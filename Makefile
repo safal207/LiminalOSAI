@@ -1,11 +1,12 @@
 CC      := gcc
-CFLAGS  := -std=c11 -Wall -Wextra -pedantic -Os
+CFLAGS  := -std=c11 -Wall -Wextra -pedantic -Os -Iinclude
 LDFLAGS :=
-TARGET  := build/liminal_pulse
+TARGET  := build/pulse_kernel
 
 CORE_SRCS   := core/pulse_kernel.c
 MEM_SRCS    := memory/soil.c
-SRCS        := $(CORE_SRCS) $(MEM_SRCS)
+BUS_SRCS    := bus/resonant.c
+SRCS        := $(CORE_SRCS) $(MEM_SRCS) $(BUS_SRCS)
 OBJS        := $(SRCS:.c=.o)
 
 all: $(TARGET)
