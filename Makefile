@@ -6,7 +6,8 @@ TARGET  := build/pulse_kernel
 CORE_SRCS   := core/pulse_kernel.c
 MEM_SRCS    := memory/soil.c
 BUS_SRCS    := bus/resonant.c
-SRCS        := $(CORE_SRCS) $(MEM_SRCS) $(BUS_SRCS)
+SYM_SRCS    := symbol/layer.c
+SRCS        := $(CORE_SRCS) $(MEM_SRCS) $(BUS_SRCS) $(SYM_SRCS)
 OBJS        := $(SRCS:.c=.o)
 
 all: $(TARGET)

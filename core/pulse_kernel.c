@@ -11,6 +11,7 @@
 
 #include "soil.h"
 #include "resonant.h"
+#include "symbol.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -22,6 +23,7 @@
 
 typedef struct {
     bool show_trace;
+    bool show_symbols;
     uint64_t limit;
 } kernel_options;
 
@@ -36,12 +38,14 @@ static size_t bounded_string_length(const uint8_t *data, size_t max_len)
 
 static kernel_options parse_options(int argc, char **argv)
 {
-    kernel_options opts = { .show_trace = false, .limit = 0 };
+    kernel_options opts = { .show_trace = false, .show_symbols = false, .limit = 0 };
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
         if (strcmp(arg, "--trace") == 0) {
             opts.show_trace = true;
+        } else if (strcmp(arg, "--symbols") == 0) {
+            opts.show_symbols = true;
         } else if (strncmp(arg, "--limit=", 8) == 0) {
             const char *value = arg + 8;
             if (*value) {
@@ -87,7 +91,7 @@ static void inhale(void)
     fputs("inhale\n", stdout);
 }
 
-static void reflect(void)
+static void reflect(const kernel_options *opts)
 {
     const char *label = "reflect";
     soil_trace trace = soil_trace_make(ENERGY_REFLECT, label, strlen(label));
@@ -120,7 +124,23 @@ static void reflect(void)
         bus_emit(&pending_echoes[i]);
     }
 
+    size_t activated = symbol_layer_pulse();
+
     fputs("reflect\n", stdout);
+
+    if (opts && opts->show_symbols) {
+        if (activated == 0) {
+            fputs("symbols: (quiet)\n", stdout);
+        } else {
+            const Symbol *active[16];
+            size_t count = symbol_layer_active(active, sizeof(active) / sizeof(active[0]));
+            fputs("symbols:", stdout);
+            for (size_t i = 0; i < count; ++i) {
+                fprintf(stdout, " %s(res=%.2f,en=%.2f)", active[i]->key, active[i]->resonance, active[i]->energy);
+            }
+            fputc('\n', stdout);
+        }
+    }
 }
 
 static void exhale(void)
@@ -166,10 +186,11 @@ int main(int argc, char **argv)
 
     soil_init();
     bus_init();
+    symbol_layer_init();
     uint64_t pulses = 0;
     while (!opts.limit || pulses < opts.limit) {
         inhale();
-        reflect();
+        reflect(&opts);
         exhale();
         pulse_delay();
         ++pulses;
