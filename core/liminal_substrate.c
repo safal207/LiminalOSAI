@@ -66,6 +66,7 @@ typedef struct {
     char lip_host[128];
     bool empathic_enabled;
     bool empathic_trace;
+    bool anticipation_trace;
     EmpathicSource emotional_source;
     float empathy_gain;
     bool emotional_memory_enabled;
@@ -231,6 +232,7 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.lip_host[0] = '\0';
     cfg.empathic_enabled = false;
     cfg.empathic_trace = false;
+    cfg.anticipation_trace = false;
     cfg.emotional_source = EMPATHIC_SOURCE_AUDIO;
     cfg.empathy_gain = 1.0f;
     cfg.emotional_memory_enabled = false;
@@ -284,6 +286,10 @@ static substrate_config parse_args(int argc, char **argv)
             cfg.empathic_enabled = true;
         } else if (strcmp(arg, "--empathic-trace") == 0) {
             cfg.empathic_trace = true;
+        } else if (strcmp(arg, "--anticipation") == 0) {
+            cfg.empathic_enabled = true;
+            cfg.empathic_trace = true;
+            cfg.anticipation_trace = true; // merged by Codex
         } else if (strncmp(arg, "--emotional-source=", 20) == 0) {
             const char *value = arg + 20;
             if (strcmp(value, "text") == 0) {
@@ -620,6 +626,25 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
             state->phase_offset = fmodf(state->phase_offset + response.coherence_bias * 2.0f, 1.0f);
             if (state->phase_offset < 0.0f) {
                 state->phase_offset += 1.0f;
+            }
+            float anticipation_shift = (response.anticipation_level - 0.5f) * 0.05f; // merged by Codex
+            state->breath_rate *= (1.0f + anticipation_shift);
+            if (state->breath_rate < 0.20f) {
+                state->breath_rate = 0.20f;
+            } else if (state->breath_rate > 2.4f) {
+                state->breath_rate = 2.4f;
+            }
+            float phase_bias = (response.micro_pattern_signal - 0.5f) * 0.08f + (response.prediction_trend - 0.5f) * 0.06f;
+            state->phase_offset = fmodf(state->phase_offset + phase_bias, 1.0f);
+            if (state->phase_offset < 0.0f) {
+                state->phase_offset += 1.0f;
+            }
+            if (cfg->anticipation_trace) {
+                printf("anticipation_substrate: level=%.2f micro=%.2f trend=%.2f phase_bias=%.3f\n",
+                       response.anticipation_level,
+                       response.micro_pattern_signal,
+                       response.prediction_trend,
+                       phase_bias);
             }
         }
         if (cfg->emotional_memory_enabled) {
