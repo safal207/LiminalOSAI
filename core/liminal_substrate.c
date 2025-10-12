@@ -25,6 +25,7 @@
 #endif
 #include "empathic.h"
 #include "emotion_memory.h"
+#include "council.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -627,7 +628,7 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
             if (state->phase_offset < 0.0f) {
                 state->phase_offset += 1.0f;
             }
-            float anticipation_shift = (response.anticipation_level - 0.5f) * 0.05f; // merged by Codex
+            float anticipation_shift = (response.anticipation_level - 0.5f) * 0.05f;
             state->breath_rate *= (1.0f + anticipation_shift);
             if (state->breath_rate < 0.20f) {
                 state->breath_rate = 0.20f;
@@ -640,10 +641,26 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                 state->phase_offset += 1.0f;
             }
             if (cfg->anticipation_trace) {
-                printf("anticipation_substrate: level=%.2f micro=%.2f trend=%.2f phase_bias=%.3f\n",
+                float reflection_hint = clamp_unit(state->resonance);
+                float awareness_hint = clamp_unit(state->sync_quality);
+                float coherence_hint = clamp_unit(state->memory_trace * 0.5f + 0.5f);
+                float vitality = clamp_unit(state->vitality);
+                float health_drift = 0.5f - vitality;
+                InnerCouncil council_snapshot = council_update(reflection_hint,
+                                                               awareness_hint,
+                                                               coherence_hint,
+                                                               health_drift,
+                                                               response.field.anticipation,
+                                                               response.anticipation_level,
+                                                               response.micro_pattern_signal,
+                                                               response.prediction_trend,
+                                                               0.0f);
+                printf("anticipation_substrate: field=%.2f level=%.2f micro=%.2f trend=%.2f vote=%+.2f phase_bias=%.3f\n",
+                       response.field.anticipation,
                        response.anticipation_level,
                        response.micro_pattern_signal,
                        response.prediction_trend,
+                       council_snapshot.anticipation_vote,
                        phase_bias);
             }
         }
@@ -685,6 +702,11 @@ int main(int argc, char **argv)
 
     liminal_state state;
     rebirth(&state);
+
+    council_init();
+    if (cfg.trace || cfg.anticipation_trace) {
+        council_summon();
+    }
 
     empathic_init(cfg.emotional_source, cfg.empathic_trace, cfg.empathy_gain);
     empathic_enable(cfg.empathic_enabled);
