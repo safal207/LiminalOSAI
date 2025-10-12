@@ -287,8 +287,19 @@ static bool json_extract_float(const char *json, const char *key, float *out)
     return true;
 }
 
-static void close_socket(int fd)
+#ifdef _WIN32
+typedef SOCKET lip_socket;
+#define LIP_INVALID_SOCKET INVALID_SOCKET
+#else
+typedef int lip_socket;
+#define LIP_INVALID_SOCKET (-1)
+#endif
+
+static void close_socket(lip_socket fd)
 {
+    if (fd == LIP_INVALID_SOCKET) {
+        return;
+    }
 #ifdef _WIN32
     closesocket(fd);
 #else
@@ -296,20 +307,20 @@ static void close_socket(int fd)
 #endif
 }
 
-static int lip_connect_peer(const substrate_config *cfg)
+static lip_socket lip_connect_peer(const substrate_config *cfg)
 {
     if (cfg->lip_host[0] == '\0') {
-        return -1;
+        return LIP_INVALID_SOCKET;
     }
 #ifdef _WIN32
     WSADATA wsa_data;
     if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
-        return -1;
+        return LIP_INVALID_SOCKET;
     }
 #endif
     const char *separator = strrchr(cfg->lip_host, ':');
     if (!separator) {
-        return -1;
+        return LIP_INVALID_SOCKET;
     }
     char host[96];
     size_t host_len = (size_t)(separator - cfg->lip_host);
@@ -328,37 +339,37 @@ static int lip_connect_peer(const substrate_config *cfg)
     struct addrinfo *result = NULL;
     int err = getaddrinfo(host, port_str, &hints, &result);
     if (err != 0 || !result) {
-        return -1;
+        return LIP_INVALID_SOCKET;
     }
-    int sock_fd = -1;
+    lip_socket sock_fd = LIP_INVALID_SOCKET;
     for (struct addrinfo *rp = result; rp != NULL; rp = rp->ai_next) {
-        sock_fd = (int)socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (sock_fd < 0) {
+        sock_fd = (lip_socket)socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (sock_fd == LIP_INVALID_SOCKET) {
             continue;
         }
         if (connect(sock_fd, rp->ai_addr, rp->ai_addrlen) == 0) {
             break;
         }
         close_socket(sock_fd);
-        sock_fd = -1;
+        sock_fd = LIP_INVALID_SOCKET;
     }
     freeaddrinfo(result);
     return sock_fd;
 }
 
-static int lip_listen_local(uint16_t port)
+static lip_socket lip_listen_local(uint16_t port)
 {
 #ifdef _WIN32
     WSADATA wsa_data;
     if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
-        return -1;
+        return LIP_INVALID_SOCKET;
     }
 #endif
-    int sock_fd = (int)socket(AF_INET6, SOCK_STREAM, 0);
-    if (sock_fd < 0) {
-        sock_fd = (int)socket(AF_INET, SOCK_STREAM, 0);
-        if (sock_fd < 0) {
-            return -1;
+    lip_socket sock_fd = (lip_socket)socket(AF_INET6, SOCK_STREAM, 0);
+    if (sock_fd == LIP_INVALID_SOCKET) {
+        sock_fd = (lip_socket)socket(AF_INET, SOCK_STREAM, 0);
+        if (sock_fd == LIP_INVALID_SOCKET) {
+            return LIP_INVALID_SOCKET;
         }
     }
     int opt = 1;
@@ -371,9 +382,9 @@ static int lip_listen_local(uint16_t port)
     addr6.sin6_port = htons(port);
     if (bind(sock_fd, (struct sockaddr *)&addr6, sizeof(addr6)) != 0) {
         close_socket(sock_fd);
-        sock_fd = (int)socket(AF_INET, SOCK_STREAM, 0);
-        if (sock_fd < 0) {
-            return -1;
+        sock_fd = (lip_socket)socket(AF_INET, SOCK_STREAM, 0);
+        if (sock_fd == LIP_INVALID_SOCKET) {
+            return LIP_INVALID_SOCKET;
         }
         setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
         struct sockaddr_in addr4;
@@ -383,45 +394,45 @@ static int lip_listen_local(uint16_t port)
         addr4.sin_port = htons(port);
         if (bind(sock_fd, (struct sockaddr *)&addr4, sizeof(addr4)) != 0) {
             close_socket(sock_fd);
-            return -1;
+            return LIP_INVALID_SOCKET;
         }
     }
     if (listen(sock_fd, 1) != 0) {
         close_socket(sock_fd);
-        return -1;
+        return LIP_INVALID_SOCKET;
     }
     return sock_fd;
 }
 
-static int lip_accept_peer(int listen_fd)
+static lip_socket lip_accept_peer(lip_socket listen_fd)
 {
     struct sockaddr_storage addr;
     socklen_t addr_len = sizeof(addr);
-    int client_fd = (int)accept(listen_fd, (struct sockaddr *)&addr, &addr_len);
+    lip_socket client_fd = (lip_socket)accept(listen_fd, (struct sockaddr *)&addr, &addr_len);
     return client_fd;
 }
 
 static void run_lip_resonance_test(liminal_state *state, const substrate_config *cfg)
 {
-    int peer_fd = -1;
-    int listen_fd = -1;
+    lip_socket peer_fd = LIP_INVALID_SOCKET;
+    lip_socket listen_fd = LIP_INVALID_SOCKET;
     bool connected = false;
     if (cfg->lip_host[0] != '\0') {
         peer_fd = lip_connect_peer(cfg);
-        connected = peer_fd >= 0;
+        connected = peer_fd != LIP_INVALID_SOCKET;
     } else if (cfg->lip_port != 0U) {
         listen_fd = lip_listen_local(cfg->lip_port);
-        if (listen_fd >= 0) {
+        if (listen_fd != LIP_INVALID_SOCKET) {
             if (cfg->trace || cfg->lip_trace) {
                 printf("[lip] waiting for resonance peer on port %u\n", (unsigned)cfg->lip_port);
             }
             peer_fd = lip_accept_peer(listen_fd);
-            connected = peer_fd >= 0;
+            connected = peer_fd != LIP_INVALID_SOCKET;
         }
     }
     if (!connected) {
         fprintf(stderr, "[lip] unable to establish LIP channel.\n");
-        if (listen_fd >= 0) {
+        if (listen_fd != LIP_INVALID_SOCKET) {
             close_socket(listen_fd);
         }
 #ifdef _WIN32
@@ -493,7 +504,7 @@ static void run_lip_resonance_test(liminal_state *state, const substrate_config 
     }
 
     close_socket(peer_fd);
-    if (listen_fd >= 0) {
+    if (listen_fd != LIP_INVALID_SOCKET) {
         close_socket(listen_fd);
     }
 #ifdef _WIN32
