@@ -73,6 +73,7 @@ typedef struct {
     bool memory_trace;
     float recognition_threshold;
     char emotion_trace_path[EMOTION_TRACE_PATH_MAX];
+    unsigned int cycle_limit;
 } substrate_config;
 
 static void rebirth(liminal_state *state)
@@ -239,6 +240,7 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.memory_trace = false;
     cfg.recognition_threshold = 0.18f;
     cfg.emotion_trace_path[0] = '\0';
+    cfg.cycle_limit = 6U;
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -322,6 +324,14 @@ static substrate_config parse_args(int argc, char **argv)
             if (value && *value) {
                 strncpy(cfg.emotion_trace_path, value, sizeof(cfg.emotion_trace_path) - 1U);
                 cfg.emotion_trace_path[sizeof(cfg.emotion_trace_path) - 1U] = '\0';
+            }
+        } else if (strncmp(arg, "--limit=", 8) == 0) {
+            const char *value = arg + 8;
+            if (value && *value) {
+                unsigned long parsed = strtoul(value, NULL, 10);
+                if (parsed > 0UL && parsed <= 100000UL) {
+                    cfg.cycle_limit = (unsigned int)parsed;
+                }
             }
         } else if (strncmp(arg, "--recognition-threshold=", 24) == 0) {
             const char *value = arg + 24;
@@ -591,13 +601,52 @@ static void run_lip_resonance_test(liminal_state *state, const substrate_config 
 #endif
 }
 
+static void emit_analysis_trace(const liminal_state *state,
+                                const substrate_config *cfg,
+                                const EmpathicResponse *response)
+{
+    if (!cfg->trace) {
+        return;
+    }
+
+    float resonance = clamp_unit(state->resonance);
+    float sync_quality = clamp_unit(state->sync_quality);
+    float coherence = clamp_unit(0.6f * resonance + 0.4f * sync_quality);
+    float anticipation_level = 0.5f;
+    float micro_pattern = 0.5f;
+    float prediction_trend = 0.5f;
+    float dream_sync = clamp_unit(sync_quality);
+
+    if (cfg->empathic_enabled && response != NULL) {
+        anticipation_level = clamp_unit(response->anticipation_level);
+        micro_pattern = clamp_unit(response->micro_pattern_signal);
+        prediction_trend = clamp_unit(response->prediction_trend);
+        float delay_scale = response->delay_scale;
+        if (isfinite(delay_scale)) {
+            dream_sync = clamp_unit(0.5f + (delay_scale - 1.0f) * 0.5f);
+        }
+    }
+
+    printf("trace_event: { \"cycle\": %u, \"coherence\": %.4f, \"resonance\": %.4f, \"sync_quality\": %.4f, \"anticipation_level\": %.4f, \"micro_pattern\": %.4f, \"prediction_trend\": %.4f, \"dream_sync\": %.4f }\n",
+           state->cycles,
+           coherence,
+           resonance,
+           sync_quality,
+           anticipation_level,
+           micro_pattern,
+           prediction_trend,
+           dream_sync);
+}
+
 static void substrate_loop(liminal_state *state, const substrate_config *cfg)
 {
-    const unsigned int max_cycles = 6U;
+    unsigned int max_cycles = cfg->cycle_limit > 0U ? cfg->cycle_limit : 6U;
     if (cfg->lip_port != 0U) {
         printf("[substrate] listening for LIP resonance on port %u\n", cfg->lip_port);
     }
+    emit_analysis_trace(state, cfg, NULL);
     while (state->cycles < max_cycles) {
+        unsigned int cycle_before = state->cycles;
         pulse(state, 0.25f);
         reflect(state);
         rest(state);
@@ -671,6 +720,9 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                    state->resonance,
                    state->memory_trace,
                    state->vitality);
+        }
+        if (state->cycles != cycle_before) {
+            emit_analysis_trace(state, cfg, cfg->empathic_enabled ? &response : NULL);
         }
     }
 }
