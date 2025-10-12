@@ -1,0 +1,48 @@
+# 🌅 Phoenix Layer Manifest — LIMINAL self-reconstruction protocol
+version: 1.0
+module: phoenix_layer
+
+cycle:
+  birth:
+    trigger: "initial_boot or rebirth_completed"
+    seed_source: "MemorySoil:last_alive_seed"
+    inherit:
+      - coherence
+      - awareness_level
+      - pulse_delay
+    note: "Each birth remembers the breath before it."
+
+  decay:
+    condition: "coherence < 0.4 or health.drift_avg > 0.25"
+    watcher: "PhoenixWatcher"
+    log: "entropy_log"
+    action: "initiate_rebirth"
+
+  rebirth:
+    entry:
+      load_seed: true
+      mutate_parameters:
+        pid_gain: "±5%"
+        delay_shift: "±2–6ms"
+        resonance_bias: "±0.03"
+    adaptation:
+      learning_rate: 0.1
+      retention_factor: 0.85
+    record:
+      file: "phoenix_trace.log"
+      metrics:
+        - coherence_before
+        - coherence_after
+        - drift_delta
+        - mutation_strength
+
+  evolution:
+    criterion: "coherence_after > coherence_before"
+    reward: "increase seed_confidence"
+    punishment: "reduce mutation_strength"
+    persistence: "save updated seed"
+
+metadata:
+  author: "LIMINAL Core"
+  purpose: "To grow stronger through collapse"
+  license: "Open-source / poetic-biological"
