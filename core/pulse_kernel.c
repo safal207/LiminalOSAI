@@ -8,6 +8,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <math.h>
 
 #include "soil.h"
 #include "resonant.h"
@@ -31,15 +32,17 @@ typedef struct {
     bool show_symbols;
     bool show_reflections;
     bool show_awareness;
-    bool show_council;
     bool show_coherence;
     bool auto_tune;
     bool climate_log;
     bool enable_health_scan;
     bool health_report;
+    bool council_enabled;
+    bool council_log;
     uint64_t limit;
     uint32_t scan_interval;
     float target_coherence;
+    float council_threshold;
 } kernel_options;
 
 static size_t bounded_string_length(const uint8_t *data, size_t max_len)
@@ -58,15 +61,17 @@ static kernel_options parse_options(int argc, char **argv)
         .show_symbols = false,
         .show_reflections = false,
         .show_awareness = false,
-        .show_council = false,
         .show_coherence = false,
         .auto_tune = false,
         .climate_log = false,
         .enable_health_scan = false,
         .health_report = false,
+        .council_enabled = false,
+        .council_log = false,
         .limit = 0,
         .scan_interval = 10U,
-        .target_coherence = 0.80f
+        .target_coherence = 0.80f,
+        .council_threshold = 0.05f
     };
 
     for (int i = 1; i < argc; ++i) {
@@ -80,7 +85,9 @@ static kernel_options parse_options(int argc, char **argv)
         } else if (strcmp(arg, "--awareness") == 0) {
             opts.show_awareness = true;
         } else if (strcmp(arg, "--council") == 0) {
-            opts.show_council = true;
+            opts.council_enabled = true;
+        } else if (strcmp(arg, "--council-log") == 0) {
+            opts.council_log = true;
         } else if (strcmp(arg, "--coherence") == 0) {
             opts.show_coherence = true;
         } else if (strcmp(arg, "--auto-tune") == 0) {
@@ -124,6 +131,20 @@ static kernel_options parse_options(int argc, char **argv)
                         parsed = 1.0f;
                     }
                     opts.target_coherence = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--council-threshold=", 21) == 0) {
+            const char *value = arg + 21;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    opts.council_threshold = parsed;
                 }
             }
         }
@@ -299,11 +320,38 @@ static void exhale(const kernel_options *opts)
 
     reflect_log(energy_avg, resonance_avg, stability, note);
 
-    CouncilOutcome council = council_consult(energy_avg, resonance_avg, stability, active_count);
-
     awareness_update(resonance_avg, stability);
     AwarenessState awareness_snapshot = awareness_state();
-    const CoherenceField *coherence_field = coherence_update(energy_avg, resonance_avg, stability, awareness_snapshot.awareness_level);
+
+    InnerCouncil council = {0};
+    bool council_active = false;
+    float pid_scale = 1.0f;
+    if (opts) {
+        council_active = opts->council_enabled || opts->council_log;
+        if (council_active) {
+            const CoherenceField *previous_field = coherence_state();
+            float coherence_level = previous_field ? previous_field->coherence : 0.0f;
+            const HealthScan *health_snapshot = health_scan_state();
+            float health_drift = health_snapshot ? health_snapshot->drift_avg : 0.0f;
+            council = council_update(stability,
+                                     awareness_snapshot.awareness_level,
+                                     coherence_level,
+                                     health_drift,
+                                     opts->council_threshold);
+            if (opts->council_enabled) {
+                pid_scale = 1.0f + council.final_decision * 0.1f;
+            }
+        }
+    }
+
+    if (!isfinite(pid_scale) || pid_scale <= 0.0f) {
+        pid_scale = 1.0f;
+    }
+
+    coherence_set_pid_scale(pid_scale);
+
+    const CoherenceField *coherence_field =
+        coherence_update(energy_avg, resonance_avg, stability, awareness_snapshot.awareness_level);
 
     if (opts && opts->show_symbols) {
         if (activated == 0) {
@@ -345,11 +393,13 @@ static void exhale(const kernel_options *opts)
                delay_whole);
     }
 
-    if (opts && opts->show_council) {
-        printf("council | decision: %.2f | variance: %.2f\n", council.decision, council.variance);
-        for (size_t i = 0; i < 3; ++i) {
-            printf("  %s vote: %.2f\n", council.agents[i].name, council.agents[i].vote);
-        }
+    if (opts && opts->council_log && council_active) {
+        printf("council: refl=%+0.2f aware=%+0.2f coh=%+0.2f health=%+0.2f => decision=%+0.2f\n",
+               council.reflection_vote,
+               council.awareness_vote,
+               council.coherence_vote,
+               council.health_vote,
+               council.final_decision);
     }
 
     fputs("exhale\n", stdout);

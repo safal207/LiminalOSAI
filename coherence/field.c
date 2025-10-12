@@ -20,6 +20,7 @@ static double last_delay_seconds = 0.1;
 static bool climate_logging = false;
 static unsigned long pulse_counter = 0UL;
 static float last_adjust = 0.0f;
+static float pid_scale_factor = 1.0f;
 
 static const float ENERGY_MAX = 12.0f;
 static const float EMA_ALPHA = 0.2f;
@@ -146,6 +147,20 @@ float coherence_adjustment(void)
     return last_adjust;
 }
 
+void coherence_set_pid_scale(float scale)
+{
+    if (!isfinite(scale) || scale <= 0.0f) {
+        pid_scale_factor = 1.0f;
+        return;
+    }
+    if (scale < 0.2f) {
+        scale = 0.2f;
+    } else if (scale > 2.0f) {
+        scale = 2.0f;
+    }
+    pid_scale_factor = scale;
+}
+
 const CoherenceField *coherence_update(float energy_avg,
                                        float resonance_avg,
                                        float stability_avg,
@@ -192,7 +207,7 @@ const CoherenceField *coherence_update(float energy_avg,
 
     const float kP = 0.15f;
     const float kI = 0.05f;
-    last_adjust = kP * err + kI * integral_term;
+    last_adjust = (kP * err + kI * integral_term) * pid_scale_factor;
 
     double scale = 1.0 - (double)last_adjust;
     if (!isfinite(scale)) {

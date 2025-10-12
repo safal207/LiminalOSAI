@@ -164,3 +164,8 @@ void health_scan_step(uint64_t cycle, float coherence, float delay_seconds, floa
                last_scan.breath_hrv);
     }
 }
+
+const HealthScan *health_scan_state(void)
+{
+    return &last_scan;
+}
