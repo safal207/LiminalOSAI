@@ -16,6 +16,7 @@
 #include "awareness.h"
 #include "council.h"
 #include "coherence.h"
+#include "health_scan.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -34,7 +35,10 @@ typedef struct {
     bool show_coherence;
     bool auto_tune;
     bool climate_log;
+    bool enable_health_scan;
+    bool health_report;
     uint64_t limit;
+    uint32_t scan_interval;
     float target_coherence;
 } kernel_options;
 
@@ -58,7 +62,10 @@ static kernel_options parse_options(int argc, char **argv)
         .show_coherence = false,
         .auto_tune = false,
         .climate_log = false,
+        .enable_health_scan = false,
+        .health_report = false,
         .limit = 0,
+        .scan_interval = 10U,
         .target_coherence = 0.80f
     };
 
@@ -80,6 +87,10 @@ static kernel_options parse_options(int argc, char **argv)
             opts.auto_tune = true;
         } else if (strcmp(arg, "--climate-log") == 0) {
             opts.climate_log = true;
+        } else if (strcmp(arg, "--health-scan") == 0) {
+            opts.enable_health_scan = true;
+        } else if (strcmp(arg, "--scan-report") == 0) {
+            opts.health_report = true;
         } else if (strncmp(arg, "--limit=", 8) == 0) {
             const char *value = arg + 8;
             if (*value) {
@@ -87,6 +98,18 @@ static kernel_options parse_options(int argc, char **argv)
                 unsigned long long parsed = strtoull(value, &end, 10);
                 if (end != value) {
                     opts.limit = (uint64_t)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--scan-interval=", 16) == 0) {
+            const char *value = arg + 16;
+            if (*value) {
+                char *end = NULL;
+                unsigned long parsed = strtoul(value, &end, 10);
+                if (end != value && parsed > 0UL) {
+                    if (parsed > UINT32_MAX) {
+                        parsed = UINT32_MAX;
+                    }
+                    opts.scan_interval = (uint32_t)parsed;
                 }
             }
         } else if (strncmp(arg, "--target=", 9) == 0) {
@@ -369,6 +392,12 @@ int main(int argc, char **argv)
     coherence_init();
     coherence_set_target(opts.target_coherence);
     coherence_enable_logging(opts.climate_log);
+    health_scan_init();
+    if (opts.enable_health_scan) {
+        health_scan_set_interval(opts.scan_interval);
+        health_scan_enable_reporting(opts.health_report);
+        health_scan_enable(true);
+    }
     council_init();
     council_summon();
     uint64_t pulses = 0;
@@ -377,6 +406,19 @@ int main(int argc, char **argv)
         reflect(&opts);
         exhale(&opts);
         pulse_delay();
+        if (opts.enable_health_scan) {
+            const CoherenceField *field = coherence_state();
+            AwarenessState awareness_snapshot = awareness_state();
+            double delay_seconds = coherence_last_delay();
+            float coherence_value = 0.0f;
+            if (field) {
+                coherence_value = field->coherence;
+            }
+            health_scan_step(pulses + 1,
+                             coherence_value,
+                             (float)delay_seconds,
+                             awareness_snapshot.drift);
+        }
         ++pulses;
     }
 
