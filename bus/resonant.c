@@ -1,9 +1,56 @@
 #include "resonant.h"
 
+#include <stdbool.h>
 #include <string.h>
 
 static resonant_msg bus_queue[RESONANT_BUS_CAPACITY];
 static size_t bus_count = 0;
+
+static int sensor_registry[RESONANT_BUS_CAPACITY];
+static size_t sensor_count = 0;
+
+static bool sensor_registered(int sensor_id)
+{
+    if (sensor_id == RESONANT_BROADCAST_ID) {
+        return true;
+    }
+
+    for (size_t i = 0; i < sensor_count; ++i) {
+        if (sensor_registry[i] == sensor_id) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void queue_duplicate(const resonant_msg *msg, int sensor_id)
+{
+    if (!msg || sensor_id == RESONANT_BROADCAST_ID) {
+        return;
+    }
+
+    resonant_msg duplicate = *msg;
+    duplicate.target_id = sensor_id;
+    bus_emit(&duplicate);
+}
+
+void bus_register_sensor(int sensor_id)
+{
+    if (sensor_id == RESONANT_BROADCAST_ID || sensor_id == 0) {
+        return;
+    }
+
+    if (sensor_registered(sensor_id)) {
+        return;
+    }
+
+    if (sensor_count >= RESONANT_BUS_CAPACITY) {
+        return;
+    }
+
+    sensor_registry[sensor_count++] = sensor_id;
+}
 
 static void shift_right_from(size_t index)
 {
@@ -23,6 +70,8 @@ void bus_init(void)
 {
     memset(bus_queue, 0, sizeof(bus_queue));
     bus_count = 0;
+    memset(sensor_registry, 0, sizeof(sensor_registry));
+    sensor_count = 0;
 }
 
 void bus_emit(const resonant_msg *msg)
@@ -62,11 +111,24 @@ bool bus_listen(int sensor_id, resonant_msg *out_msg)
         return false;
     }
 
+    bus_register_sensor(sensor_id);
+
     for (size_t i = 0; i < bus_count; ++i) {
         if (bus_queue[i].target_id == sensor_id || bus_queue[i].target_id == RESONANT_BROADCAST_ID) {
-            *out_msg = bus_queue[i];
+            resonant_msg message = bus_queue[i];
             shift_left_from(i);
             --bus_count;
+            *out_msg = message;
+
+            if (message.target_id == RESONANT_BROADCAST_ID) {
+                for (size_t sensor_index = 0; sensor_index < sensor_count; ++sensor_index) {
+                    int registered_id = sensor_registry[sensor_index];
+                    if (registered_id == sensor_id) {
+                        continue;
+                    }
+                    queue_duplicate(&message, registered_id);
+                }
+            }
             return true;
         }
     }
