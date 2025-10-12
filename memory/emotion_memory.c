@@ -1,5 +1,7 @@
 #include "emotion_memory.h"
 
+#include "soil.h"
+
 #include <errno.h>
 #include <inttypes.h>
 #include <math.h>
@@ -67,6 +69,21 @@ static uint64_t current_timestamp(void)
     ts.tv_nsec = 0;
 #endif
     return (uint64_t)ts.tv_sec;
+}
+
+static uint64_t current_timestamp_ns(void)
+{
+    struct timespec ts;
+#if defined(CLOCK_REALTIME)
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+        ts.tv_sec = time(NULL);
+        ts.tv_nsec = 0;
+    }
+#else
+    ts.tv_sec = time(NULL);
+    ts.tv_nsec = 0;
+#endif
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
 static void clear_known(void)
@@ -526,4 +543,63 @@ void emotion_memory_finalize(void)
 
     g_memory.dirty = false;
     clear_known();
+}
+
+void emotion_memory_emit_pre_echo(const EmotionField *field,
+                                  float anticipation_level,
+                                  float micro_signal,
+                                  float trend_signal)
+{
+    if (!g_memory.enabled || !field) {
+        return;
+    }
+
+    soil_emotion_context context;
+    memset(&context, 0, sizeof(context));
+    context.timestamp = current_timestamp_ns();
+    context.field.warmth = clamp_unit(field->warmth);
+    context.field.tension = clamp_unit(field->tension);
+    context.field.harmony = clamp_unit(field->harmony);
+    context.field.empathy = clamp_unit(field->empathy);
+    context.field.anticipation = clamp_unit(field->anticipation);
+    context.anticipation_level = clamp_unit(anticipation_level);
+    context.micro_signal = clamp_unit(micro_signal);
+    context.trend_signal = clamp_unit(trend_signal);
+
+    char imprint[SOIL_TRACE_DATA_SIZE];
+    int written = snprintf(imprint,
+                           sizeof(imprint),
+                           "pre-echo lvl=%.2f micro=%.2f trend=%.2f",
+                           context.anticipation_level,
+                           context.micro_signal,
+                           context.trend_signal);
+    if (written < 0) {
+        return;
+    }
+
+    size_t payload_len = 0;
+    if (written > 0) {
+        if ((size_t)written >= sizeof(imprint)) {
+            payload_len = sizeof(imprint) - 1U;
+        } else {
+            payload_len = (size_t)written;
+        }
+    }
+
+    soil_trace trace = soil_trace_make_with_context(SOIL_ENERGY_PRE_ECHO,
+                                                    imprint,
+                                                    payload_len,
+                                                    &context);
+    soil_write(&trace);
+
+    if (g_memory.trace_enabled) {
+        printf("memory_pre_echo: anticipation=%.3f micro=%.3f trend=%.3f warmth=%.3f tension=%.3f harmony=%.3f empathy=%.3f\n",
+               context.anticipation_level,
+               context.micro_signal,
+               context.trend_signal,
+               context.field.warmth,
+               context.field.tension,
+               context.field.harmony,
+               context.field.empathy);
+    }
 }

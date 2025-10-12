@@ -37,6 +37,9 @@ void soil_write(const soil_trace *trace)
     soil_trace *slot = &soil_buffer[soil_head];
     *slot = *trace;
     slot->timestamp = soil_now_timestamp();
+    if (slot->context.timestamp == 0) {
+        slot->context.timestamp = slot->timestamp;
+    }
 
     soil_head = (soil_head + 1) % SOIL_CAPACITY;
     if (soil_count < SOIL_CAPACITY) {
@@ -92,6 +95,7 @@ soil_trace soil_trace_make(uint32_t energy, const void *data, size_t data_len)
     memset(&trace, 0, sizeof(trace));
     trace.timestamp = soil_now_timestamp();
     trace.energy = energy;
+    memset(&trace.context, 0, sizeof(trace.context));
 
     if (data && data_len > 0) {
         if (data_len > SOIL_TRACE_DATA_SIZE) {
@@ -100,5 +104,20 @@ soil_trace soil_trace_make(uint32_t energy, const void *data, size_t data_len)
         memcpy(trace.data, data, data_len);
     }
 
+    return trace;
+}
+
+soil_trace soil_trace_make_with_context(uint32_t energy,
+                                        const void *data,
+                                        size_t data_len,
+                                        const soil_emotion_context *context)
+{
+    soil_trace trace = soil_trace_make(energy, data, data_len);
+    if (context) {
+        trace.context = *context;
+        if (trace.context.timestamp == 0) {
+            trace.context.timestamp = trace.timestamp;
+        }
+    }
     return trace;
 }

@@ -31,6 +31,10 @@ bool emotion_memory_recognized(void);
 float emotion_memory_resonance_boost(void);
 const EmotionTrace *emotion_memory_last_trace(void);
 void emotion_memory_finalize(void);
+void emotion_memory_emit_pre_echo(const EmotionField *field,
+                                  float anticipation_level,
+                                  float micro_signal,
+                                  float trend_signal);
 
 #ifdef __cplusplus
 }

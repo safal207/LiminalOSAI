@@ -29,6 +29,9 @@
 #define ENERGY_REFLECT  5U
 #define ENERGY_EXHALE   2U
 
+#define PRE_ECHO_LEVEL_THRESHOLD 0.12f
+#define PRE_ECHO_SIGNAL_THRESHOLD 0.18f
+
 #define SENSOR_INHALE   1
 #define SENSOR_REFLECT  2
 #define SENSOR_EXHALE   3
@@ -474,6 +477,45 @@ static void pulse_delay(void)
     nanosleep(&req, NULL);
 }
 
+static void monitor_pre_echo(const EmpathicResponse *response, bool allow_emit)
+{
+    static bool initialized = false;
+    static float last_level = 0.5f;
+    static float last_micro = 0.5f;
+    static float last_trend = 0.5f;
+
+    if (!response) {
+        return;
+    }
+
+    float level = clamp_unit(response->anticipation_level);
+    float micro = clamp_unit(response->micro_pattern_signal);
+    float trend = clamp_unit(response->prediction_trend);
+
+    if (!initialized) {
+        last_level = level;
+        last_micro = micro;
+        last_trend = trend;
+        initialized = true;
+        return;
+    }
+
+    float level_delta = fabsf(level - last_level);
+    float micro_delta = fabsf(micro - last_micro);
+    float trend_delta = fabsf(trend - last_trend);
+
+    if (allow_emit &&
+        (level_delta >= PRE_ECHO_LEVEL_THRESHOLD ||
+         micro_delta >= PRE_ECHO_SIGNAL_THRESHOLD ||
+         trend_delta >= PRE_ECHO_SIGNAL_THRESHOLD)) {
+        emotion_memory_emit_pre_echo(&response->field, level, micro, trend);
+    }
+
+    last_level = level;
+    last_micro = micro;
+    last_trend = trend;
+}
+
 static void inhale(void)
 {
     const char *label = "inhale";
@@ -635,6 +677,7 @@ static void exhale(const kernel_options *opts)
         }
         empathic_response = empathic_step(opts->target_coherence, alignment_hint, resonance_hint);
         coherence_set_target(empathic_response.target_coherence);
+        monitor_pre_echo(&empathic_response, emotional_memory_active);
         if (opts->anticipation_trace) {
             printf("anticipation_bridge: level=%.2f micro=%.2f trend=%.2f target=%.2f\n", // merged by Codex
                    empathic_response.anticipation_level,
