@@ -21,6 +21,7 @@
 #include "weave.h"
 #include "dream.h"
 #include "metabolic.h"
+#include "symbiosis.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -48,6 +49,10 @@ typedef struct {
     bool dream_log;
     bool metabolic_enabled;
     bool metabolic_trace;
+    bool human_bridge_enabled;
+    bool human_trace;
+    SymbiosisSource human_source;
+    float human_resonance_gain;
     uint64_t limit;
     uint32_t scan_interval;
     float target_coherence;
@@ -67,6 +72,17 @@ static size_t bounded_string_length(const uint8_t *data, size_t max_len)
         ++len;
     }
     return len;
+}
+
+static float clamp_unit(float value)
+{
+    if (value < 0.0f) {
+        return 0.0f;
+    }
+    if (value > 1.0f) {
+        return 1.0f;
+    }
+    return value;
 }
 
 static kernel_options parse_options(int argc, char **argv)
@@ -89,6 +105,10 @@ static kernel_options parse_options(int argc, char **argv)
         .dream_log = false,
         .metabolic_enabled = false,
         .metabolic_trace = false,
+        .human_bridge_enabled = false,
+        .human_trace = false,
+        .human_source = SYMBIOSIS_SOURCE_KEYBOARD,
+        .human_resonance_gain = 1.0f,
         .limit = 0,
         .scan_interval = 10U,
         .target_coherence = 0.80f,
@@ -217,6 +237,40 @@ static kernel_options parse_options(int argc, char **argv)
             opts.metabolic_enabled = true;
         } else if (strcmp(arg, "--metabolic-trace") == 0) {
             opts.metabolic_trace = true;
+        } else if (strncmp(arg, "--human-bridge", 14) == 0) {
+            opts.human_bridge_enabled = true;
+            const char *value = NULL;
+            if (arg[14] == '=') {
+                value = arg + 15;
+            }
+            if (value && (*value == '0' || strcmp(value, "off") == 0 || strcmp(value, "OFF") == 0)) {
+                opts.human_bridge_enabled = false;
+            }
+        } else if (strcmp(arg, "--human-trace") == 0) {
+            opts.human_trace = true;
+        } else if (strncmp(arg, "--human-source=", 15) == 0) {
+            const char *value = arg + 15;
+            if (strcmp(value, "audio") == 0) {
+                opts.human_source = SYMBIOSIS_SOURCE_AUDIO;
+            } else if (strcmp(value, "sensor") == 0) {
+                opts.human_source = SYMBIOSIS_SOURCE_SENSOR;
+            } else {
+                opts.human_source = SYMBIOSIS_SOURCE_KEYBOARD;
+            }
+        } else if (strncmp(arg, "--resonance-gain=", 17) == 0) {
+            const char *value = arg + 17;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.1f) {
+                        parsed = 0.1f;
+                    } else if (parsed > 4.0f) {
+                        parsed = 4.0f;
+                    }
+                    opts.human_resonance_gain = parsed;
+                }
+            }
         } else if (strncmp(arg, "--vitality-threshold=", 21) == 0) {
             const char *value = arg + 21;
             if (*value) {
@@ -308,6 +362,7 @@ static void pulse_delay(void)
     double tuned_delay = base_delay * coherence_delay_scale();
     tuned_delay = awareness_adjust_delay(tuned_delay);
     tuned_delay *= metabolic_delay_scale();
+    tuned_delay *= symbiosis_delay_scale();
 
     const double min_delay = 0.03;
     const double max_delay = 0.25;
@@ -446,9 +501,54 @@ static void exhale(const kernel_options *opts)
         }
     }
 
+    HumanPulse human_pulse = {0.0f, 0.0f, 0.0f};
+    float human_alignment = 0.0f;
+    float human_resonance_level = 0.0f;
+    float human_reflection_boost = 0.0f;
+    float human_metabolic_intake = 0.0f;
+    float human_metabolic_output = 0.0f;
+    bool human_bridge_active = opts && opts->human_bridge_enabled;
+
+    if (human_bridge_active) {
+        float liminal_frequency = resonance_avg / 12.0f;
+        if (!isfinite(liminal_frequency) || liminal_frequency <= 0.0f) {
+            liminal_frequency = stability > 0.0f ? stability : 0.5f;
+        }
+
+        human_pulse = symbiosis_step(clamp_unit(liminal_frequency));
+        human_alignment = symbiosis_alignment();
+        human_resonance_level = symbiosis_resonance_level();
+
+        float blend = 0.12f * opts->human_resonance_gain;
+        if (blend < 0.0f) {
+            blend = 0.0f;
+        } else if (blend > 0.6f) {
+            blend = 0.6f;
+        }
+
+        float target_resonance = human_pulse.beat_rate * 12.0f;
+        resonance_avg = (1.0f - blend) * resonance_avg + blend * target_resonance;
+        if (resonance_avg < 0.0f) {
+            resonance_avg = 0.0f;
+        } else if (resonance_avg > 12.0f) {
+            resonance_avg = 12.0f;
+        }
+
+        float stability_bias = (human_alignment - 0.5f) * 0.20f * opts->human_resonance_gain;
+        stability = clamp_unit(stability + stability_bias);
+
+        human_reflection_boost = human_pulse.amplitude * 0.12f * opts->human_resonance_gain;
+        human_metabolic_intake = human_pulse.amplitude * 0.20f;
+        human_metabolic_output = (1.0f - human_alignment) * 0.10f;
+    }
+
     char note[64];
     if (active_count == 0) {
         strcpy(note, "listening for symbols");
+    } else if (human_bridge_active && human_alignment >= 0.85f) {
+        strcpy(note, "mirroring human rhythm");
+    } else if (human_bridge_active && human_alignment >= 0.70f) {
+        strcpy(note, "echoing human pulse");
     } else if (stability >= 0.85f) {
         strcpy(note, "breathing in sync");
     } else if (stability >= 0.60f) {
@@ -465,13 +565,25 @@ static void exhale(const kernel_options *opts)
     const DreamState *dream_snapshot = dream_state();
     bool dream_active = dream_snapshot && dream_snapshot->active;
     float awareness_energy = awareness_snapshot.awareness_level * 0.6f;
-    float reflection_energy = stability * 0.4f;
+    if (human_bridge_active) {
+        awareness_energy += (human_resonance_level - 0.5f) * 0.12f;
+        if (awareness_energy < 0.0f) {
+            awareness_energy = 0.0f;
+        }
+    }
+    float reflection_energy = stability * 0.4f + human_reflection_boost;
     float dream_cost = dream_active ? 0.3f : 0.1f;
     float rebirth_cost = 0.0f;
 
-    metabolic_step(awareness_energy + reflection_energy, dream_cost + rebirth_cost);
+    float metabolic_intake = awareness_energy + reflection_energy + human_metabolic_intake;
+    float metabolic_output = dream_cost + rebirth_cost + human_metabolic_output;
+    metabolic_step(metabolic_intake, metabolic_output);
     stability = metabolic_adjust_stability(stability);
     awareness_snapshot.awareness_level = metabolic_adjust_awareness(awareness_snapshot.awareness_level);
+    if (human_bridge_active) {
+        float awareness_bias = (human_alignment - 0.5f) * 0.15f;
+        awareness_snapshot.awareness_level = clamp_unit(awareness_snapshot.awareness_level + awareness_bias);
+    }
 
     InnerCouncil council = {0};
     bool council_active = false;
@@ -544,6 +656,17 @@ static void exhale(const kernel_options *opts)
                coherence_field->stability_avg,
                coherence_field->awareness_level,
                delay_whole);
+    }
+
+    if (human_bridge_active && opts && opts->human_trace) {
+        double delay_scale = symbiosis_delay_scale();
+        printf("symbiotic bridge | beat=%.2f | amp=%.2f | align=%.2f | res=%.2f | phase=%+.2f | delay=%.3f\n",
+               human_pulse.beat_rate,
+               human_pulse.amplitude,
+               human_alignment,
+               human_resonance_level,
+               symbiosis_phase_shift(),
+               delay_scale);
     }
 
     if (opts && opts->council_log && council_active) {
@@ -652,6 +775,8 @@ int main(int argc, char **argv)
     metabolic_enable(opts.metabolic_enabled);
     metabolic_enable_trace(opts.metabolic_trace);
     metabolic_set_thresholds(opts.vitality_rest_threshold, opts.vitality_creative_threshold);
+    symbiosis_init(opts.human_source, opts.human_trace, opts.human_resonance_gain);
+    symbiosis_enable(opts.human_bridge_enabled);
     uint64_t pulses = 0;
     while (!opts.limit || pulses < opts.limit) {
         inhale();

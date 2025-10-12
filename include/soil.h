@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 #define SOIL_CAPACITY 256
-#define SOIL_TRACE_DATA_SIZE 32
+#define SOIL_TRACE_DATA_SIZE 64
 
 typedef struct {
     uint64_t timestamp;
