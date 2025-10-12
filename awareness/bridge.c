@@ -1,0 +1,138 @@
+#include "awareness.h"
+
+#include "resonant.h"
+
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+#ifndef AWARENESS_SOURCE_ID
+#define AWARENESS_SOURCE_ID 7
+#endif
+
+static AwarenessState state;
+static float last_resonance = -1.0f;
+static float last_stability = -1.0f;
+static bool auto_tune = false;
+static double last_cycle_duration = 0.1;
+static float cycle_scale = 1.0f;
+
+static float clamp_unit(float value)
+{
+    if (value < 0.0f) {
+        return 0.0f;
+    }
+    if (value > 1.0f) {
+        return 1.0f;
+    }
+    return value;
+}
+
+static void bus_emit_wave(const char *tag, float awareness_level)
+{
+    char payload[RESONANT_MSG_DATA_SIZE];
+    if (!tag) {
+        tag = "wave";
+    }
+
+    int written = snprintf(payload, sizeof(payload), "%s:%.2f", tag, awareness_level);
+    if (written < 0) {
+        written = 0;
+        payload[0] = '\0';
+    }
+
+    uint32_t energy = (uint32_t)(awareness_level * 100.0f);
+    if (energy == 0U) {
+        energy = 1U;
+    }
+
+    resonant_msg msg = resonant_msg_make(AWARENESS_SOURCE_ID, RESONANT_BROADCAST_ID, energy, payload, (size_t)written);
+    bus_emit(&msg);
+}
+
+void awareness_init(void)
+{
+    memset(&state, 0, sizeof(state));
+    state.awareness_level = 1.0f;
+    state.self_coherence = 1.0f;
+    state.drift = 0.0f;
+    last_resonance = -1.0f;
+    last_stability = -1.0f;
+    auto_tune = false;
+    cycle_scale = 1.0f;
+    last_cycle_duration = 0.1;
+}
+
+void awareness_set_auto_tune(bool enable)
+{
+    auto_tune = enable;
+}
+
+bool awareness_auto_tune_enabled(void)
+{
+    return auto_tune;
+}
+
+AwarenessState awareness_state(void)
+{
+    return state;
+}
+
+bool awareness_update(float resonance_avg, float stability)
+{
+    float drift = fabsf(stability - resonance_avg);
+    if (!isfinite(drift)) {
+        drift = 1.0f;
+    }
+    drift = clamp_unit(drift);
+
+    state.drift = drift;
+    state.awareness_level = clamp_unit(1.0f - drift);
+
+    if (last_resonance >= 0.0f && last_stability >= 0.0f) {
+        float resonance_delta = clamp_unit(fabsf(resonance_avg - last_resonance));
+        float stability_delta = clamp_unit(fabsf(stability - last_stability));
+        float coherence = 1.0f - 0.5f * (resonance_delta + stability_delta);
+        state.self_coherence = clamp_unit(coherence);
+    } else {
+        state.self_coherence = 1.0f;
+    }
+
+    last_resonance = resonance_avg;
+    last_stability = stability;
+
+    bool wave_emitted = false;
+    if (drift > 0.2f) {
+        bus_emit_wave("realign", state.awareness_level);
+        printf("awareness: %.2f | drift: %.2f | wave: realign\n", state.awareness_level, state.drift);
+        cycle_scale = 1.0f + drift * 0.5f;
+        if (cycle_scale < 1.0f) {
+            cycle_scale = 1.0f;
+        }
+        wave_emitted = true;
+    } else {
+        cycle_scale = 1.0f;
+    }
+
+    return wave_emitted;
+}
+
+double awareness_adjust_delay(double base_seconds)
+{
+    if (base_seconds <= 0.0) {
+        base_seconds = 0.001;
+    }
+
+    double scaled = base_seconds;
+    if (auto_tune) {
+        scaled = base_seconds * (double)cycle_scale;
+    }
+
+    last_cycle_duration = scaled;
+    return scaled;
+}
+
+double awareness_cycle_duration(void)
+{
+    return last_cycle_duration;
+}

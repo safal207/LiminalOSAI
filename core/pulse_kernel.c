@@ -13,6 +13,7 @@
 #include "resonant.h"
 #include "symbol.h"
 #include "reflection.h"
+#include "awareness.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -26,6 +27,8 @@ typedef struct {
     bool show_trace;
     bool show_symbols;
     bool show_reflections;
+    bool show_awareness;
+    bool auto_tune;
     uint64_t limit;
 } kernel_options;
 
@@ -40,7 +43,14 @@ static size_t bounded_string_length(const uint8_t *data, size_t max_len)
 
 static kernel_options parse_options(int argc, char **argv)
 {
-    kernel_options opts = { .show_trace = false, .show_symbols = false, .show_reflections = false, .limit = 0 };
+    kernel_options opts = {
+        .show_trace = false,
+        .show_symbols = false,
+        .show_reflections = false,
+        .show_awareness = false,
+        .auto_tune = false,
+        .limit = 0
+    };
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -50,6 +60,10 @@ static kernel_options parse_options(int argc, char **argv)
             opts.show_symbols = true;
         } else if (strcmp(arg, "--reflect") == 0) {
             opts.show_reflections = true;
+        } else if (strcmp(arg, "--awareness") == 0) {
+            opts.show_awareness = true;
+        } else if (strcmp(arg, "--auto-tune") == 0) {
+            opts.auto_tune = true;
         } else if (strncmp(arg, "--limit=", 8) == 0) {
             const char *value = arg + 8;
             if (*value) {
@@ -78,7 +92,27 @@ static kernel_options parse_options(int argc, char **argv)
 
 static void pulse_delay(void)
 {
-    struct timespec req = { .tv_sec = 0, .tv_nsec = 100000000L };
+    const double base_delay = 0.1;
+    double tuned_delay = awareness_adjust_delay(base_delay);
+
+    if (tuned_delay < 0.001) {
+        tuned_delay = 0.001;
+    }
+
+    time_t seconds = (time_t)tuned_delay;
+    long nanoseconds = (long)((tuned_delay - (double)seconds) * 1000000000.0);
+    if (nanoseconds < 0) {
+        nanoseconds = 0;
+    }
+    if (nanoseconds >= 1000000000L) {
+        seconds += nanoseconds / 1000000000L;
+        nanoseconds %= 1000000000L;
+    }
+    if (seconds == 0 && nanoseconds == 0) {
+        nanoseconds = 1000000L;
+    }
+
+    struct timespec req = { .tv_sec = seconds, .tv_nsec = nanoseconds };
     nanosleep(&req, NULL);
 }
 
@@ -147,7 +181,7 @@ static void reflect(const kernel_options *opts)
     }
 }
 
-static void exhale(void)
+static void exhale(const kernel_options *opts)
 {
     const Symbol *active[16];
     size_t active_count = symbol_layer_active(active, sizeof(active) / sizeof(active[0]));
@@ -213,6 +247,19 @@ static void exhale(void)
 
     reflect_log(energy_avg, resonance_avg, stability, note);
 
+    awareness_update(resonance_avg, stability);
+
+    if (opts && opts->show_awareness) {
+        AwarenessState state = awareness_state();
+        double breath = awareness_cycle_duration();
+        printf("awareness state | level: %.2f | coherence: %.2f | drift: %.2f | breath: %.3fs%s\n",
+               state.awareness_level,
+               state.self_coherence,
+               state.drift,
+               breath,
+               awareness_auto_tune_enabled() ? "" : " (manual)");
+    }
+
     fputs("exhale\n", stdout);
 }
 
@@ -245,11 +292,13 @@ int main(int argc, char **argv)
     soil_init();
     bus_init();
     symbol_layer_init();
+    awareness_init();
+    awareness_set_auto_tune(opts.auto_tune);
     uint64_t pulses = 0;
     while (!opts.limit || pulses < opts.limit) {
         inhale();
         reflect(&opts);
-        exhale();
+        exhale(&opts);
         pulse_delay();
         ++pulses;
     }
