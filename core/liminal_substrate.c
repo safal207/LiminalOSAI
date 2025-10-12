@@ -1,11 +1,27 @@
+#ifndef _WIN32
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200112L
+#endif
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#ifdef __unix__
+#include <time.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#else
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
 #endif
 
 #ifndef M_PI
@@ -38,6 +54,10 @@ typedef struct {
     bool trace;
     bool human_bridge;
     uint16_t lip_port;
+    bool lip_test;
+    bool lip_trace;
+    unsigned int lip_interval_ms;
+    char lip_host[128];
 } substrate_config;
 
 static void rebirth(liminal_state *state)
@@ -180,6 +200,10 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.trace = false;
     cfg.human_bridge = false;
     cfg.lip_port = 0U;
+    cfg.lip_test = false;
+    cfg.lip_trace = false;
+    cfg.lip_interval_ms = 1000U;
+    cfg.lip_host[0] = '\0';
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -194,6 +218,22 @@ static substrate_config parse_args(int argc, char **argv)
             unsigned long parsed = strtoul(value, NULL, 10);
             if (parsed <= UINT16_MAX) {
                 cfg.lip_port = (uint16_t)parsed;
+            }
+        } else if (strcmp(arg, "--lip-test") == 0) {
+            cfg.lip_test = true;
+        } else if (strcmp(arg, "--lip-trace") == 0) {
+            cfg.lip_trace = true;
+        } else if (strncmp(arg, "--lip-interval=", 15) == 0) {
+            const char *value = arg + 15;
+            unsigned long parsed = strtoul(value, NULL, 10);
+            if (parsed > 0UL && parsed <= 60000UL) {
+                cfg.lip_interval_ms = (unsigned int)parsed;
+            }
+        } else if (strncmp(arg, "--lip-host=", 11) == 0) {
+            const char *value = arg + 11;
+            if (value && *value) {
+                strncpy(cfg.lip_host, value, sizeof(cfg.lip_host) - 1U);
+                cfg.lip_host[sizeof(cfg.lip_host) - 1U] = '\0';
             }
         } else if (strncmp(arg, "--human-bridge", 14) == 0) {
             cfg.human_bridge = true;
@@ -211,6 +251,254 @@ static substrate_config parse_args(int argc, char **argv)
     }
 
     return cfg;
+}
+
+static void lip_sleep(unsigned int interval_ms)
+{
+#ifdef _WIN32
+    Sleep(interval_ms);
+#else
+    struct timespec ts;
+    ts.tv_sec = interval_ms / 1000U;
+    ts.tv_nsec = (long)(interval_ms % 1000U) * 1000000L;
+    nanosleep(&ts, NULL);
+#endif
+}
+
+static bool json_extract_float(const char *json, const char *key, float *out)
+{
+    const char *pos = strstr(json, key);
+    if (!pos) {
+        return false;
+    }
+    pos += strlen(key);
+    while (*pos == ' ' || *pos == '\t' || *pos == '"' || *pos == ':' ) {
+        ++pos;
+    }
+    if (*pos == '\0') {
+        return false;
+    }
+    char *end_ptr = NULL;
+    float value = strtof(pos, &end_ptr);
+    if (end_ptr == pos) {
+        return false;
+    }
+    *out = value;
+    return true;
+}
+
+static void close_socket(int fd)
+{
+#ifdef _WIN32
+    closesocket(fd);
+#else
+    close(fd);
+#endif
+}
+
+static int lip_connect_peer(const substrate_config *cfg)
+{
+    if (cfg->lip_host[0] == '\0') {
+        return -1;
+    }
+#ifdef _WIN32
+    WSADATA wsa_data;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+        return -1;
+    }
+#endif
+    const char *separator = strrchr(cfg->lip_host, ':');
+    if (!separator) {
+        return -1;
+    }
+    char host[96];
+    size_t host_len = (size_t)(separator - cfg->lip_host);
+    if (host_len >= sizeof(host)) {
+        host_len = sizeof(host) - 1U;
+    }
+    memcpy(host, cfg->lip_host, host_len);
+    host[host_len] = '\0';
+    const char *port_str = separator + 1;
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo *result = NULL;
+    int err = getaddrinfo(host, port_str, &hints, &result);
+    if (err != 0 || !result) {
+        return -1;
+    }
+    int sock_fd = -1;
+    for (struct addrinfo *rp = result; rp != NULL; rp = rp->ai_next) {
+        sock_fd = (int)socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (sock_fd < 0) {
+            continue;
+        }
+        if (connect(sock_fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+            break;
+        }
+        close_socket(sock_fd);
+        sock_fd = -1;
+    }
+    freeaddrinfo(result);
+    return sock_fd;
+}
+
+static int lip_listen_local(uint16_t port)
+{
+#ifdef _WIN32
+    WSADATA wsa_data;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+        return -1;
+    }
+#endif
+    int sock_fd = (int)socket(AF_INET6, SOCK_STREAM, 0);
+    if (sock_fd < 0) {
+        sock_fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+        if (sock_fd < 0) {
+            return -1;
+        }
+    }
+    int opt = 1;
+    setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
+
+    struct sockaddr_in6 addr6;
+    memset(&addr6, 0, sizeof(addr6));
+    addr6.sin6_family = AF_INET6;
+    addr6.sin6_addr = in6addr_any;
+    addr6.sin6_port = htons(port);
+    if (bind(sock_fd, (struct sockaddr *)&addr6, sizeof(addr6)) != 0) {
+        close_socket(sock_fd);
+        sock_fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+        if (sock_fd < 0) {
+            return -1;
+        }
+        setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
+        struct sockaddr_in addr4;
+        memset(&addr4, 0, sizeof(addr4));
+        addr4.sin_family = AF_INET;
+        addr4.sin_addr.s_addr = htonl(INADDR_ANY);
+        addr4.sin_port = htons(port);
+        if (bind(sock_fd, (struct sockaddr *)&addr4, sizeof(addr4)) != 0) {
+            close_socket(sock_fd);
+            return -1;
+        }
+    }
+    if (listen(sock_fd, 1) != 0) {
+        close_socket(sock_fd);
+        return -1;
+    }
+    return sock_fd;
+}
+
+static int lip_accept_peer(int listen_fd)
+{
+    struct sockaddr_storage addr;
+    socklen_t addr_len = sizeof(addr);
+    int client_fd = (int)accept(listen_fd, (struct sockaddr *)&addr, &addr_len);
+    return client_fd;
+}
+
+static void run_lip_resonance_test(liminal_state *state, const substrate_config *cfg)
+{
+    int peer_fd = -1;
+    int listen_fd = -1;
+    bool connected = false;
+    if (cfg->lip_host[0] != '\0') {
+        peer_fd = lip_connect_peer(cfg);
+        connected = peer_fd >= 0;
+    } else if (cfg->lip_port != 0U) {
+        listen_fd = lip_listen_local(cfg->lip_port);
+        if (listen_fd >= 0) {
+            if (cfg->trace || cfg->lip_trace) {
+                printf("[lip] waiting for resonance peer on port %u\n", (unsigned)cfg->lip_port);
+            }
+            peer_fd = lip_accept_peer(listen_fd);
+            connected = peer_fd >= 0;
+        }
+    }
+    if (!connected) {
+        fprintf(stderr, "[lip] unable to establish LIP channel.\n");
+        if (listen_fd >= 0) {
+            close_socket(listen_fd);
+        }
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return;
+    }
+
+    float freq = 0.68f;
+    float phase = 0.27f;
+    state->breath_rate = freq;
+    state->breath_position = phase;
+    state->phase_offset = 0.0f;
+
+    const int max_cycles = 10;
+    char buffer[256];
+    for (int cycle = 0; cycle < max_cycles; ++cycle) {
+        lip_event ev = resonance_event(freq, phase, "sync");
+        int len = snprintf(buffer,
+                           sizeof(buffer),
+                           "{ \"type\": \"%s\", \"freq\": %.3f, \"phase\": %.3f, \"intent\": \"%s\" }\n",
+                           ev.type,
+                           ev.freq,
+                           ev.phase,
+                           ev.intent);
+        if (len <= 0 || len >= (int)sizeof(buffer)) {
+            break;
+        }
+        if (cfg->lip_trace) {
+            printf("[lip] send: %s", buffer);
+        }
+        if (send(peer_fd, buffer, (size_t)len, 0) < 0) {
+            break;
+        }
+
+        int received = recv(peer_fd, buffer, sizeof(buffer) - 1, 0);
+        if (received <= 0) {
+            break;
+        }
+        buffer[received] = '\0';
+        if (cfg->lip_trace) {
+            printf("[lip] recv: %s\n", buffer);
+        }
+        float ack_freq = freq;
+        float ack_phase = phase;
+        bool got_freq = json_extract_float(buffer, "\"freq\"", &ack_freq);
+        bool got_phase = json_extract_float(buffer, "\"phase\"", &ack_phase);
+        if (!got_freq || !got_phase) {
+            continue;
+        }
+
+        float delta = fabsf(freq - ack_freq) + fabsf(phase - ack_phase);
+        float sync_level = delta < 0.05f ? 1.0f : fmaxf(0.0f, 1.0f - delta);
+        float phase_shift = ack_phase - phase;
+        state->sync_quality = 0.8f * state->sync_quality + 0.2f * sync_level;
+        state->resonance = sync_level;
+        state->breath_rate = 0.7f * state->breath_rate + 0.3f * ack_freq;
+        phase = fmodf((phase + ack_phase) * 0.5f, 1.0f);
+        state->breath_position = phase;
+
+        const char *partner = cfg->lip_host[0] != '\0' ? cfg->lip_host : "external";
+        printf("resonance_test: partner=%s sync=%.3f phase_shift=%.2f\n",
+               partner,
+               sync_level,
+               phase_shift);
+
+        lip_sleep(cfg->lip_interval_ms);
+        freq = state->breath_rate;
+    }
+
+    close_socket(peer_fd);
+    if (listen_fd >= 0) {
+        close_socket(listen_fd);
+    }
+#ifdef _WIN32
+    WSACleanup();
+#endif
 }
 
 static void substrate_loop(liminal_state *state, const substrate_config *cfg)
@@ -261,6 +549,10 @@ int main(int argc, char **argv)
                cfg.adaptive ? "on" : "off",
                cfg.human_bridge ? "on" : "off",
                (unsigned)cfg.lip_port);
+    }
+
+    if (cfg.lip_test) {
+        run_lip_resonance_test(&state, &cfg);
     }
 
     substrate_loop(&state, &cfg);
