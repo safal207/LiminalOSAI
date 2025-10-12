@@ -20,6 +20,7 @@ size_t symbol_layer_active(const Symbol **out_symbols, size_t max_count);
 void symbol_register(const char *key, float resonance);
 Symbol *symbol_find(const char *key);
 void symbol_decay(void);
+void symbol_create_link(const char *from_key, const char *to_key, float weight);
 
 #ifdef __cplusplus
 }

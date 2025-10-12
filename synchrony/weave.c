@@ -26,7 +26,8 @@ static const float default_shift_deg[WEAVE_MODULE_COUNT] = {
     72.0f,  /* soil */
     144.0f, /* reflection */
     216.0f, /* awareness */
-    288.0f  /* council */
+    288.0f, /* council */
+    330.0f  /* dream */
 };
 
 static const char *module_labels[WEAVE_MODULE_COUNT] = {
@@ -34,7 +35,8 @@ static const char *module_labels[WEAVE_MODULE_COUNT] = {
     "soil",
     "reflection",
     "awareness",
-    "council"
+    "council",
+    "dream"
 };
 
 static struct {

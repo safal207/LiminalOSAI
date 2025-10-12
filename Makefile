@@ -13,7 +13,8 @@ COUNCIL_SRCS:= council/inner.c
 COH_SRCS    := coherence/field.c
 DIAG_SRCS   := diagnostics/health_scan.c
 SYNC_SRCS   := synchrony/weave.c
-SRCS        := $(CORE_SRCS) $(MEM_SRCS) $(BUS_SRCS) $(SYM_SRCS) $(REF_SRCS) $(AWARE_SRCS) $(COUNCIL_SRCS) $(COH_SRCS) $(DIAG_SRCS) $(SYNC_SRCS)
+DREAM_SRCS  := dream/state.c
+SRCS        := $(CORE_SRCS) $(MEM_SRCS) $(BUS_SRCS) $(SYM_SRCS) $(REF_SRCS) $(AWARE_SRCS) $(COUNCIL_SRCS) $(COH_SRCS) $(DIAG_SRCS) $(SYNC_SRCS) $(DREAM_SRCS)
 OBJS        := $(SRCS:.c=.o)
 
 all: $(TARGET)
