@@ -29,4 +29,15 @@ $(TARGET): $(OBJS)
 clean:
 	rm -f $(OBJS) $(TARGET)
 
-.PHONY: all clean
+.PHONY: all clean rebirth report
+
+# --- Phoenix self-report integration ---
+
+rebirth: $(TARGET)
+	@echo "🌀 Initiating Phoenix Rebirth..."
+	@$(TARGET) --limit=30 --trace --reflect --awareness --rebirth || true
+	@python3 phoenix_report.py || echo "⚠️ Report skipped (no trace found)."
+
+report:
+	@python3 phoenix_report.py
+
