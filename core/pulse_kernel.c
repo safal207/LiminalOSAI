@@ -23,6 +23,7 @@
 #include "metabolic.h"
 #include "symbiosis.h"
 #include "empathic.h"
+#include "emotion_memory.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -31,6 +32,10 @@
 #define SENSOR_INHALE   1
 #define SENSOR_REFLECT  2
 #define SENSOR_EXHALE   3
+
+#ifndef EMOTION_TRACE_PATH_MAX
+#define EMOTION_TRACE_PATH_MAX 256
+#endif
 
 typedef struct {
     bool show_trace;
@@ -58,6 +63,10 @@ typedef struct {
     bool empathic_trace;
     EmpathicSource emotional_source;
     float empathy_gain;
+    bool emotional_memory_enabled;
+    bool memory_trace;
+    float recognition_threshold;
+    char emotion_trace_path[EMOTION_TRACE_PATH_MAX];
     uint64_t limit;
     uint32_t scan_interval;
     float target_coherence;
@@ -118,6 +127,10 @@ static kernel_options parse_options(int argc, char **argv)
         .empathic_trace = false,
         .emotional_source = EMPATHIC_SOURCE_AUDIO,
         .empathy_gain = 1.0f,
+        .emotional_memory_enabled = false,
+        .memory_trace = false,
+        .recognition_threshold = 0.18f,
+        .emotion_trace_path = {0},
         .limit = 0,
         .scan_interval = 10U,
         .target_coherence = 0.80f,
@@ -305,6 +318,30 @@ static kernel_options parse_options(int argc, char **argv)
                         parsed = 3.5f;
                     }
                     opts.empathy_gain = parsed;
+                }
+            }
+        } else if (strcmp(arg, "--emotional-memory") == 0) {
+            opts.emotional_memory_enabled = true;
+        } else if (strcmp(arg, "--memory-trace") == 0) {
+            opts.memory_trace = true;
+        } else if (strncmp(arg, "--emotion-trace-path=", 21) == 0) {
+            const char *value = arg + 21;
+            if (value && *value) {
+                strncpy(opts.emotion_trace_path, value, sizeof(opts.emotion_trace_path) - 1U);
+                opts.emotion_trace_path[sizeof(opts.emotion_trace_path) - 1U] = '\0';
+            }
+        } else if (strncmp(arg, "--recognition-threshold=", 24) == 0) {
+            const char *value = arg + 24;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.01f) {
+                        parsed = 0.01f;
+                    } else if (parsed > 1.5f) {
+                        parsed = 1.5f;
+                    }
+                    opts.recognition_threshold = parsed;
                 }
             }
         } else if (strncmp(arg, "--vitality-threshold=", 21) == 0) {
@@ -547,6 +584,7 @@ static void exhale(const kernel_options *opts)
     bool human_bridge_active = opts && opts->human_bridge_enabled;
     EmpathicResponse empathic_response = {0};
     bool empathic_layer_active = opts && opts->empathic_enabled;
+    bool emotional_memory_active = opts && opts->emotional_memory_enabled;
 
     if (human_bridge_active) {
         float liminal_frequency = resonance_avg / 12.0f;
@@ -584,8 +622,19 @@ static void exhale(const kernel_options *opts)
     if (empathic_layer_active) {
         float alignment_hint = human_bridge_active ? human_alignment : stability;
         float resonance_hint = clamp_unit(resonance_avg / 12.0f);
+        if (emotional_memory_active) {
+            float boost = emotion_memory_resonance_boost();
+            if (boost > 0.0f) {
+                resonance_hint = clamp_unit(resonance_hint + boost);
+            }
+        }
         empathic_response = empathic_step(opts->target_coherence, alignment_hint, resonance_hint);
         coherence_set_target(empathic_response.target_coherence);
+    }
+
+    if (emotional_memory_active) {
+        EmotionField field_snapshot = empathic_layer_active ? empathic_response.field : empathic_field();
+        emotion_memory_update(field_snapshot);
     }
 
     char note[64];
@@ -830,6 +879,10 @@ int main(int argc, char **argv)
     metabolic_set_thresholds(opts.vitality_rest_threshold, opts.vitality_creative_threshold);
     empathic_init(opts.emotional_source, opts.empathic_trace, opts.empathy_gain);
     empathic_enable(opts.empathic_enabled);
+    emotion_memory_configure(opts.emotional_memory_enabled,
+                             opts.memory_trace,
+                             opts.emotion_trace_path[0] ? opts.emotion_trace_path : NULL,
+                             opts.recognition_threshold);
     symbiosis_init(opts.human_source, opts.human_trace, opts.human_resonance_gain);
     symbiosis_enable(opts.human_bridge_enabled);
     uint64_t pulses = 0;
@@ -865,6 +918,7 @@ int main(int argc, char **argv)
         reflect_dump(10);
     }
 
+    emotion_memory_finalize();
     metabolic_shutdown();
 
     return 0;

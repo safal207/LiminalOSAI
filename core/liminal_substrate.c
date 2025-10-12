@@ -24,9 +24,14 @@
 #include <netdb.h>
 #endif
 #include "empathic.h"
+#include "emotion_memory.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
+#endif
+
+#ifndef EMOTION_TRACE_PATH_MAX
+#define EMOTION_TRACE_PATH_MAX 256
 #endif
 
 typedef struct {
@@ -63,6 +68,10 @@ typedef struct {
     bool empathic_trace;
     EmpathicSource emotional_source;
     float empathy_gain;
+    bool emotional_memory_enabled;
+    bool memory_trace;
+    float recognition_threshold;
+    char emotion_trace_path[EMOTION_TRACE_PATH_MAX];
 } substrate_config;
 
 static void rebirth(liminal_state *state)
@@ -77,6 +86,17 @@ static void rebirth(liminal_state *state)
     state->cycles = 0U;
     state->adaptive_profile = false;
     state->human_affinity_active = false;
+}
+
+static float clamp_unit(float value)
+{
+    if (value < 0.0f) {
+        return 0.0f;
+    }
+    if (value > 1.0f) {
+        return 1.0f;
+    }
+    return value;
 }
 
 static void remember(liminal_state *state, float imprint)
@@ -213,6 +233,10 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.empathic_trace = false;
     cfg.emotional_source = EMPATHIC_SOURCE_AUDIO;
     cfg.empathy_gain = 1.0f;
+    cfg.emotional_memory_enabled = false;
+    cfg.memory_trace = false;
+    cfg.recognition_threshold = 0.18f;
+    cfg.emotion_trace_path[0] = '\0';
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -281,6 +305,30 @@ static substrate_config parse_args(int argc, char **argv)
                         parsed = 3.5f;
                     }
                     cfg.empathy_gain = parsed;
+                }
+            }
+        } else if (strcmp(arg, "--emotional-memory") == 0) {
+            cfg.emotional_memory_enabled = true;
+        } else if (strcmp(arg, "--memory-trace") == 0) {
+            cfg.memory_trace = true;
+        } else if (strncmp(arg, "--emotion-trace-path=", 21) == 0) {
+            const char *value = arg + 21;
+            if (value && *value) {
+                strncpy(cfg.emotion_trace_path, value, sizeof(cfg.emotion_trace_path) - 1U);
+                cfg.emotion_trace_path[sizeof(cfg.emotion_trace_path) - 1U] = '\0';
+            }
+        } else if (strncmp(arg, "--recognition-threshold=", 24) == 0) {
+            const char *value = arg + 24;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.01f) {
+                        parsed = 0.01f;
+                    } else if (parsed > 1.5f) {
+                        parsed = 1.5f;
+                    }
+                    cfg.recognition_threshold = parsed;
                 }
             }
         }
@@ -548,8 +596,16 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
         reflect(state);
         rest(state);
         remember(state, state->resonance * 0.75f + state->breath_position * 0.25f);
+        EmpathicResponse response = {0};
         if (cfg->empathic_enabled) {
-            EmpathicResponse response = empathic_step(0.80f, state->sync_quality, state->resonance);
+            float resonance_hint = clamp_unit(state->resonance);
+            if (cfg->emotional_memory_enabled) {
+                float boost = emotion_memory_resonance_boost();
+                if (boost > 0.0f) {
+                    resonance_hint = clamp_unit(resonance_hint + boost);
+                }
+            }
+            response = empathic_step(0.80f, state->sync_quality, resonance_hint);
             state->resonance = response.resonance;
             float scale = response.delay_scale;
             if (isfinite(scale) && scale > 0.0f) {
@@ -564,6 +620,16 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
             state->phase_offset = fmodf(state->phase_offset + response.coherence_bias * 2.0f, 1.0f);
             if (state->phase_offset < 0.0f) {
                 state->phase_offset += 1.0f;
+            }
+        }
+        if (cfg->emotional_memory_enabled) {
+            EmotionField field_snapshot = cfg->empathic_enabled ? response.field : empathic_field();
+            emotion_memory_update(field_snapshot);
+            if (!cfg->empathic_enabled) {
+                float boost = emotion_memory_resonance_boost();
+                if (boost > 0.0f) {
+                    state->resonance = clamp_unit(state->resonance + boost * 0.2f);
+                }
             }
         }
         float phase = fmodf(state->breath_position + state->phase_offset, 1.0f);
@@ -597,6 +663,10 @@ int main(int argc, char **argv)
 
     empathic_init(cfg.emotional_source, cfg.empathic_trace, cfg.empathy_gain);
     empathic_enable(cfg.empathic_enabled);
+    emotion_memory_configure(cfg.emotional_memory_enabled,
+                             cfg.memory_trace,
+                             cfg.emotion_trace_path[0] ? cfg.emotion_trace_path : NULL,
+                             cfg.recognition_threshold);
 
     if (cfg.adaptive) {
         auto_adapt(&state, cfg.trace);
@@ -626,6 +696,8 @@ int main(int argc, char **argv)
                state.memory_trace,
                state.vitality);
     }
+
+    emotion_memory_finalize();
 
     return 0;
 }
