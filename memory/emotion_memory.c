@@ -41,6 +41,8 @@ typedef struct {
 
 static emotion_memory_state g_memory = {0};
 
+static void compute_signature_from_trace(EmotionTrace *trace);
+
 static float clamp_unit(float value)
 {
     if (value < 0.0f) {
@@ -216,9 +218,13 @@ static bool parse_trace_line(const char *line, EmotionTrace *out)
     if (!parse_float_field(line, "\"resonance\"", &trace.resonance_avg)) {
         return false;
     }
+    if (!parse_float_field(line, "\"anticipation\"", &trace.anticipation_avg)) {
+        trace.anticipation_avg = 0.5f;
+    }
     if (!parse_u64_field(line, "\"timestamp\"", &trace.timestamp)) {
         trace.timestamp = current_timestamp();
     }
+    compute_signature_from_trace(&trace);
     *out = trace;
     return true;
 }
@@ -257,9 +263,10 @@ static void compute_signature_from_trace(EmotionTrace *trace)
     uint32_t t = quantize_component(trace->tension_avg);
     uint32_t h = quantize_component(trace->harmony_avg);
     uint32_t r = quantize_component(trace->resonance_avg);
+    uint32_t a = quantize_component(trace->anticipation_avg);
     uint32_t hash1 = 2166136261u;
-    uint32_t data[4] = {w, t, h, r};
-    for (size_t i = 0; i < 4; ++i) {
+    uint32_t data[5] = {w, t, h, r, a};
+    for (size_t i = 0; i < 5; ++i) {
         uint32_t value = data[i];
         for (int b = 0; b < 4; ++b) {
             uint8_t byte = (uint8_t)((value >> (b * 8)) & 0xFFu);
@@ -268,7 +275,7 @@ static void compute_signature_from_trace(EmotionTrace *trace)
         }
     }
     uint32_t hash2 = 16777619u;
-    for (size_t i = 0; i < 4; ++i) {
+    for (size_t i = 0; i < 5; ++i) {
         hash2 ^= data[i] + (uint32_t)(i * 109u);
         hash2 *= 2166136261u;
     }
@@ -284,7 +291,8 @@ static float distance_to_trace(const EmotionTrace *a, const EmotionTrace *b)
     float dt = a->tension_avg - b->tension_avg;
     float dh = a->harmony_avg - b->harmony_avg;
     float dr = a->resonance_avg - b->resonance_avg;
-    float sum = dw * dw + dt * dt + dh * dh + dr * dr;
+    float da = a->anticipation_avg - b->anticipation_avg;
+    float sum = dw * dw + dt * dt + dh * dh + dr * dr + da * da;
     if (sum <= 0.0f) {
         return 0.0f;
     }
@@ -316,11 +324,12 @@ static void announce_state(float best_distance, bool force_echo)
     putchar('\n');
 
     if (g_memory.trace_enabled) {
-        printf("memory_trace: warmth=%.3f tension=%.3f harmony=%.3f empathy=%.3f boost=%.3f\n",
+        printf("memory_trace: warmth=%.3f tension=%.3f harmony=%.3f empathy=%.3f anticipation=%.3f boost=%.3f\n",
                g_memory.current.warmth_avg,
                g_memory.current.tension_avg,
                g_memory.current.harmony_avg,
                g_memory.current.resonance_avg,
+               g_memory.current.anticipation_avg,
                boost);
     }
 
@@ -431,6 +440,7 @@ void emotion_memory_update(EmotionField field)
         g_memory.current.tension_avg = clamp_unit(field.tension);
         g_memory.current.harmony_avg = clamp_unit(field.harmony);
         g_memory.current.resonance_avg = clamp_unit(field.empathy);
+        g_memory.current.anticipation_avg = clamp_unit(field.anticipation);
         g_memory.session_active = true;
         g_memory.session_updates = 1;
     } else {
@@ -438,6 +448,7 @@ void emotion_memory_update(EmotionField field)
         g_memory.current.tension_avg = g_memory.current.tension_avg * 0.8f + clamp_unit(field.tension) * 0.2f;
         g_memory.current.harmony_avg = g_memory.current.harmony_avg * 0.8f + clamp_unit(field.harmony) * 0.2f;
         g_memory.current.resonance_avg = g_memory.current.resonance_avg * 0.8f + clamp_unit(field.empathy) * 0.2f;
+        g_memory.current.anticipation_avg = g_memory.current.anticipation_avg * 0.8f + clamp_unit(field.anticipation) * 0.2f;
         ++g_memory.session_updates;
     }
 
@@ -489,22 +500,24 @@ void emotion_memory_finalize(void)
         FILE *fp = fopen(g_memory.storage_path, "a");
         if (fp) {
             fprintf(fp,
-                    "{\"signature\":\"%s\",\"timestamp\":%" PRIu64 ",\"warmth\":%.4f,\"tension\":%.4f,\"harmony\":%.4f,\"resonance\":%.4f}\n",
+                    "{\"signature\":\"%s\",\"timestamp\":%" PRIu64 ",\"warmth\":%.4f,\"tension\":%.4f,\"harmony\":%.4f,\"resonance\":%.4f,\"anticipation\":%.4f}\n",
                     g_memory.current.signature,
                     g_memory.current.timestamp,
                     g_memory.current.warmth_avg,
                     g_memory.current.tension_avg,
                     g_memory.current.harmony_avg,
-                    g_memory.current.resonance_avg);
+                    g_memory.current.resonance_avg,
+                    g_memory.current.anticipation_avg);
             fclose(fp);
             push_known(&g_memory.current);
             if (g_memory.trace_enabled) {
-                printf("memory_soil: stored signature=%s warmth=%.3f tension=%.3f harmony=%.3f resonance=%.3f\n",
+                printf("memory_soil: stored signature=%s warmth=%.3f tension=%.3f harmony=%.3f resonance=%.3f anticipation=%.3f\n",
                        g_memory.current.signature,
                        g_memory.current.warmth_avg,
                        g_memory.current.tension_avg,
                        g_memory.current.harmony_avg,
-                       g_memory.current.resonance_avg);
+                       g_memory.current.resonance_avg,
+                       g_memory.current.anticipation_avg);
             }
         } else if (g_memory.trace_enabled) {
             fprintf(stderr, "memory_soil: failed to write %s\n", g_memory.storage_path);

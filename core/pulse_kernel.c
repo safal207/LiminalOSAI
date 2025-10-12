@@ -61,6 +61,7 @@ typedef struct {
     float human_resonance_gain;
     bool empathic_enabled;
     bool empathic_trace;
+    bool anticipation_trace;
     EmpathicSource emotional_source;
     float empathy_gain;
     bool emotional_memory_enabled;
@@ -125,6 +126,7 @@ static kernel_options parse_options(int argc, char **argv)
         .human_resonance_gain = 1.0f,
         .empathic_enabled = false,
         .empathic_trace = false,
+        .anticipation_trace = false,
         .emotional_source = EMPATHIC_SOURCE_AUDIO,
         .empathy_gain = 1.0f,
         .emotional_memory_enabled = false,
@@ -297,6 +299,9 @@ static kernel_options parse_options(int argc, char **argv)
             opts.empathic_enabled = true;
         } else if (strcmp(arg, "--empathic-trace") == 0) {
             opts.empathic_trace = true;
+        } else if (strcmp(arg, "--anticipation") == 0) {
+            opts.empathic_enabled = true;
+            opts.anticipation_trace = true; // merged by Codex
         } else if (strncmp(arg, "--emotional-source=", 20) == 0) {
             const char *value = arg + 20;
             if (strcmp(value, "text") == 0) {
@@ -630,6 +635,13 @@ static void exhale(const kernel_options *opts)
         }
         empathic_response = empathic_step(opts->target_coherence, alignment_hint, resonance_hint);
         coherence_set_target(empathic_response.target_coherence);
+        if (opts->anticipation_trace) {
+            printf("anticipation_bridge: level=%.2f micro=%.2f trend=%.2f target=%.2f\n", // merged by Codex
+                   empathic_response.anticipation_level,
+                   empathic_response.micro_pattern_signal,
+                   empathic_response.prediction_trend,
+                   empathic_response.target_coherence);
+        }
     }
 
     if (emotional_memory_active) {
@@ -670,6 +682,7 @@ static void exhale(const kernel_options *opts)
     if (empathic_layer_active) {
         awareness_energy = clamp_unit(awareness_energy + (empathic_response.field.warmth - 0.5f) * 0.08f);
         reflection_energy = clamp_unit(reflection_energy + (0.5f - empathic_response.field.tension) * 0.05f);
+        awareness_energy = clamp_unit(awareness_energy + (empathic_response.field.anticipation - 0.5f) * 0.06f); // merged by Codex
     }
     float dream_cost = dream_active ? 0.3f : 0.1f;
     float rebirth_cost = 0.0f;
@@ -711,8 +724,28 @@ static void exhale(const kernel_options *opts)
 
     coherence_set_pid_scale(pid_scale);
 
+    float resonance_for_coherence = resonance_avg;
+    float stability_for_coherence = stability;
+    float awareness_for_coherence = awareness_snapshot.awareness_level;
+    if (empathic_layer_active) {
+        float anticipation_level = empathic_response.anticipation_level;
+        float micro_signal = empathic_response.micro_pattern_signal;
+        float trend_signal = empathic_response.prediction_trend;
+        float anticipation_bias = (anticipation_level - 0.5f) * 2.0f;
+        float micro_bias = (micro_signal - 0.5f) * 1.2f;
+        float trend_bias = (trend_signal - 0.5f) * 1.5f;
+        resonance_for_coherence += (anticipation_bias + micro_bias + trend_bias); // merged by Codex
+        if (resonance_for_coherence < 0.0f) {
+            resonance_for_coherence = 0.0f;
+        } else if (resonance_for_coherence > 12.0f) {
+            resonance_for_coherence = 12.0f;
+        }
+        stability_for_coherence = clamp_unit(stability + (anticipation_level - 0.5f) * 0.12f);
+        awareness_for_coherence = clamp_unit(awareness_snapshot.awareness_level + (trend_signal - 0.5f) * 0.10f);
+    }
+
     const CoherenceField *coherence_field =
-        coherence_update(energy_avg, resonance_avg, stability, awareness_snapshot.awareness_level);
+        coherence_update(energy_avg, resonance_for_coherence, stability_for_coherence, awareness_for_coherence);
 
     float coherence_level = coherence_field ? coherence_field->coherence : 0.0f;
     if (empathic_layer_active) {

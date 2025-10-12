@@ -17,6 +17,7 @@ typedef struct {
     float tension_avg;
     float harmony_avg;
     float resonance_avg;
+    float anticipation_avg;
     uint64_t timestamp;
     char signature[EMOTION_SIGNATURE_SIZE];
 } EmotionTrace;
