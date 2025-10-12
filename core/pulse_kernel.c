@@ -14,6 +14,7 @@
 #include "symbol.h"
 #include "reflection.h"
 #include "awareness.h"
+#include "council.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -28,6 +29,7 @@ typedef struct {
     bool show_symbols;
     bool show_reflections;
     bool show_awareness;
+    bool show_council;
     bool auto_tune;
     uint64_t limit;
 } kernel_options;
@@ -48,6 +50,7 @@ static kernel_options parse_options(int argc, char **argv)
         .show_symbols = false,
         .show_reflections = false,
         .show_awareness = false,
+        .show_council = false,
         .auto_tune = false,
         .limit = 0
     };
@@ -62,6 +65,8 @@ static kernel_options parse_options(int argc, char **argv)
             opts.show_reflections = true;
         } else if (strcmp(arg, "--awareness") == 0) {
             opts.show_awareness = true;
+        } else if (strcmp(arg, "--council") == 0) {
+            opts.show_council = true;
         } else if (strcmp(arg, "--auto-tune") == 0) {
             opts.auto_tune = true;
         } else if (strncmp(arg, "--limit=", 8) == 0) {
@@ -247,6 +252,8 @@ static void exhale(const kernel_options *opts)
 
     reflect_log(energy_avg, resonance_avg, stability, note);
 
+    CouncilOutcome council = council_consult(energy_avg, resonance_avg, stability, active_count);
+
     awareness_update(resonance_avg, stability);
 
     if (opts && opts->show_awareness) {
@@ -258,6 +265,13 @@ static void exhale(const kernel_options *opts)
                state.drift,
                breath,
                awareness_auto_tune_enabled() ? "" : " (manual)");
+    }
+
+    if (opts && opts->show_council) {
+        printf("council | decision: %.2f | variance: %.2f\n", council.decision, council.variance);
+        for (size_t i = 0; i < 3; ++i) {
+            printf("  %s vote: %.2f\n", council.agents[i].name, council.agents[i].vote);
+        }
     }
 
     fputs("exhale\n", stdout);
@@ -294,6 +308,8 @@ int main(int argc, char **argv)
     symbol_layer_init();
     awareness_init();
     awareness_set_auto_tune(opts.auto_tune);
+    council_init();
+    council_summon();
     uint64_t pulses = 0;
     while (!opts.limit || pulses < opts.limit) {
         inhale();

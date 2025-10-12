@@ -50,6 +50,13 @@ static void bus_emit_wave(const char *tag, float awareness_level)
     bus_emit(&msg);
 }
 
+void awareness_emit_dialogue(float variance)
+{
+    float level = clamp_unit(isfinite(variance) ? variance : 0.0f);
+    bus_emit_wave("dialogue", level);
+    printf(" inner council murmurs: dialogue variance %.2f\n", level);
+}
+
 void awareness_init(void)
 {
     memset(&state, 0, sizeof(state));
@@ -105,6 +112,7 @@ bool awareness_update(float resonance_avg, float stability)
     if (drift > 0.2f) {
         bus_emit_wave("realign", state.awareness_level);
         printf("awareness: %.2f | drift: %.2f | wave: realign\n", state.awareness_level, state.drift);
+        printf(" inner council whispers: recalibrating harmony\n");
         cycle_scale = 1.0f + drift * 0.5f;
         if (cycle_scale < 1.0f) {
             cycle_scale = 1.0f;
