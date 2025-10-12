@@ -12,6 +12,7 @@
 #include "soil.h"
 #include "resonant.h"
 #include "symbol.h"
+#include "reflection.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -24,6 +25,7 @@
 typedef struct {
     bool show_trace;
     bool show_symbols;
+    bool show_reflections;
     uint64_t limit;
 } kernel_options;
 
@@ -38,7 +40,7 @@ static size_t bounded_string_length(const uint8_t *data, size_t max_len)
 
 static kernel_options parse_options(int argc, char **argv)
 {
-    kernel_options opts = { .show_trace = false, .show_symbols = false, .limit = 0 };
+    kernel_options opts = { .show_trace = false, .show_symbols = false, .show_reflections = false, .limit = 0 };
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -46,6 +48,8 @@ static kernel_options parse_options(int argc, char **argv)
             opts.show_trace = true;
         } else if (strcmp(arg, "--symbols") == 0) {
             opts.show_symbols = true;
+        } else if (strcmp(arg, "--reflect") == 0) {
+            opts.show_reflections = true;
         } else if (strncmp(arg, "--limit=", 8) == 0) {
             const char *value = arg + 8;
             if (*value) {
@@ -145,6 +149,58 @@ static void reflect(const kernel_options *opts)
 
 static void exhale(void)
 {
+    const Symbol *active[16];
+    size_t active_count = symbol_layer_active(active, sizeof(active) / sizeof(active[0]));
+
+    float energy_sum = 0.0f;
+    float resonance_sum = 0.0f;
+    for (size_t i = 0; i < active_count; ++i) {
+        if (!active[i]) {
+            continue;
+        }
+        energy_sum += active[i]->energy;
+        resonance_sum += active[i]->resonance;
+    }
+
+    float energy_avg = 0.0f;
+    float resonance_avg = 0.0f;
+    if (active_count > 0) {
+        energy_avg = energy_sum / (float)active_count;
+        resonance_avg = resonance_sum / (float)active_count;
+    }
+
+    float stability = 0.0f;
+    if (active_count > 0) {
+        const float max_signal = 12.0f;
+        float energy_norm = energy_avg / max_signal;
+        float resonance_norm = resonance_avg / max_signal;
+        if (energy_norm > 1.0f) {
+            energy_norm = 1.0f;
+        }
+        if (resonance_norm > 1.0f) {
+            resonance_norm = 1.0f;
+        }
+        float presence = (float)active_count / 4.0f;
+        if (presence > 1.0f) {
+            presence = 1.0f;
+        }
+        stability = (energy_norm + resonance_norm) * 0.45f + presence * 0.10f;
+        if (stability > 1.0f) {
+            stability = 1.0f;
+        }
+    }
+
+    char note[64];
+    if (active_count == 0) {
+        strcpy(note, "listening for symbols");
+    } else if (stability >= 0.85f) {
+        strcpy(note, "breathing in sync");
+    } else if (stability >= 0.60f) {
+        strcpy(note, "rhythm steadying");
+    } else {
+        strcpy(note, "seeking balance");
+    }
+
     soil_decay();
 
     const char *label = "exhale";
@@ -154,6 +210,8 @@ static void exhale(void)
     static const char exhale_signal[] = "ebb";
     resonant_msg exhale_msg = resonant_msg_make(SENSOR_EXHALE, RESONANT_BROADCAST_ID, ENERGY_EXHALE, exhale_signal, sizeof(exhale_signal) - 1);
     bus_emit(&exhale_msg);
+
+    reflect_log(energy_avg, resonance_avg, stability, note);
 
     fputs("exhale\n", stdout);
 }
@@ -198,6 +256,10 @@ int main(int argc, char **argv)
 
     if (opts.show_trace) {
         print_recent_traces();
+    }
+
+    if (opts.show_reflections) {
+        reflect_dump(10);
     }
 
     return 0;
