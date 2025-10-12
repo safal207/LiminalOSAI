@@ -23,6 +23,7 @@ void health_scan_step(uint64_t cycle,
                       float coherence,
                       float delay_seconds,
                       float drift);
+const HealthScan *health_scan_state(void);
 
 #ifdef __cplusplus
 }

@@ -8,24 +8,22 @@ extern "C" {
 #endif
 
 typedef struct {
-    char name[16];
-    float bias_energy;
-    float bias_resonance;
-    float vote;
-} CouncilAgent;
-
-typedef struct {
-    CouncilAgent agents[3];
-    float decision;
-    float variance;
-} CouncilOutcome;
+    float reflection_vote;
+    float awareness_vote;
+    float coherence_vote;
+    float health_vote;
+    float final_decision;
+} InnerCouncil;
 
 void council_init(void);
 void council_summon(void);
-CouncilOutcome council_consult(float energy_avg,
-                               float resonance_avg,
-                               float stability,
-                               size_t symbol_count);
+InnerCouncil council_update(float reflection_stability,
+                            float awareness_level,
+                            float coherence_level,
+                            float health_drift,
+                            float decision_threshold);
+const InnerCouncil *council_state(void);
+
 
 #ifdef __cplusplus
 }
