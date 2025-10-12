@@ -16,6 +16,7 @@ static float last_stability = -1.0f;
 static bool auto_tune = false;
 static double last_cycle_duration = 0.1;
 static float cycle_scale = 1.0f;
+static double coherence_scale = 1.0;
 
 static const float RESONANCE_MAX = 12.0f;
 
@@ -70,6 +71,7 @@ void awareness_init(void)
     auto_tune = false;
     cycle_scale = 1.0f;
     last_cycle_duration = 0.1;
+    coherence_scale = 1.0;
 }
 
 void awareness_set_auto_tune(bool enable)
@@ -144,7 +146,7 @@ double awareness_adjust_delay(double base_seconds)
 
     double scaled = base_seconds;
     if (auto_tune) {
-        scaled = base_seconds * (double)cycle_scale;
+        scaled = base_seconds * (double)cycle_scale * coherence_scale;
     }
 
     last_cycle_duration = scaled;
@@ -154,4 +156,20 @@ double awareness_adjust_delay(double base_seconds)
 double awareness_cycle_duration(void)
 {
     return last_cycle_duration;
+}
+
+void awareness_set_coherence_scale(double scale)
+{
+    if (!isfinite(scale) || scale <= 0.0) {
+        coherence_scale = 1.0;
+        return;
+    }
+
+    if (scale < 0.1) {
+        scale = 0.1;
+    } else if (scale > 5.0) {
+        scale = 5.0;
+    }
+
+    coherence_scale = scale;
 }
