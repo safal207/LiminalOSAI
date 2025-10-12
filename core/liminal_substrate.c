@@ -23,6 +23,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #endif
+#include "empathic.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -58,6 +59,10 @@ typedef struct {
     bool lip_trace;
     unsigned int lip_interval_ms;
     char lip_host[128];
+    bool empathic_enabled;
+    bool empathic_trace;
+    EmpathicSource emotional_source;
+    float empathy_gain;
 } substrate_config;
 
 static void rebirth(liminal_state *state)
@@ -204,6 +209,10 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.lip_trace = false;
     cfg.lip_interval_ms = 1000U;
     cfg.lip_host[0] = '\0';
+    cfg.empathic_enabled = false;
+    cfg.empathic_trace = false;
+    cfg.emotional_source = EMPATHIC_SOURCE_AUDIO;
+    cfg.empathy_gain = 1.0f;
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -246,6 +255,33 @@ static substrate_config parse_args(int argc, char **argv)
             }
             if (value && (strcmp(value, "off") == 0 || strcmp(value, "0") == 0)) {
                 cfg.human_bridge = false;
+            }
+        } else if (strcmp(arg, "--empathic") == 0) {
+            cfg.empathic_enabled = true;
+        } else if (strcmp(arg, "--empathic-trace") == 0) {
+            cfg.empathic_trace = true;
+        } else if (strncmp(arg, "--emotional-source=", 20) == 0) {
+            const char *value = arg + 20;
+            if (strcmp(value, "text") == 0) {
+                cfg.emotional_source = EMPATHIC_SOURCE_TEXT;
+            } else if (strcmp(value, "sensor") == 0) {
+                cfg.emotional_source = EMPATHIC_SOURCE_SENSOR;
+            } else {
+                cfg.emotional_source = EMPATHIC_SOURCE_AUDIO;
+            }
+        } else if (strncmp(arg, "--empathy-gain=", 15) == 0) {
+            const char *value = arg + 15;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.2f) {
+                        parsed = 0.2f;
+                    } else if (parsed > 3.5f) {
+                        parsed = 3.5f;
+                    }
+                    cfg.empathy_gain = parsed;
+                }
             }
         }
     }
@@ -512,6 +548,24 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
         reflect(state);
         rest(state);
         remember(state, state->resonance * 0.75f + state->breath_position * 0.25f);
+        if (cfg->empathic_enabled) {
+            EmpathicResponse response = empathic_step(0.80f, state->sync_quality, state->resonance);
+            state->resonance = response.resonance;
+            float scale = response.delay_scale;
+            if (isfinite(scale) && scale > 0.0f) {
+                float adjust = 1.0f + (scale - 1.0f) * 0.3f;
+                state->breath_rate *= adjust;
+                if (state->breath_rate < 0.20f) {
+                    state->breath_rate = 0.20f;
+                } else if (state->breath_rate > 2.4f) {
+                    state->breath_rate = 2.4f;
+                }
+            }
+            state->phase_offset = fmodf(state->phase_offset + response.coherence_bias * 2.0f, 1.0f);
+            if (state->phase_offset < 0.0f) {
+                state->phase_offset += 1.0f;
+            }
+        }
         float phase = fmodf(state->breath_position + state->phase_offset, 1.0f);
         lip_event event = resonance_event(state->breath_rate, phase, "align");
         emit_lip_event(&event);
@@ -540,6 +594,9 @@ int main(int argc, char **argv)
 
     liminal_state state;
     rebirth(&state);
+
+    empathic_init(cfg.emotional_source, cfg.empathic_trace, cfg.empathy_gain);
+    empathic_enable(cfg.empathic_enabled);
 
     if (cfg.adaptive) {
         auto_adapt(&state, cfg.trace);

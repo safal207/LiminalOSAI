@@ -22,6 +22,7 @@
 #include "dream.h"
 #include "metabolic.h"
 #include "symbiosis.h"
+#include "empathic.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -53,6 +54,10 @@ typedef struct {
     bool human_trace;
     SymbiosisSource human_source;
     float human_resonance_gain;
+    bool empathic_enabled;
+    bool empathic_trace;
+    EmpathicSource emotional_source;
+    float empathy_gain;
     uint64_t limit;
     uint32_t scan_interval;
     float target_coherence;
@@ -109,6 +114,10 @@ static kernel_options parse_options(int argc, char **argv)
         .human_trace = false,
         .human_source = SYMBIOSIS_SOURCE_KEYBOARD,
         .human_resonance_gain = 1.0f,
+        .empathic_enabled = false,
+        .empathic_trace = false,
+        .emotional_source = EMPATHIC_SOURCE_AUDIO,
+        .empathy_gain = 1.0f,
         .limit = 0,
         .scan_interval = 10U,
         .target_coherence = 0.80f,
@@ -271,6 +280,33 @@ static kernel_options parse_options(int argc, char **argv)
                     opts.human_resonance_gain = parsed;
                 }
             }
+        } else if (strcmp(arg, "--empathic") == 0) {
+            opts.empathic_enabled = true;
+        } else if (strcmp(arg, "--empathic-trace") == 0) {
+            opts.empathic_trace = true;
+        } else if (strncmp(arg, "--emotional-source=", 20) == 0) {
+            const char *value = arg + 20;
+            if (strcmp(value, "text") == 0) {
+                opts.emotional_source = EMPATHIC_SOURCE_TEXT;
+            } else if (strcmp(value, "sensor") == 0) {
+                opts.emotional_source = EMPATHIC_SOURCE_SENSOR;
+            } else {
+                opts.emotional_source = EMPATHIC_SOURCE_AUDIO;
+            }
+        } else if (strncmp(arg, "--empathy-gain=", 15) == 0) {
+            const char *value = arg + 15;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.2f) {
+                        parsed = 0.2f;
+                    } else if (parsed > 3.5f) {
+                        parsed = 3.5f;
+                    }
+                    opts.empathy_gain = parsed;
+                }
+            }
         } else if (strncmp(arg, "--vitality-threshold=", 21) == 0) {
             const char *value = arg + 21;
             if (*value) {
@@ -363,6 +399,7 @@ static void pulse_delay(void)
     tuned_delay = awareness_adjust_delay(tuned_delay);
     tuned_delay *= metabolic_delay_scale();
     tuned_delay *= symbiosis_delay_scale();
+    tuned_delay *= empathic_delay_scale();
 
     const double min_delay = 0.03;
     const double max_delay = 0.25;
@@ -508,6 +545,8 @@ static void exhale(const kernel_options *opts)
     float human_metabolic_intake = 0.0f;
     float human_metabolic_output = 0.0f;
     bool human_bridge_active = opts && opts->human_bridge_enabled;
+    EmpathicResponse empathic_response = {0};
+    bool empathic_layer_active = opts && opts->empathic_enabled;
 
     if (human_bridge_active) {
         float liminal_frequency = resonance_avg / 12.0f;
@@ -542,6 +581,13 @@ static void exhale(const kernel_options *opts)
         human_metabolic_output = (1.0f - human_alignment) * 0.10f;
     }
 
+    if (empathic_layer_active) {
+        float alignment_hint = human_bridge_active ? human_alignment : stability;
+        float resonance_hint = clamp_unit(resonance_avg / 12.0f);
+        empathic_response = empathic_step(opts->target_coherence, alignment_hint, resonance_hint);
+        coherence_set_target(empathic_response.target_coherence);
+    }
+
     char note[64];
     if (active_count == 0) {
         strcpy(note, "listening for symbols");
@@ -572,6 +618,10 @@ static void exhale(const kernel_options *opts)
         }
     }
     float reflection_energy = stability * 0.4f + human_reflection_boost;
+    if (empathic_layer_active) {
+        awareness_energy = clamp_unit(awareness_energy + (empathic_response.field.warmth - 0.5f) * 0.08f);
+        reflection_energy = clamp_unit(reflection_energy + (0.5f - empathic_response.field.tension) * 0.05f);
+    }
     float dream_cost = dream_active ? 0.3f : 0.1f;
     float rebirth_cost = 0.0f;
 
@@ -616,6 +666,9 @@ static void exhale(const kernel_options *opts)
         coherence_update(energy_avg, resonance_avg, stability, awareness_snapshot.awareness_level);
 
     float coherence_level = coherence_field ? coherence_field->coherence : 0.0f;
+    if (empathic_layer_active) {
+        coherence_level = empathic_apply_coherence(coherence_level);
+    }
     dream_update(coherence_level, awareness_snapshot.awareness_level);
 
     if (opts && opts->show_symbols) {
@@ -650,7 +703,7 @@ static void exhale(const kernel_options *opts)
         }
         int delay_whole = (int)(delay_ms + 0.5);
         printf("coh=%.2f | energy=%.2f | res=%.2f | stab=%.2f | aware=%.2f | delay=%dms\n",
-               coherence_field->coherence,
+               coherence_level,
                coherence_field->energy_smooth,
                coherence_field->resonance_smooth,
                coherence_field->stability_avg,
@@ -775,6 +828,8 @@ int main(int argc, char **argv)
     metabolic_enable(opts.metabolic_enabled);
     metabolic_enable_trace(opts.metabolic_trace);
     metabolic_set_thresholds(opts.vitality_rest_threshold, opts.vitality_creative_threshold);
+    empathic_init(opts.emotional_source, opts.empathic_trace, opts.empathy_gain);
+    empathic_enable(opts.empathic_enabled);
     symbiosis_init(opts.human_source, opts.human_trace, opts.human_resonance_gain);
     symbiosis_enable(opts.human_bridge_enabled);
     uint64_t pulses = 0;
@@ -788,13 +843,16 @@ int main(int argc, char **argv)
             AwarenessState awareness_snapshot = awareness_state();
             double delay_seconds = coherence_last_delay();
             float coherence_value = 0.0f;
-            if (field) {
-                coherence_value = field->coherence;
-            }
-            health_scan_step(pulses + 1,
-                             coherence_value,
-                             (float)delay_seconds,
-                             awareness_snapshot.drift);
+        if (field) {
+            coherence_value = field->coherence;
+        }
+        if (opts.empathic_enabled) {
+            coherence_value = empathic_coherence_value(coherence_value);
+        }
+        health_scan_step(pulses + 1,
+                         coherence_value,
+                         (float)delay_seconds,
+                         awareness_snapshot.drift);
         }
         ++pulses;
     }
