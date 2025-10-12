@@ -17,6 +17,7 @@
 #include "awareness.h"
 #include "council.h"
 #include "coherence.h"
+#include "alignment_balancer.h"
 #include "health_scan.h"
 #include "weave.h"
 #include "dream.h"
@@ -671,6 +672,7 @@ static void exhale(const kernel_options *opts)
 
     const DreamState *dream_snapshot = dream_state();
     bool dream_active = dream_snapshot && dream_snapshot->active;
+    float dream_sync_ratio = dream_snapshot ? dream_snapshot->sync_ratio : 0.5f;
     float awareness_energy = awareness_snapshot.awareness_level * 0.6f;
     if (human_bridge_active) {
         awareness_energy += (human_resonance_level - 0.5f) * 0.12f;
@@ -684,7 +686,7 @@ static void exhale(const kernel_options *opts)
         reflection_energy = clamp_unit(reflection_energy + (0.5f - empathic_response.field.tension) * 0.05f);
         awareness_energy = clamp_unit(awareness_energy + (empathic_response.field.anticipation - 0.5f) * 0.06f); // merged by Codex
     }
-    float dream_cost = dream_active ? 0.3f : 0.1f;
+    float dream_cost = dream_active ? (0.18f + dream_sync_ratio * 0.18f) : 0.1f;
     float rebirth_cost = 0.0f;
 
     float metabolic_intake = awareness_energy + reflection_energy + human_metabolic_intake;
@@ -697,14 +699,15 @@ static void exhale(const kernel_options *opts)
         awareness_snapshot.awareness_level = clamp_unit(awareness_snapshot.awareness_level + awareness_bias);
     }
 
+    const CoherenceField *previous_field = coherence_state();
+    float previous_coherence = previous_field ? previous_field->coherence : 0.0f;
+
     InnerCouncil council = {0};
     bool council_active = false;
-    float pid_scale = 1.0f;
     if (opts) {
         council_active = opts->council_enabled || opts->council_log;
         if (council_active) {
-            const CoherenceField *previous_field = coherence_state();
-            float coherence_level = previous_field ? previous_field->coherence : 0.0f;
+            float coherence_level = previous_coherence;
             const HealthScan *health_snapshot = health_scan_state();
             float health_drift = health_snapshot ? health_snapshot->drift_avg : 0.0f;
             council = council_update(stability,
@@ -712,16 +715,24 @@ static void exhale(const kernel_options *opts)
                                      coherence_level,
                                      health_drift,
                                      opts->council_threshold);
-            if (opts->council_enabled) {
-                pid_scale = 1.0f + council.final_decision * 0.1f;
-            }
         }
     }
 
+    float current_target = coherence_target();
+    const AlignmentBalance *alignment = alignment_balancer_update(council_active ? &council : NULL,
+                                                                  dream_snapshot,
+                                                                  awareness_snapshot.awareness_level,
+                                                                  previous_coherence,
+                                                                  current_target);
+
+    float pid_scale = alignment ? alignment->pid_scale : 1.0f;
     if (!isfinite(pid_scale) || pid_scale <= 0.0f) {
         pid_scale = 1.0f;
     }
 
+    if (alignment) {
+        coherence_set_target(alignment->coherence_target);
+    }
     coherence_set_pid_scale(pid_scale);
 
     float resonance_for_coherence = resonance_avg;
@@ -751,7 +762,7 @@ static void exhale(const kernel_options *opts)
     if (empathic_layer_active) {
         coherence_level = empathic_apply_coherence(coherence_level);
     }
-    dream_update(coherence_level, awareness_snapshot.awareness_level);
+    dream_update(coherence_level, awareness_snapshot.awareness_level, alignment);
 
     if (opts && opts->show_symbols) {
         if (activated == 0) {
@@ -784,12 +795,14 @@ static void exhale(const kernel_options *opts)
             delay_ms = 0.0;
         }
         int delay_whole = (int)(delay_ms + 0.5);
-        printf("coh=%.2f | energy=%.2f | res=%.2f | stab=%.2f | aware=%.2f | delay=%dms\n",
+        printf("coh=%.2f | energy=%.2f | res=%.2f | stab=%.2f | aware=%.2f | target=%.2f | pid=%.2f | delay=%dms\n",
                coherence_level,
                coherence_field->energy_smooth,
                coherence_field->resonance_smooth,
                coherence_field->stability_avg,
                coherence_field->awareness_level,
+               coherence_field->target_level,
+               coherence_field->pid_scale,
                delay_whole);
     }
 
@@ -811,6 +824,16 @@ static void exhale(const kernel_options *opts)
                council.coherence_vote,
                council.health_vote,
                council.final_decision);
+    }
+
+    if (alignment && opts && (opts->council_log || opts->dream_log)) {
+        printf("balancer: pid=%.2f thr=%.2f sync=%.2f target=%.2f | council=%+.2f sleep=%+.2f\n",
+               alignment->pid_scale,
+               alignment->dream_threshold,
+               alignment->dream_sync,
+               alignment->coherence_target,
+               alignment->council_signal,
+               alignment->dream_signal);
     }
 
     if (opts && opts->enable_sync) {
@@ -881,6 +904,7 @@ int main(int argc, char **argv)
     bus_register_sensor(SENSOR_EXHALE);
     symbol_layer_init();
     dream_init();
+    alignment_balancer_init(opts.dream_threshold, opts.target_coherence);
     metabolic_init();
     awareness_init();
     awareness_set_auto_tune(opts.auto_tune);
@@ -905,6 +929,7 @@ int main(int argc, char **argv)
     }
 
     dream_set_entry_threshold(opts.dream_threshold);
+    alignment_balancer_set_base(dream_state()->entry_threshold, coherence_target());
     dream_enable_logging(opts.dream_log);
     dream_enable(opts.dream_enabled);
     metabolic_enable(opts.metabolic_enabled);

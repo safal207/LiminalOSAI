@@ -7,11 +7,15 @@
 extern "C" {
 #endif
 
-typedef struct {
+struct AlignmentBalance;
+
+typedef struct DreamState {
     bool active;
     int cycle_count;
     float entry_threshold;
     float dream_intensity;
+    float aligned_threshold;
+    float sync_ratio;
 } DreamState;
 
 void dream_init(void);
@@ -23,7 +27,7 @@ const DreamState *dream_state(void);
 void dream_enter(void);
 void dream_iterate(void);
 void dream_exit(void);
-void dream_update(float coherence, float awareness_level);
+void dream_update(float coherence, float awareness_level, const struct AlignmentBalance *alignment);
 
 #ifdef __cplusplus
 }

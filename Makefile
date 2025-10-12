@@ -4,7 +4,7 @@ LDFLAGS := -lm
 TARGET  := build/pulse_kernel
 SUBSTRATE_TARGET := build/liminal_core
 
-CORE_SRCS   := core/pulse_kernel.c
+CORE_SRCS   := core/pulse_kernel.c core/alignment_balancer.c
 SUBSTRATE_SRCS := core/liminal_substrate.c empathic/field.c memory/emotion_memory.c
 MEM_SRCS    := memory/soil.c memory/emotion_memory.c
 BUS_SRCS    := bus/resonant.c

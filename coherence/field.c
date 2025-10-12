@@ -102,11 +102,15 @@ void coherence_init(void)
     climate_logging = false;
     pulse_counter = 0UL;
     last_adjust = 0.0f;
+    pid_scale_factor = 1.0f;
+    field_state.target_level = target_level;
+    field_state.pid_scale = pid_scale_factor;
 }
 
 void coherence_set_target(float target)
 {
     target_level = clamp01(target);
+    field_state.target_level = target_level;
 }
 
 float coherence_target(void)
@@ -151,6 +155,7 @@ void coherence_set_pid_scale(float scale)
 {
     if (!isfinite(scale) || scale <= 0.0f) {
         pid_scale_factor = 1.0f;
+        field_state.pid_scale = pid_scale_factor;
         return;
     }
     if (scale < 0.2f) {
@@ -159,6 +164,7 @@ void coherence_set_pid_scale(float scale)
         scale = 2.0f;
     }
     pid_scale_factor = scale;
+    field_state.pid_scale = pid_scale_factor;
 }
 
 const CoherenceField *coherence_update(float energy_avg,
@@ -221,6 +227,9 @@ const CoherenceField *coherence_update(float energy_avg,
     delay_scale = scale;
 
     awareness_set_coherence_scale(delay_scale);
+
+    field_state.target_level = target_level;
+    field_state.pid_scale = pid_scale_factor;
 
     if (field_state.coherence < 0.5f) {
         emit_wave("soothe", 0.5f - field_state.coherence);

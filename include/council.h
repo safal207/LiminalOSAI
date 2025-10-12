@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-typedef struct {
+typedef struct InnerCouncil {
     float reflection_vote;
     float awareness_vote;
     float coherence_vote;

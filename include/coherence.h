@@ -9,6 +9,8 @@ typedef struct {
     float stability_avg;
     float awareness_level;
     float coherence;
+    float target_level;
+    float pid_scale;
 } CoherenceField;
 
 void coherence_init(void);
