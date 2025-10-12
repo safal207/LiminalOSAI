@@ -18,6 +18,7 @@
 #include "council.h"
 #include "coherence.h"
 #include "health_scan.h"
+#include "weave.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -39,10 +40,15 @@ typedef struct {
     bool health_report;
     bool council_enabled;
     bool council_log;
+    bool enable_sync;
+    bool sync_trace;
     uint64_t limit;
     uint32_t scan_interval;
     float target_coherence;
     float council_threshold;
+    int phase_count;
+    float phase_shift_deg[WEAVE_MODULE_COUNT];
+    bool phase_shift_set[WEAVE_MODULE_COUNT];
 } kernel_options;
 
 static size_t bounded_string_length(const uint8_t *data, size_t max_len)
@@ -68,11 +74,19 @@ static kernel_options parse_options(int argc, char **argv)
         .health_report = false,
         .council_enabled = false,
         .council_log = false,
+        .enable_sync = false,
+        .sync_trace = false,
         .limit = 0,
         .scan_interval = 10U,
         .target_coherence = 0.80f,
-        .council_threshold = 0.05f
+        .council_threshold = 0.05f,
+        .phase_count = 8
     };
+
+    for (size_t i = 0; i < weave_module_count(); ++i) {
+        opts.phase_shift_deg[i] = 0.0f;
+        opts.phase_shift_set[i] = false;
+    }
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -145,6 +159,54 @@ static kernel_options parse_options(int argc, char **argv)
                         parsed = 1.0f;
                     }
                     opts.council_threshold = parsed;
+                }
+            }
+        } else if (strcmp(arg, "--sync") == 0) {
+            opts.enable_sync = true;
+        } else if (strncmp(arg, "--phases=", 9) == 0) {
+            const char *value = arg + 9;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value) {
+                    if (parsed < 4) {
+                        parsed = 4;
+                    } else if (parsed > 16) {
+                        parsed = 16;
+                    }
+                    opts.phase_count = (int)parsed;
+                }
+            }
+        } else if (strcmp(arg, "--sync-trace") == 0) {
+            opts.sync_trace = true;
+        } else if (strncmp(arg, "--phase-shift=", 14) == 0) {
+            const char *value = arg + 14;
+            const char *sep = strchr(value, ':');
+            if (sep && sep != value) {
+                char module_name[32];
+                size_t len = (size_t)(sep - value);
+                if (len >= sizeof(module_name)) {
+                    len = sizeof(module_name) - 1;
+                }
+                memcpy(module_name, value, len);
+                module_name[len] = '\0';
+                int module_index = weave_module_lookup(module_name);
+                if (module_index >= 0) {
+                    const char *deg_text = sep + 1;
+                    if (*deg_text) {
+                        char *end = NULL;
+                        float degrees = strtof(deg_text, &end);
+                        if (end != deg_text) {
+                            while (degrees < 0.0f) {
+                                degrees += 360.0f;
+                            }
+                            while (degrees >= 360.0f) {
+                                degrees -= 360.0f;
+                            }
+                            opts.phase_shift_deg[module_index] = degrees;
+                            opts.phase_shift_set[module_index] = true;
+                        }
+                    }
                 }
             }
         }
@@ -402,6 +464,38 @@ static void exhale(const kernel_options *opts)
                council.final_decision);
     }
 
+    if (opts && opts->enable_sync) {
+        weave_next_phase();
+        if (opts->sync_trace) {
+            char trace_line[160];
+            weave_trace_line(trace_line, sizeof(trace_line));
+            fputs(trace_line, stdout);
+        }
+        if (weave_should_emit_echo()) {
+            char echo_data[SOIL_TRACE_DATA_SIZE];
+            int phase_index = weave_current_phase_index() + 1;
+            float sync_quality = weave_sync_quality();
+            float drift = weave_current_drift();
+            float latency_ms = weave_current_latency();
+            int written = snprintf(echo_data,
+                                   sizeof(echo_data),
+                                   "sync: p=%d s=%.2f d=%.2f l=%.1f",
+                                   phase_index,
+                                   sync_quality,
+                                   drift,
+                                   latency_ms);
+            if (written < 0) {
+                written = 0;
+            } else if (written >= (int)sizeof(echo_data)) {
+                written = (int)sizeof(echo_data) - 1;
+                echo_data[written] = '\0';
+            }
+            soil_trace echo = soil_trace_make(ENERGY_EXHALE, echo_data, (size_t)written);
+            soil_write(&echo);
+            weave_mark_echo_emitted();
+        }
+    }
+
     fputs("exhale\n", stdout);
 }
 
@@ -450,6 +544,14 @@ int main(int argc, char **argv)
     }
     council_init();
     council_summon();
+    if (opts.enable_sync) {
+        weave_init(opts.phase_count);
+        for (size_t i = 0; i < weave_module_count(); ++i) {
+            if (opts.phase_shift_set[i]) {
+                weave_set_phase_shift(i, opts.phase_shift_deg[i]);
+            }
+        }
+    }
     uint64_t pulses = 0;
     while (!opts.limit || pulses < opts.limit) {
         inhale();
