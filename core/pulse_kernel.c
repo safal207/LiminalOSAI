@@ -20,6 +20,7 @@
 #include "health_scan.h"
 #include "weave.h"
 #include "dream.h"
+#include "metabolic.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -45,6 +46,8 @@ typedef struct {
     bool sync_trace;
     bool dream_enabled;
     bool dream_log;
+    bool metabolic_enabled;
+    bool metabolic_trace;
     uint64_t limit;
     uint32_t scan_interval;
     float target_coherence;
@@ -53,6 +56,8 @@ typedef struct {
     float phase_shift_deg[WEAVE_MODULE_COUNT];
     bool phase_shift_set[WEAVE_MODULE_COUNT];
     float dream_threshold;
+    float vitality_rest_threshold;
+    float vitality_creative_threshold;
 } kernel_options;
 
 static size_t bounded_string_length(const uint8_t *data, size_t max_len)
@@ -82,12 +87,16 @@ static kernel_options parse_options(int argc, char **argv)
         .sync_trace = false,
         .dream_enabled = false,
         .dream_log = false,
+        .metabolic_enabled = false,
+        .metabolic_trace = false,
         .limit = 0,
         .scan_interval = 10U,
         .target_coherence = 0.80f,
         .council_threshold = 0.05f,
         .phase_count = 8,
-        .dream_threshold = 0.90f
+        .dream_threshold = 0.90f,
+        .vitality_rest_threshold = 0.30f,
+        .vitality_creative_threshold = 0.90f
     };
 
     for (size_t i = 0; i < weave_module_count(); ++i) {
@@ -204,6 +213,48 @@ static kernel_options parse_options(int argc, char **argv)
                     opts.dream_threshold = parsed;
                 }
             }
+        } else if (strcmp(arg, "--metabolic") == 0) {
+            opts.metabolic_enabled = true;
+        } else if (strcmp(arg, "--metabolic-trace") == 0) {
+            opts.metabolic_trace = true;
+        } else if (strncmp(arg, "--vitality-threshold=", 21) == 0) {
+            const char *value = arg + 21;
+            if (*value) {
+                char *end = NULL;
+                float rest = strtof(value, &end);
+                if (end != value) {
+                    float creative = opts.vitality_creative_threshold;
+                    if (*end == ':' || *end == ',') {
+                        const char *second = end + 1;
+                        if (*second) {
+                            char *end_high = NULL;
+                            float parsed_high = strtof(second, &end_high);
+                            if (end_high != second) {
+                                creative = parsed_high;
+                            }
+                        }
+                    }
+                    if (rest < 0.0f) {
+                        rest = 0.0f;
+                    } else if (rest > 0.95f) {
+                        rest = 0.95f;
+                    }
+                    if (creative < rest) {
+                        creative = rest;
+                    }
+                    if (creative > 1.0f) {
+                        creative = 1.0f;
+                    }
+                    if ((creative - rest) < 0.10f) {
+                        creative = rest + 0.10f;
+                        if (creative > 1.0f) {
+                            creative = 1.0f;
+                        }
+                    }
+                    opts.vitality_rest_threshold = rest;
+                    opts.vitality_creative_threshold = creative;
+                }
+            }
         } else if (strncmp(arg, "--phase-shift=", 14) == 0) {
             const char *value = arg + 14;
             const char *sep = strchr(value, ':');
@@ -256,6 +307,7 @@ static void pulse_delay(void)
     const double base_delay = 0.1;
     double tuned_delay = base_delay * coherence_delay_scale();
     tuned_delay = awareness_adjust_delay(tuned_delay);
+    tuned_delay *= metabolic_delay_scale();
 
     const double min_delay = 0.03;
     const double max_delay = 0.25;
@@ -410,6 +462,17 @@ static void exhale(const kernel_options *opts)
     awareness_update(resonance_avg, stability);
     AwarenessState awareness_snapshot = awareness_state();
 
+    const DreamState *dream_snapshot = dream_state();
+    bool dream_active = dream_snapshot && dream_snapshot->active;
+    float awareness_energy = awareness_snapshot.awareness_level * 0.6f;
+    float reflection_energy = stability * 0.4f;
+    float dream_cost = dream_active ? 0.3f : 0.1f;
+    float rebirth_cost = 0.0f;
+
+    metabolic_step(awareness_energy + reflection_energy, dream_cost + rebirth_cost);
+    stability = metabolic_adjust_stability(stability);
+    awareness_snapshot.awareness_level = metabolic_adjust_awareness(awareness_snapshot.awareness_level);
+
     InnerCouncil council = {0};
     bool council_active = false;
     float pid_scale = 1.0f;
@@ -560,6 +623,7 @@ int main(int argc, char **argv)
     bus_register_sensor(SENSOR_EXHALE);
     symbol_layer_init();
     dream_init();
+    metabolic_init();
     awareness_init();
     awareness_set_auto_tune(opts.auto_tune);
     coherence_init();
@@ -585,6 +649,9 @@ int main(int argc, char **argv)
     dream_set_entry_threshold(opts.dream_threshold);
     dream_enable_logging(opts.dream_log);
     dream_enable(opts.dream_enabled);
+    metabolic_enable(opts.metabolic_enabled);
+    metabolic_enable_trace(opts.metabolic_trace);
+    metabolic_set_thresholds(opts.vitality_rest_threshold, opts.vitality_creative_threshold);
     uint64_t pulses = 0;
     while (!opts.limit || pulses < opts.limit) {
         inhale();
@@ -614,6 +681,8 @@ int main(int argc, char **argv)
     if (opts.show_reflections) {
         reflect_dump(10);
     }
+
+    metabolic_shutdown();
 
     return 0;
 }
