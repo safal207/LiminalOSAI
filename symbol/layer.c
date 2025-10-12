@@ -4,6 +4,7 @@
 #include "soil.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -11,6 +12,9 @@
 #define SYMBOL_TABLE_CAPACITY 256
 #define SYMBOL_TRACE_WINDOW   6
 #define SYMBOL_SENSOR_ID      7
+
+#define SYMBOL_RESONANCE_STABLE_THRESHOLD 0.9f
+#define SYMBOL_STABILITY_PULSES          3U
 
 typedef struct {
     const char *key;
@@ -24,6 +28,9 @@ static size_t symbol_count = 0;
 
 static Symbol *current_active[SYMBOL_TABLE_CAPACITY];
 static size_t current_active_count = 0;
+
+static uint8_t symbol_stability[SYMBOL_TABLE_CAPACITY];
+static bool symbol_manifested[SYMBOL_TABLE_CAPACITY];
 
 static const symbol_pattern pattern_table[] = {
     { "breath_cycle",    { 3U, 5U, 2U }, 3U, 1.5f },
@@ -41,10 +48,44 @@ static bool symbol_is_active(const Symbol *symbol)
     return false;
 }
 
-static void symbol_record_activation(Symbol *symbol, float impulse)
+static size_t symbol_index(const Symbol *symbol)
 {
     if (!symbol) {
+        return SYMBOL_TABLE_CAPACITY;
+    }
+
+    ptrdiff_t offset = symbol - symbol_table;
+    if (offset < 0 || (size_t)offset >= SYMBOL_TABLE_CAPACITY) {
+        return SYMBOL_TABLE_CAPACITY;
+    }
+
+    return (size_t)offset;
+}
+
+static bool symbol_is_manifested(size_t index)
+{
+    return index < SYMBOL_TABLE_CAPACITY && symbol_manifested[index];
+}
+
+static void symbol_reset_stability(size_t index)
+{
+    if (index >= SYMBOL_TABLE_CAPACITY) {
         return;
+    }
+
+    symbol_stability[index] = 0U;
+    symbol_manifested[index] = false;
+}
+
+static bool symbol_record_activation(Symbol *symbol, float impulse)
+{
+    if (!symbol) {
+        return false;
+    }
+
+    size_t index = symbol_index(symbol);
+    if (index >= SYMBOL_TABLE_CAPACITY) {
+        return false;
     }
 
     symbol->energy += impulse;
@@ -57,9 +98,27 @@ static void symbol_record_activation(Symbol *symbol, float impulse)
         symbol->resonance = 12.0f;
     }
 
-    if (!symbol_is_active(symbol) && current_active_count < SYMBOL_TABLE_CAPACITY) {
+    bool reached_stability = false;
+    if (symbol->resonance >= SYMBOL_RESONANCE_STABLE_THRESHOLD) {
+        if (symbol_stability[index] < UINT8_MAX) {
+            ++symbol_stability[index];
+        }
+
+        if (symbol_stability[index] >= SYMBOL_STABILITY_PULSES) {
+            if (!symbol_manifested[index]) {
+                reached_stability = true;
+            }
+            symbol_manifested[index] = true;
+        }
+    } else {
+        symbol_reset_stability(index);
+    }
+
+    if (symbol_is_manifested(index) && !symbol_is_active(symbol) && current_active_count < SYMBOL_TABLE_CAPACITY) {
         current_active[current_active_count++] = symbol;
     }
+
+    return reached_stability;
 }
 
 static bool match_pattern(const symbol_pattern *pattern, const soil_trace *traces, size_t trace_count)
@@ -151,6 +210,10 @@ void symbol_register(const char *key, float resonance)
     if (existing) {
         existing->resonance = resonance;
         existing->energy = 0.0f;
+        size_t index = symbol_index(existing);
+        if (index < SYMBOL_TABLE_CAPACITY) {
+            symbol_reset_stability(index);
+        }
         return;
     }
 
@@ -164,6 +227,9 @@ void symbol_register(const char *key, float resonance)
     slot->key[sizeof(slot->key) - 1] = '\0';
     slot->resonance = resonance;
     slot->energy = 0.0f;
+
+    size_t new_index = symbol_index(slot);
+    symbol_reset_stability(new_index);
 }
 
 Symbol *symbol_find(const char *key)
@@ -197,6 +263,10 @@ void symbol_decay(void)
         if (symbol_table[i].energy < 0.01f) {
             symbol_table[i].energy = 0.0f;
         }
+
+        if (symbol_table[i].resonance < SYMBOL_RESONANCE_STABLE_THRESHOLD * 0.5f) {
+            symbol_reset_stability(i);
+        }
     }
 }
 
@@ -206,6 +276,8 @@ void symbol_layer_init(void)
     memset(current_active, 0, sizeof(current_active));
     symbol_count = 0;
     current_active_count = 0;
+    memset(symbol_stability, 0, sizeof(symbol_stability));
+    memset(symbol_manifested, 0, sizeof(symbol_manifested));
 
     for (size_t i = 0; i < sizeof(pattern_table) / sizeof(pattern_table[0]); ++i) {
         symbol_register(pattern_table[i].key, 0.4f);
@@ -230,8 +302,9 @@ size_t symbol_layer_pulse(void)
 
         if (match_pattern(pattern, window, trace_count)) {
             Symbol *symbol = symbol_find(pattern->key);
-            symbol_record_activation(symbol, pattern->impulse);
-            write_semantic_echo(symbol);
+            if (symbol && symbol_record_activation(symbol, pattern->impulse)) {
+                write_semantic_echo(symbol);
+            }
         }
     }
 
