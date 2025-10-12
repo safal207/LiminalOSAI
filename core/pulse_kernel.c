@@ -727,13 +727,18 @@ static void exhale(const kernel_options *opts)
     float resonance_for_coherence = resonance_avg;
     float stability_for_coherence = stability;
     float awareness_for_coherence = awareness_snapshot.awareness_level;
+    float anticipation_level = 0.5f;
+    float anticipation_micro = 0.5f;
+    float anticipation_trend = 0.5f;
+    bool anticipation_from_empathic = false;
     if (empathic_layer_active) {
-        float anticipation_level = empathic_response.anticipation_level;
-        float micro_signal = empathic_response.micro_pattern_signal;
-        float trend_signal = empathic_response.prediction_trend;
+        anticipation_level = clamp_unit(empathic_response.anticipation_level);
+        anticipation_micro = clamp_unit(empathic_response.micro_pattern_signal);
+        anticipation_trend = clamp_unit(empathic_response.prediction_trend);
+        anticipation_from_empathic = true;
         float anticipation_bias = (anticipation_level - 0.5f) * 2.0f;
-        float micro_bias = (micro_signal - 0.5f) * 1.2f;
-        float trend_bias = (trend_signal - 0.5f) * 1.5f;
+        float micro_bias = (anticipation_micro - 0.5f) * 1.2f;
+        float trend_bias = (anticipation_trend - 0.5f) * 1.5f;
         resonance_for_coherence += (anticipation_bias + micro_bias + trend_bias); // merged by Codex
         if (resonance_for_coherence < 0.0f) {
             resonance_for_coherence = 0.0f;
@@ -741,7 +746,7 @@ static void exhale(const kernel_options *opts)
             resonance_for_coherence = 12.0f;
         }
         stability_for_coherence = clamp_unit(stability + (anticipation_level - 0.5f) * 0.12f);
-        awareness_for_coherence = clamp_unit(awareness_snapshot.awareness_level + (trend_signal - 0.5f) * 0.10f);
+        awareness_for_coherence = clamp_unit(awareness_snapshot.awareness_level + (anticipation_trend - 0.5f) * 0.10f);
     }
 
     const CoherenceField *coherence_field =
@@ -751,7 +756,42 @@ static void exhale(const kernel_options *opts)
     if (empathic_layer_active) {
         coherence_level = empathic_apply_coherence(coherence_level);
     }
-    dream_update(coherence_level, awareness_snapshot.awareness_level);
+    if (!empathic_layer_active) {
+        anticipation_level = clamp_unit(coherence_level);
+        anticipation_micro = clamp_unit(resonance_for_coherence / 12.0f);
+        anticipation_trend = clamp_unit(stability_for_coherence);
+    }
+
+    if (empathic_layer_active) {
+        char dream_feed_trace[SOIL_TRACE_DATA_SIZE];
+        int written = snprintf(dream_feed_trace,
+                               sizeof(dream_feed_trace),
+                               "dream_feed ant=%.2f/%.2f/%.2f",
+                               anticipation_level,
+                               anticipation_micro,
+                               anticipation_trend);
+        if (written > 0) {
+            size_t feed_len = strlen(dream_feed_trace);
+            soil_trace feed = soil_trace_make(2U, dream_feed_trace, feed_len);
+            soil_write(&feed);
+        }
+    }
+
+    if (opts && opts->dream_log) {
+        printf("dream_feed: coh=%.2f aware=%.2f ant=%.2f micro=%.2f trend=%.2f%s\n",
+               coherence_level,
+               awareness_snapshot.awareness_level,
+               anticipation_level,
+               anticipation_micro,
+               anticipation_trend,
+               anticipation_from_empathic ? "" : " (baseline)");
+    }
+
+    dream_update(coherence_level,
+                 awareness_snapshot.awareness_level,
+                 anticipation_level,
+                 anticipation_micro,
+                 anticipation_trend);
 
     if (opts && opts->show_symbols) {
         if (activated == 0) {
