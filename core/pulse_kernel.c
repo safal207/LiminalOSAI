@@ -19,6 +19,7 @@
 #include "coherence.h"
 #include "health_scan.h"
 #include "weave.h"
+#include "dream.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -42,6 +43,8 @@ typedef struct {
     bool council_log;
     bool enable_sync;
     bool sync_trace;
+    bool dream_enabled;
+    bool dream_log;
     uint64_t limit;
     uint32_t scan_interval;
     float target_coherence;
@@ -49,6 +52,7 @@ typedef struct {
     int phase_count;
     float phase_shift_deg[WEAVE_MODULE_COUNT];
     bool phase_shift_set[WEAVE_MODULE_COUNT];
+    float dream_threshold;
 } kernel_options;
 
 static size_t bounded_string_length(const uint8_t *data, size_t max_len)
@@ -76,11 +80,14 @@ static kernel_options parse_options(int argc, char **argv)
         .council_log = false,
         .enable_sync = false,
         .sync_trace = false,
+        .dream_enabled = false,
+        .dream_log = false,
         .limit = 0,
         .scan_interval = 10U,
         .target_coherence = 0.80f,
         .council_threshold = 0.05f,
-        .phase_count = 8
+        .phase_count = 8,
+        .dream_threshold = 0.90f
     };
 
     for (size_t i = 0; i < weave_module_count(); ++i) {
@@ -179,6 +186,24 @@ static kernel_options parse_options(int argc, char **argv)
             }
         } else if (strcmp(arg, "--sync-trace") == 0) {
             opts.sync_trace = true;
+        } else if (strcmp(arg, "--dream") == 0) {
+            opts.dream_enabled = true;
+        } else if (strcmp(arg, "--dream-log") == 0) {
+            opts.dream_log = true;
+        } else if (strncmp(arg, "--dream-threshold=", 18) == 0) {
+            const char *value = arg + 18;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    opts.dream_threshold = parsed;
+                }
+            }
         } else if (strncmp(arg, "--phase-shift=", 14) == 0) {
             const char *value = arg + 14;
             const char *sep = strchr(value, ':');
@@ -415,6 +440,9 @@ static void exhale(const kernel_options *opts)
     const CoherenceField *coherence_field =
         coherence_update(energy_avg, resonance_avg, stability, awareness_snapshot.awareness_level);
 
+    float coherence_level = coherence_field ? coherence_field->coherence : 0.0f;
+    dream_update(coherence_level, awareness_snapshot.awareness_level);
+
     if (opts && opts->show_symbols) {
         if (activated == 0) {
             fputs("symbols: (quiet)\n", stdout);
@@ -531,6 +559,7 @@ int main(int argc, char **argv)
     bus_register_sensor(SENSOR_REFLECT);
     bus_register_sensor(SENSOR_EXHALE);
     symbol_layer_init();
+    dream_init();
     awareness_init();
     awareness_set_auto_tune(opts.auto_tune);
     coherence_init();
@@ -552,6 +581,10 @@ int main(int argc, char **argv)
             }
         }
     }
+
+    dream_set_entry_threshold(opts.dream_threshold);
+    dream_enable_logging(opts.dream_log);
+    dream_enable(opts.dream_enabled);
     uint64_t pulses = 0;
     while (!opts.limit || pulses < opts.limit) {
         inhale();

@@ -12,6 +12,7 @@
 #define SYMBOL_TABLE_CAPACITY 256
 #define SYMBOL_TRACE_WINDOW   6
 #define SYMBOL_SENSOR_ID      7
+#define SYMBOL_LINK_CAPACITY  64
 
 #define SYMBOL_RESONANCE_STABLE_THRESHOLD 0.9f
 #define SYMBOL_STABILITY_PULSES          3U
@@ -31,6 +32,16 @@ static size_t current_active_count = 0;
 
 static uint8_t symbol_stability[SYMBOL_TABLE_CAPACITY];
 static bool symbol_manifested[SYMBOL_TABLE_CAPACITY];
+
+typedef struct {
+    char from_key[32];
+    char to_key[32];
+    float weight;
+} symbol_link_entry;
+
+static symbol_link_entry link_buffer[SYMBOL_LINK_CAPACITY];
+static size_t link_count = 0;
+static size_t link_cursor = 0;
 
 static const symbol_pattern pattern_table[] = {
     { "breath_cycle",    { 3U, 5U, 2U }, 3U, 1.5f },
@@ -270,6 +281,58 @@ void symbol_decay(void)
     }
 }
 
+void symbol_create_link(const char *from_key, const char *to_key, float weight)
+{
+    if (!from_key || !to_key || *from_key == '\0' || *to_key == '\0') {
+        return;
+    }
+
+    if (weight < 0.0f) {
+        weight = 0.0f;
+    }
+    if (weight > 1.0f) {
+        weight = 1.0f;
+    }
+
+    symbol_link_entry *entry = &link_buffer[link_cursor % SYMBOL_LINK_CAPACITY];
+    strncpy(entry->from_key, from_key, sizeof(entry->from_key) - 1U);
+    entry->from_key[sizeof(entry->from_key) - 1U] = '\0';
+    strncpy(entry->to_key, to_key, sizeof(entry->to_key) - 1U);
+    entry->to_key[sizeof(entry->to_key) - 1U] = '\0';
+    entry->weight = weight;
+
+    link_cursor = (link_cursor + 1U) % SYMBOL_LINK_CAPACITY;
+    if (link_count < SYMBOL_LINK_CAPACITY) {
+        ++link_count;
+    }
+
+    Symbol *from_symbol = symbol_find(from_key);
+    if (!from_symbol) {
+        symbol_register(from_key, 0.3f);
+        from_symbol = symbol_find(from_key);
+    }
+
+    Symbol *to_symbol = symbol_find(to_key);
+    if (!to_symbol) {
+        symbol_register(to_key, 0.3f);
+        to_symbol = symbol_find(to_key);
+    }
+
+    if (from_symbol) {
+        from_symbol->resonance += weight * 0.5f;
+        if (from_symbol->resonance > 12.0f) {
+            from_symbol->resonance = 12.0f;
+        }
+    }
+
+    if (to_symbol) {
+        to_symbol->resonance += weight * 0.5f;
+        if (to_symbol->resonance > 12.0f) {
+            to_symbol->resonance = 12.0f;
+        }
+    }
+}
+
 void symbol_layer_init(void)
 {
     memset(symbol_table, 0, sizeof(symbol_table));
@@ -278,6 +341,9 @@ void symbol_layer_init(void)
     current_active_count = 0;
     memset(symbol_stability, 0, sizeof(symbol_stability));
     memset(symbol_manifested, 0, sizeof(symbol_manifested));
+    memset(link_buffer, 0, sizeof(link_buffer));
+    link_count = 0;
+    link_cursor = 0;
 
     for (size_t i = 0; i < sizeof(pattern_table) / sizeof(pattern_table[0]); ++i) {
         symbol_register(pattern_table[i].key, 0.4f);
