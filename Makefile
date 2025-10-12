@@ -24,6 +24,11 @@ OBJS        := $(SRCS:.c=.o)
 SUBSTRATE_OBJS := $(SUBSTRATE_SRCS:.c=.o)
 ALL_OBJS    := $(OBJS) $(SUBSTRATE_OBJS)
 
+LONG_TRACE_DIR := diagnostics/traces
+LONG_TRACE_LOG := $(LONG_TRACE_DIR)/liminal_core_long_run.log
+LONG_TRACE_SUMMARY := $(LONG_TRACE_DIR)/liminal_core_long_run.txt
+LONG_TRACE_JSON := $(LONG_TRACE_DIR)/liminal_core_long_run.json
+
 all: $(TARGET) $(SUBSTRATE_TARGET)
 
 $(TARGET): $(OBJS)
@@ -40,7 +45,7 @@ $(SUBSTRATE_TARGET): $(SUBSTRATE_OBJS)
 clean:
 	rm -f $(ALL_OBJS) $(TARGET) $(SUBSTRATE_TARGET)
 
-.PHONY: all clean rebirth report report-metabolic
+.PHONY: all clean rebirth report report-metabolic long-run-diagnostics
 
 # --- Phoenix self-report integration ---
 
@@ -54,4 +59,11 @@ report:
 
 report-metabolic:
 	@python3 metabolic_report.py || echo "⚠️ Report skipped (no trace found)."
+
+long-run-diagnostics: $(SUBSTRATE_TARGET)
+	@mkdir -p $(LONG_TRACE_DIR)
+	@echo "🧪 Running liminal_core long-run diagnostic (60 cycles)..."
+	@bash -o pipefail -c '$(SUBSTRATE_TARGET) --substrate --limit=60 --trace --symbols --reflect --awareness --anticipation --dreamsync --sync 2>&1 | tee $(LONG_TRACE_LOG)'
+	@python3 diagnostics/liminal_trace_report.py --input $(LONG_TRACE_LOG) --output $(LONG_TRACE_SUMMARY) --json $(LONG_TRACE_JSON)
+	@echo "📄 Saved summary → $(LONG_TRACE_SUMMARY)"
 
