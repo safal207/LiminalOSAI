@@ -63,6 +63,9 @@ typedef struct {
     bool empathic_trace;
     EmpathicSource emotional_source;
     float empathy_gain;
+    bool recognition_field_enabled;
+    bool anticipation_trace;
+    int trend_window;
 } substrate_config;
 
 static void rebirth(liminal_state *state)
@@ -213,6 +216,9 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.empathic_trace = false;
     cfg.emotional_source = EMPATHIC_SOURCE_AUDIO;
     cfg.empathy_gain = 1.0f;
+    cfg.recognition_field_enabled = false;
+    cfg.anticipation_trace = false;
+    cfg.trend_window = EMPATHIC_RECOGNITION_WINDOW_DEFAULT;
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -281,6 +287,24 @@ static substrate_config parse_args(int argc, char **argv)
                         parsed = 3.5f;
                     }
                     cfg.empathy_gain = parsed;
+                }
+            }
+        } else if (strcmp(arg, "--recognition-field") == 0) {
+            cfg.recognition_field_enabled = true;
+        } else if (strcmp(arg, "--anticipation-trace") == 0) {
+            cfg.anticipation_trace = true;
+        } else if (strncmp(arg, "--trend-window=", 15) == 0) {
+            const char *value = arg + 15;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed > 0) {
+                    if (parsed < EMPATHIC_RECOGNITION_WINDOW_MIN) {
+                        parsed = EMPATHIC_RECOGNITION_WINDOW_MIN;
+                    } else if (parsed > EMPATHIC_RECOGNITION_WINDOW_MAX) {
+                        parsed = EMPATHIC_RECOGNITION_WINDOW_MAX;
+                    }
+                    cfg.trend_window = (int)parsed;
                 }
             }
         }
@@ -597,6 +621,9 @@ int main(int argc, char **argv)
 
     empathic_init(cfg.emotional_source, cfg.empathic_trace, cfg.empathy_gain);
     empathic_enable(cfg.empathic_enabled);
+    empathic_set_trend_window(cfg.trend_window);
+    empathic_recognition_enable(cfg.recognition_field_enabled);
+    empathic_recognition_trace(cfg.anticipation_trace);
 
     if (cfg.adaptive) {
         auto_adapt(&state, cfg.trace);

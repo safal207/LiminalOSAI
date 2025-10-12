@@ -58,6 +58,9 @@ typedef struct {
     bool empathic_trace;
     EmpathicSource emotional_source;
     float empathy_gain;
+    bool recognition_field_enabled;
+    bool anticipation_trace;
+    int trend_window;
     uint64_t limit;
     uint32_t scan_interval;
     float target_coherence;
@@ -118,6 +121,9 @@ static kernel_options parse_options(int argc, char **argv)
         .empathic_trace = false,
         .emotional_source = EMPATHIC_SOURCE_AUDIO,
         .empathy_gain = 1.0f,
+        .recognition_field_enabled = false,
+        .anticipation_trace = false,
+        .trend_window = EMPATHIC_RECOGNITION_WINDOW_DEFAULT,
         .limit = 0,
         .scan_interval = 10U,
         .target_coherence = 0.80f,
@@ -305,6 +311,24 @@ static kernel_options parse_options(int argc, char **argv)
                         parsed = 3.5f;
                     }
                     opts.empathy_gain = parsed;
+                }
+            }
+        } else if (strcmp(arg, "--recognition-field") == 0) {
+            opts.recognition_field_enabled = true;
+        } else if (strcmp(arg, "--anticipation-trace") == 0) {
+            opts.anticipation_trace = true;
+        } else if (strncmp(arg, "--trend-window=", 15) == 0) {
+            const char *value = arg + 15;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed > 0) {
+                    if (parsed < EMPATHIC_RECOGNITION_WINDOW_MIN) {
+                        parsed = EMPATHIC_RECOGNITION_WINDOW_MIN;
+                    } else if (parsed > EMPATHIC_RECOGNITION_WINDOW_MAX) {
+                        parsed = EMPATHIC_RECOGNITION_WINDOW_MAX;
+                    }
+                    opts.trend_window = (int)parsed;
                 }
             }
         } else if (strncmp(arg, "--vitality-threshold=", 21) == 0) {
@@ -603,6 +627,14 @@ static void exhale(const kernel_options *opts)
         strcpy(note, "seeking balance");
     }
 
+    if (empathic_layer_active && opts->recognition_field_enabled) {
+        if (empathic_response.anxiety_predicted) {
+            strcpy(note, "anticipating turbulence");
+        } else if (empathic_response.calm_predicted) {
+            strcpy(note, "anticipating calm expansion");
+        }
+    }
+
     reflect_log(energy_avg, resonance_avg, stability, note);
 
     awareness_update(resonance_avg, stability);
@@ -621,6 +653,20 @@ static void exhale(const kernel_options *opts)
     if (empathic_layer_active) {
         awareness_energy = clamp_unit(awareness_energy + (empathic_response.field.warmth - 0.5f) * 0.08f);
         reflection_energy = clamp_unit(reflection_energy + (0.5f - empathic_response.field.tension) * 0.05f);
+        if (opts->recognition_field_enabled) {
+            if (empathic_response.anxiety_predicted) {
+                awareness_energy = clamp_unit(awareness_energy * 0.94f);
+                float softness_boost = (0.35f - empathic_response.field.tension) * 0.12f;
+                if (softness_boost < 0.0f) {
+                    softness_boost = 0.0f;
+                }
+                reflection_energy = clamp_unit(reflection_energy + 0.05f + softness_boost);
+            } else if (empathic_response.calm_predicted) {
+                float harmony_lift = (empathic_response.field.harmony - 0.5f) * 0.08f;
+                awareness_energy = clamp_unit(awareness_energy + 0.05f + harmony_lift);
+                reflection_energy = clamp_unit(reflection_energy + 0.02f);
+            }
+        }
     }
     float dream_cost = dream_active ? 0.3f : 0.1f;
     float rebirth_cost = 0.0f;
@@ -830,6 +876,9 @@ int main(int argc, char **argv)
     metabolic_set_thresholds(opts.vitality_rest_threshold, opts.vitality_creative_threshold);
     empathic_init(opts.emotional_source, opts.empathic_trace, opts.empathy_gain);
     empathic_enable(opts.empathic_enabled);
+    empathic_set_trend_window(opts.trend_window);
+    empathic_recognition_enable(opts.recognition_field_enabled);
+    empathic_recognition_trace(opts.anticipation_trace);
     symbiosis_init(opts.human_source, opts.human_trace, opts.human_resonance_gain);
     symbiosis_enable(opts.human_bridge_enabled);
     uint64_t pulses = 0;

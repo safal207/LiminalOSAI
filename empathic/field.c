@@ -19,6 +19,19 @@
 #define EMPATHIC_ACK_TAG "empathic_ack"
 #endif
 
+#define RECOGNITION_WINDOW_MIN EMPATHIC_RECOGNITION_WINDOW_MIN
+#define RECOGNITION_WINDOW_MAX EMPATHIC_RECOGNITION_WINDOW_MAX
+#define RECOGNITION_WINDOW_DEFAULT EMPATHIC_RECOGNITION_WINDOW_DEFAULT
+
+typedef struct {
+    float tension[RECOGNITION_WINDOW_MAX];
+    float warmth[RECOGNITION_WINDOW_MAX];
+    float harmony[RECOGNITION_WINDOW_MAX];
+    int window_size;
+    int count;
+    int index;
+} MicroPatternBuffer;
+
 static struct {
     bool initialized;
     bool enabled;
@@ -44,6 +57,13 @@ static struct {
     float empathy_freq;
     double last_timestamp;
     float last_coherence;
+    bool recognition_enabled;
+    bool anticipation_trace;
+    int trend_window;
+    float anticipation_signal;
+    bool calm_predicted;
+    bool anxiety_predicted;
+    MicroPatternBuffer recognition_buffer;
 } empathic_state;
 
 static double monotonic_seconds(void)
@@ -90,6 +110,151 @@ static float blend(float current, float target, float rate)
         return target;
     }
     return current + (target - current) * rate;
+}
+
+static void recognition_reset_buffer(void)
+{
+    memset(&empathic_state.recognition_buffer, 0, sizeof(empathic_state.recognition_buffer));
+    empathic_state.recognition_buffer.window_size = empathic_state.trend_window > 0 ? empathic_state.trend_window : RECOGNITION_WINDOW_DEFAULT;
+    if (empathic_state.recognition_buffer.window_size < RECOGNITION_WINDOW_MIN) {
+        empathic_state.recognition_buffer.window_size = RECOGNITION_WINDOW_MIN;
+    } else if (empathic_state.recognition_buffer.window_size > RECOGNITION_WINDOW_MAX) {
+        empathic_state.recognition_buffer.window_size = RECOGNITION_WINDOW_MAX;
+    }
+    empathic_state.recognition_buffer.count = 0;
+    empathic_state.recognition_buffer.index = 0;
+    empathic_state.anticipation_signal = 0.5f;
+    empathic_state.calm_predicted = false;
+    empathic_state.anxiety_predicted = false;
+}
+
+static void recognition_push(float tension, float warmth, float harmony)
+{
+    MicroPatternBuffer *buffer = &empathic_state.recognition_buffer;
+    int window = buffer->window_size;
+    if (window < RECOGNITION_WINDOW_MIN) {
+        window = RECOGNITION_WINDOW_MIN;
+        buffer->window_size = window;
+    } else if (window > RECOGNITION_WINDOW_MAX) {
+        window = RECOGNITION_WINDOW_MAX;
+        buffer->window_size = window;
+    }
+
+    buffer->tension[buffer->index] = tension;
+    buffer->warmth[buffer->index] = warmth;
+    buffer->harmony[buffer->index] = harmony;
+
+    buffer->index = (buffer->index + 1) % window;
+    if (buffer->count < window) {
+        buffer->count += 1;
+    }
+}
+
+static int recognition_start_index(const MicroPatternBuffer *buffer, int samples)
+{
+    int index = buffer->index - samples;
+    int window = buffer->window_size > 0 ? buffer->window_size : RECOGNITION_WINDOW_DEFAULT;
+    if (window <= 0) {
+        return 0;
+    }
+    while (index < 0) {
+        index += window;
+    }
+    return index % window;
+}
+
+static float recognition_trend(const float *values, const MicroPatternBuffer *buffer)
+{
+    int window = buffer->window_size;
+    if (window < RECOGNITION_WINDOW_MIN) {
+        window = RECOGNITION_WINDOW_MIN;
+    }
+    int samples = buffer->count < window ? buffer->count : window;
+    if (samples < 2) {
+        return 0.0f;
+    }
+
+    int index = recognition_start_index(buffer, samples);
+    float previous = values[index];
+    float sum = 0.0f;
+    for (int i = 1; i < samples; ++i) {
+        index = (index + 1) % window;
+        float current = values[index];
+        sum += (current - previous);
+        previous = current;
+    }
+    return sum / (float)samples;
+}
+
+static void prepare_softening(void)
+{
+    float tension_target = clamp_unit(empathic_state.field.tension * 0.92f);
+    empathic_state.field.tension = clamp_unit(blend(empathic_state.field.tension, tension_target, 0.35f));
+
+    float warmth_target = clamp_unit(empathic_state.field.warmth + 0.04f);
+    empathic_state.field.warmth = clamp_unit(blend(empathic_state.field.warmth, warmth_target, 0.25f));
+}
+
+static void encourage_expansion(void)
+{
+    float harmony_target = clamp_unit(empathic_state.field.harmony + 0.05f);
+    empathic_state.field.harmony = clamp_unit(blend(empathic_state.field.harmony, harmony_target, 0.30f));
+
+    float warmth_target = clamp_unit(empathic_state.field.warmth + 0.03f);
+    empathic_state.field.warmth = clamp_unit(blend(empathic_state.field.warmth, warmth_target, 0.20f));
+}
+
+static void recognition_update(void)
+{
+    if (!empathic_state.recognition_enabled) {
+        return;
+    }
+
+    recognition_push(empathic_state.field.tension, empathic_state.field.warmth, empathic_state.field.harmony);
+
+    MicroPatternBuffer *buffer = &empathic_state.recognition_buffer;
+    if (buffer->count < 2) {
+        empathic_state.anticipation_signal = 0.5f;
+        empathic_state.calm_predicted = false;
+        empathic_state.anxiety_predicted = false;
+        return;
+    }
+
+    float tension_trend = recognition_trend(buffer->tension, buffer);
+    float warmth_trend = recognition_trend(buffer->warmth, buffer);
+    float harmony_trend = recognition_trend(buffer->harmony, buffer);
+
+    float anticipation = clamp_unit(0.5f + (warmth_trend - tension_trend + harmony_trend) / 3.0f);
+    bool calm = anticipation > 0.70f;
+    bool anxious = anticipation < 0.30f;
+
+    bool previous_calm = empathic_state.calm_predicted;
+    bool previous_anxious = empathic_state.anxiety_predicted;
+
+    empathic_state.anticipation_signal = anticipation;
+    empathic_state.calm_predicted = calm;
+    empathic_state.anxiety_predicted = anxious;
+
+    if (anxious) {
+        prepare_softening();
+    } else if (calm) {
+        encourage_expansion();
+    }
+
+    if (empathic_state.anticipation_trace) {
+        printf("recognition_field: anticipation=%.2f warm_trend=%.3f tension_trend=%.3f harmony_trend=%.3f window=%d\n",
+               anticipation,
+               warmth_trend,
+               tension_trend,
+               harmony_trend,
+               buffer->window_size);
+    }
+
+    if ((calm && !previous_calm) || (anxious && !previous_anxious)) {
+        printf("recognition_field: anticipation=%.2f %s\n",
+               anticipation,
+               calm ? "calm_predicted" : "anxiety_predicted");
+    }
 }
 
 static void reset_state(void)
@@ -169,6 +334,10 @@ void empathic_init(EmpathicSource source, bool trace, float gain)
     empathic_state.delay_scale = 1.0f;
     empathic_state.coherence_bias = 0.0f;
     empathic_state.last_timestamp = monotonic_seconds();
+    empathic_state.recognition_enabled = false;
+    empathic_state.anticipation_trace = false;
+    empathic_state.trend_window = RECOGNITION_WINDOW_DEFAULT;
+    recognition_reset_buffer();
     empathic_state.initialized = true;
 }
 
@@ -222,6 +391,9 @@ EmpathicResponse empathic_step(float base_target, float alignment_hint, float re
     response.target_coherence = empathic_state.target_coherence;
     response.delay_scale = empathic_state.delay_scale;
     response.coherence_bias = empathic_state.coherence_bias;
+    response.anticipation = empathic_state.anticipation_signal;
+    response.calm_predicted = empathic_state.recognition_enabled ? empathic_state.calm_predicted : false;
+    response.anxiety_predicted = empathic_state.recognition_enabled ? empathic_state.anxiety_predicted : false;
 
     if (!empathic_active()) {
         if (empathic_state.initialized) {
@@ -232,6 +404,9 @@ EmpathicResponse empathic_step(float base_target, float alignment_hint, float re
         response.target_coherence = clamp_unit(base_target);
         response.delay_scale = 1.0f;
         response.coherence_bias = 0.0f;
+        response.anticipation = empathic_state.recognition_enabled ? empathic_state.anticipation_signal : 0.5f;
+        response.calm_predicted = false;
+        response.anxiety_predicted = false;
         return response;
     }
 
@@ -240,6 +415,7 @@ EmpathicResponse empathic_step(float base_target, float alignment_hint, float re
     }
 
     update_field(alignment_hint, resonance_hint);
+    recognition_update();
 
     float resonance_center = clamp_unit(resonance_hint);
     empathic_state.resonance = clamp_unit(0.55f + (empathic_state.field.empathy - 0.5f) * 0.45f + (resonance_center - 0.5f) * 0.30f);
@@ -253,11 +429,25 @@ EmpathicResponse empathic_step(float base_target, float alignment_hint, float re
     float harmony_delta = (empathic_state.field.harmony - 0.5f) * 0.05f * empathic_state.gain;
     empathic_state.coherence_bias = clamp_range(harmony_delta, -0.15f, 0.15f);
 
+    if (empathic_state.recognition_enabled) {
+        if (empathic_state.anxiety_predicted) {
+            empathic_state.delay_scale = clamp_range(empathic_state.delay_scale * 1.05f, 0.70f, 1.35f);
+            empathic_state.target_coherence = clamp_unit(empathic_state.target_coherence - 0.04f);
+        } else if (empathic_state.calm_predicted) {
+            empathic_state.delay_scale = clamp_range(empathic_state.delay_scale * 0.95f, 0.70f, 1.35f);
+            empathic_state.target_coherence = clamp_unit(empathic_state.target_coherence + 0.03f);
+            empathic_state.coherence_bias = clamp_range(empathic_state.coherence_bias + 0.02f, -0.15f, 0.15f);
+        }
+    }
+
     response.field = empathic_state.field;
     response.resonance = empathic_state.resonance;
     response.target_coherence = empathic_state.target_coherence;
     response.delay_scale = empathic_state.delay_scale;
     response.coherence_bias = empathic_state.coherence_bias;
+    response.anticipation = empathic_state.anticipation_signal;
+    response.calm_predicted = empathic_state.calm_predicted;
+    response.anxiety_predicted = empathic_state.anxiety_predicted;
 
     printf("empathic_echo: warmth=%.2f tension=%.2f harmony=%.2f resonance=%.2f\n",
            response.field.warmth,
@@ -328,4 +518,41 @@ float empathic_target_level(void)
         return clamp_unit(empathic_state.initialized ? empathic_state.target_coherence : 0.80f);
     }
     return clamp_unit(empathic_state.target_coherence);
+}
+
+void empathic_recognition_enable(bool enable)
+{
+    empathic_state.recognition_enabled = enable;
+    recognition_reset_buffer();
+}
+
+void empathic_recognition_trace(bool enable)
+{
+    empathic_state.anticipation_trace = enable;
+}
+
+void empathic_set_trend_window(int window)
+{
+    if (window < RECOGNITION_WINDOW_MIN) {
+        window = RECOGNITION_WINDOW_MIN;
+    } else if (window > RECOGNITION_WINDOW_MAX) {
+        window = RECOGNITION_WINDOW_MAX;
+    }
+    empathic_state.trend_window = window;
+    recognition_reset_buffer();
+}
+
+float empathic_anticipation(void)
+{
+    return clamp_unit(empathic_state.anticipation_signal);
+}
+
+bool empathic_calm_prediction(void)
+{
+    return empathic_state.recognition_enabled && empathic_state.calm_predicted;
+}
+
+bool empathic_anxiety_prediction(void)
+{
+    return empathic_state.recognition_enabled && empathic_state.anxiety_predicted;
 }
