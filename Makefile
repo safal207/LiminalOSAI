@@ -8,7 +8,8 @@ MEM_SRCS    := memory/soil.c
 BUS_SRCS    := bus/resonant.c
 SYM_SRCS    := symbol/layer.c
 REF_SRCS    := reflection/layer.c
-SRCS        := $(CORE_SRCS) $(MEM_SRCS) $(BUS_SRCS) $(SYM_SRCS) $(REF_SRCS)
+AWARE_SRCS  := awareness/bridge.c
+SRCS        := $(CORE_SRCS) $(MEM_SRCS) $(BUS_SRCS) $(SYM_SRCS) $(REF_SRCS) $(AWARE_SRCS)
 OBJS        := $(SRCS:.c=.o)
 
 all: $(TARGET)
