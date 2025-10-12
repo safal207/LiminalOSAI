@@ -15,6 +15,7 @@
 #include "reflection.h"
 #include "awareness.h"
 #include "council.h"
+#include "coherence.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -30,8 +31,11 @@ typedef struct {
     bool show_reflections;
     bool show_awareness;
     bool show_council;
+    bool show_coherence;
     bool auto_tune;
+    bool climate_log;
     uint64_t limit;
+    float target_coherence;
 } kernel_options;
 
 static size_t bounded_string_length(const uint8_t *data, size_t max_len)
@@ -51,8 +55,11 @@ static kernel_options parse_options(int argc, char **argv)
         .show_reflections = false,
         .show_awareness = false,
         .show_council = false,
+        .show_coherence = false,
         .auto_tune = false,
-        .limit = 0
+        .climate_log = false,
+        .limit = 0,
+        .target_coherence = 0.80f
     };
 
     for (int i = 1; i < argc; ++i) {
@@ -67,8 +74,12 @@ static kernel_options parse_options(int argc, char **argv)
             opts.show_awareness = true;
         } else if (strcmp(arg, "--council") == 0) {
             opts.show_council = true;
+        } else if (strcmp(arg, "--coherence") == 0) {
+            opts.show_coherence = true;
         } else if (strcmp(arg, "--auto-tune") == 0) {
             opts.auto_tune = true;
+        } else if (strcmp(arg, "--climate-log") == 0) {
+            opts.climate_log = true;
         } else if (strncmp(arg, "--limit=", 8) == 0) {
             const char *value = arg + 8;
             if (*value) {
@@ -76,6 +87,20 @@ static kernel_options parse_options(int argc, char **argv)
                 unsigned long long parsed = strtoull(value, &end, 10);
                 if (end != value) {
                     opts.limit = (uint64_t)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--target=", 9) == 0) {
+            const char *value = arg + 9;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    opts.target_coherence = parsed;
                 }
             }
         }
@@ -98,7 +123,18 @@ static kernel_options parse_options(int argc, char **argv)
 static void pulse_delay(void)
 {
     const double base_delay = 0.1;
-    double tuned_delay = awareness_adjust_delay(base_delay);
+    double tuned_delay = base_delay * coherence_delay_scale();
+    tuned_delay = awareness_adjust_delay(tuned_delay);
+
+    const double min_delay = 0.03;
+    const double max_delay = 0.25;
+    if (tuned_delay < min_delay) {
+        tuned_delay = min_delay;
+    } else if (tuned_delay > max_delay) {
+        tuned_delay = max_delay;
+    }
+
+    coherence_register_delay(tuned_delay);
 
     if (tuned_delay < 0.001) {
         tuned_delay = 0.001;
@@ -243,6 +279,8 @@ static void exhale(const kernel_options *opts)
     CouncilOutcome council = council_consult(energy_avg, resonance_avg, stability, active_count);
 
     awareness_update(resonance_avg, stability);
+    AwarenessState awareness_snapshot = awareness_state();
+    const CoherenceField *coherence_field = coherence_update(energy_avg, resonance_avg, stability, awareness_snapshot.awareness_level);
 
     if (opts && opts->show_symbols) {
         if (activated == 0) {
@@ -260,14 +298,28 @@ static void exhale(const kernel_options *opts)
     }
 
     if (opts && opts->show_awareness) {
-        AwarenessState state = awareness_state();
         double breath = awareness_cycle_duration();
         printf("awareness state | level: %.2f | coherence: %.2f | drift: %.2f | breath: %.3fs%s\n",
-               state.awareness_level,
-               state.self_coherence,
-               state.drift,
+               awareness_snapshot.awareness_level,
+               awareness_snapshot.self_coherence,
+               awareness_snapshot.drift,
                breath,
                awareness_auto_tune_enabled() ? "" : " (manual)");
+    }
+
+    if (opts && opts->show_coherence && coherence_field) {
+        double delay_ms = coherence_last_delay() * 1000.0;
+        if (delay_ms < 0.0) {
+            delay_ms = 0.0;
+        }
+        int delay_whole = (int)(delay_ms + 0.5);
+        printf("coh=%.2f | energy=%.2f | res=%.2f | stab=%.2f | aware=%.2f | delay=%dms\n",
+               coherence_field->coherence,
+               coherence_field->energy_smooth,
+               coherence_field->resonance_smooth,
+               coherence_field->stability_avg,
+               coherence_field->awareness_level,
+               delay_whole);
     }
 
     if (opts && opts->show_council) {
@@ -314,6 +366,9 @@ int main(int argc, char **argv)
     symbol_layer_init();
     awareness_init();
     awareness_set_auto_tune(opts.auto_tune);
+    coherence_init();
+    coherence_set_target(opts.target_coherence);
+    coherence_enable_logging(opts.climate_log);
     council_init();
     council_summon();
     uint64_t pulses = 0;
