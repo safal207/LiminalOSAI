@@ -22,6 +22,7 @@ typedef struct {
 
 void bus_init(void);
 void bus_emit(const resonant_msg *msg);
+void bus_register_sensor(int sensor_id);
 bool bus_listen(int sensor_id, resonant_msg *out_msg);
 size_t bus_pending(void);
 resonant_msg resonant_msg_make(int source_id, int target_id, uint32_t energy, const void *payload, size_t payload_len);

@@ -136,6 +136,8 @@ static void inhale(void)
 
 static void reflect(const kernel_options *opts)
 {
+    (void)opts;
+
     const char *label = "reflect";
     soil_trace trace = soil_trace_make(ENERGY_REFLECT, label, strlen(label));
     soil_write(&trace);
@@ -167,27 +169,23 @@ static void reflect(const kernel_options *opts)
         bus_emit(&pending_echoes[i]);
     }
 
-    size_t activated = symbol_layer_pulse();
-
     fputs("reflect\n", stdout);
-
-    if (opts && opts->show_symbols) {
-        if (activated == 0) {
-            fputs("symbols: (quiet)\n", stdout);
-        } else {
-            const Symbol *active[16];
-            size_t count = symbol_layer_active(active, sizeof(active) / sizeof(active[0]));
-            fputs("symbols:", stdout);
-            for (size_t i = 0; i < count; ++i) {
-                fprintf(stdout, " %s(res=%.2f,en=%.2f)", active[i]->key, active[i]->resonance, active[i]->energy);
-            }
-            fputc('\n', stdout);
-        }
-    }
 }
 
 static void exhale(const kernel_options *opts)
 {
+    soil_decay();
+
+    const char *label = "exhale";
+    soil_trace trace = soil_trace_make(ENERGY_EXHALE, label, strlen(label));
+    soil_write(&trace);
+
+    static const char exhale_signal[] = "ebb";
+    resonant_msg exhale_msg = resonant_msg_make(SENSOR_EXHALE, RESONANT_BROADCAST_ID, ENERGY_EXHALE, exhale_signal, sizeof(exhale_signal) - 1);
+    bus_emit(&exhale_msg);
+
+    size_t activated = symbol_layer_pulse();
+
     const Symbol *active[16];
     size_t active_count = symbol_layer_active(active, sizeof(active) / sizeof(active[0]));
 
@@ -240,21 +238,26 @@ static void exhale(const kernel_options *opts)
         strcpy(note, "seeking balance");
     }
 
-    soil_decay();
-
-    const char *label = "exhale";
-    soil_trace trace = soil_trace_make(ENERGY_EXHALE, label, strlen(label));
-    soil_write(&trace);
-
-    static const char exhale_signal[] = "ebb";
-    resonant_msg exhale_msg = resonant_msg_make(SENSOR_EXHALE, RESONANT_BROADCAST_ID, ENERGY_EXHALE, exhale_signal, sizeof(exhale_signal) - 1);
-    bus_emit(&exhale_msg);
-
     reflect_log(energy_avg, resonance_avg, stability, note);
 
     CouncilOutcome council = council_consult(energy_avg, resonance_avg, stability, active_count);
 
     awareness_update(resonance_avg, stability);
+
+    if (opts && opts->show_symbols) {
+        if (activated == 0) {
+            fputs("symbols: (quiet)\n", stdout);
+        } else {
+            fputs("symbols:", stdout);
+            for (size_t i = 0; i < active_count; ++i) {
+                if (!active[i]) {
+                    continue;
+                }
+                fprintf(stdout, " %s(res=%.2f,en=%.2f)", active[i]->key, active[i]->resonance, active[i]->energy);
+            }
+            fputc('\n', stdout);
+        }
+    }
 
     if (opts && opts->show_awareness) {
         AwarenessState state = awareness_state();
@@ -305,6 +308,9 @@ int main(int argc, char **argv)
 
     soil_init();
     bus_init();
+    bus_register_sensor(SENSOR_INHALE);
+    bus_register_sensor(SENSOR_REFLECT);
+    bus_register_sensor(SENSOR_EXHALE);
     symbol_layer_init();
     awareness_init();
     awareness_set_auto_tune(opts.auto_tune);

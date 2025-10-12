@@ -17,6 +17,8 @@ static bool auto_tune = false;
 static double last_cycle_duration = 0.1;
 static float cycle_scale = 1.0f;
 
+static const float RESONANCE_MAX = 12.0f;
+
 static float clamp_unit(float value)
 {
     if (value < 0.0f) {
@@ -87,7 +89,16 @@ AwarenessState awareness_state(void)
 
 bool awareness_update(float resonance_avg, float stability)
 {
-    float drift = fabsf(stability - resonance_avg);
+    float res_norm = 0.0f;
+    if (RESONANCE_MAX > 0.0f) {
+        res_norm = resonance_avg / RESONANCE_MAX;
+    }
+    if (!isfinite(res_norm)) {
+        res_norm = 0.0f;
+    }
+    res_norm = clamp_unit(res_norm);
+
+    float drift = fabsf(stability - res_norm);
     if (!isfinite(drift)) {
         drift = 1.0f;
     }
