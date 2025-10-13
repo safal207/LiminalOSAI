@@ -26,7 +26,6 @@ static const float EMA_ALPHA = 0.25f;
 static const float MAE_ALPHA = 0.15f;
 static const float DRIFT_STABILITY_LIMIT = 0.02f;
 static const float MAE_STABILITY_LIMIT = 0.04f;
-static const float FEEDBACK_WINDUP_THRESHOLD = 0.06f;
 static const float FEEDBACK_WINDUP_DAMPING = 0.97f;
 
 typedef struct {
@@ -38,9 +37,10 @@ typedef struct {
     float last_pred_delay;
     float last_ff;
     float last_influence;
+    float last_ff_rel;
 } Ant2Meta;
 
-static Ant2Meta ant2_meta = {false, false, false, false, 0.5f, 1.0f, 0.0f, 0.0f};
+static Ant2Meta ant2_meta = {false, false, false, false, 0.5f, 1.0f, 0.0f, 0.0f, 0.0f};
 
 static float clampf(float value, float min_value, float max_value)
 {
@@ -81,7 +81,8 @@ static void ant2_log_state(const Ant2 *state, float pred_coh, float pred_delay, 
     }
     fprintf(fp,
             "{\"ema_coh\":%.3f,\"ema_delay\":%.3f,\"drift\":%.3f,\"drift_delay\":%.3f,"
-            "\"pred\":%.3f,\"pred_delay\":%.3f,\"ff\":%+.3f,\"gain\":%.3f,\"influence\":%.3f,\"mae\":%.4f}\n",
+            "\"pred\":%.3f,\"pred_delay\":%.3f,\"ff\":%+.3f,\"ff_rel\":%+.3f,\"gain\":%.3f,"
+            "\"influence\":%.3f,\"mae\":%.4f}\n",
             state->ema_coh,
             state->ema_delay,
             state->drift_coh,
@@ -89,6 +90,7 @@ static void ant2_log_state(const Ant2 *state, float pred_coh, float pred_delay, 
             pred_coh,
             pred_delay,
             ff,
+            ant2_meta.last_ff_rel,
             state->gain,
             influence,
             state->mae);
@@ -137,6 +139,7 @@ void ant2_init(Ant2 *state, float initial_gain)
     ant2_meta.last_pred_delay = 1.0f;
     ant2_meta.last_ff = 0.0f;
     ant2_meta.last_influence = 0.0f;
+    ant2_meta.last_ff_rel = 0.0f;
 }
 
 void ant2_set_trace(bool enable)
@@ -251,15 +254,19 @@ float ant2_feedforward(Ant2 *state,
     return scale;
 }
 
-void ant2_feedback_adjust(Ant2 *state, float feedback_delta)
+void ant2_feedback_adjust(Ant2 *state, float feedback_delta_rel, float windup_threshold)
 {
     if (!state) {
         return;
     }
-    if (!isfinite(feedback_delta)) {
+    if (!isfinite(feedback_delta_rel)) {
         return;
     }
-    if (fabsf(feedback_delta) > FEEDBACK_WINDUP_THRESHOLD) {
+    ant2_meta.last_ff_rel = feedback_delta_rel;
+    if (!isfinite(windup_threshold) || windup_threshold <= 0.0f) {
+        windup_threshold = ANT2_FEEDBACK_WINDUP_THRESHOLD;
+    }
+    if (fabsf(feedback_delta_rel) > windup_threshold) {
         state->gain *= FEEDBACK_WINDUP_DAMPING;
         state->gain = clampf(state->gain, 0.0f, 1.0f);
     }

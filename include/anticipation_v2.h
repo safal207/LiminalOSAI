@@ -17,6 +17,8 @@ typedef struct {
     float mae;
 } Ant2;
 
+#define ANT2_FEEDBACK_WINDUP_THRESHOLD 0.06f
+
 void ant2_init(Ant2 *state, float initial_gain);
 void ant2_set_trace(bool enable);
 float ant2_feedforward(Ant2 *state,
@@ -27,7 +29,9 @@ float ant2_feedforward(Ant2 *state,
                        float *predicted_coherence,
                        float *predicted_delay,
                        float *ff_out);
-void ant2_feedback_adjust(Ant2 *state, float feedback_delta);
+void ant2_feedback_adjust(Ant2 *state,
+                          float feedback_delta_rel,
+                          float windup_threshold);
 
 #ifdef __cplusplus
 }
