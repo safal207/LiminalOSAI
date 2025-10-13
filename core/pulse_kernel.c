@@ -33,6 +33,7 @@
 #include "empathic.h"
 #include "emotion_memory.h"
 #include "anticipation_v2.h"
+#include "mirror.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -109,6 +110,9 @@ typedef struct {
     bool bond_trace_enabled;
     Affinity affinity_config;
     float allow_align_consent;
+    bool mirror_enabled;
+    bool mirror_trace;
+    float mirror_softness;
 } kernel_options;
 
 static size_t bounded_string_length(const uint8_t *data, size_t max_len)
@@ -202,6 +206,9 @@ static bool ant2_module_enabled = false;
 static Ant2 ant2_state;
 static float ant2_delay_factor = 1.0f;
 static const float ANT2_BASE_DELAY = 0.1f;
+static bool mirror_module_enabled = false;
+static float mirror_gain_amp = 1.0f;
+static float mirror_gain_tempo = 1.0f;
 
 static const char *ensemble_strategy_name(ensemble_strategy mode)
 {
@@ -599,7 +606,10 @@ static kernel_options parse_options(int argc, char **argv)
         .affinity_enabled = false,
         .bond_trace_enabled = false,
         .affinity_config = {0.0f, 0.0f, 0.0f},
-        .allow_align_consent = 0.2f
+        .allow_align_consent = 0.2f,
+        .mirror_enabled = false,
+        .mirror_trace = false,
+        .mirror_softness = 0.5f
     };
 
     for (size_t i = 0; i < weave_module_count(); ++i) {
@@ -865,6 +875,24 @@ static kernel_options parse_options(int argc, char **argv)
             }
         } else if (strcmp(arg, "--bond-trace") == 0) {
             opts.bond_trace_enabled = true;
+        } else if (strcmp(arg, "--mirror") == 0) {
+            opts.mirror_enabled = true;
+        } else if (strcmp(arg, "--mirror-trace") == 0) {
+            opts.mirror_trace = true;
+        } else if (strncmp(arg, "--mirror-soft=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.1f) {
+                        parsed = 0.1f;
+                    } else if (parsed > 0.9f) {
+                        parsed = 0.9f;
+                    }
+                    opts.mirror_softness = parsed;
+                }
+            }
         } else if (strncmp(arg, "--emotional-source=", 20) == 0) {
             const char *value = arg + 20;
             if (strcmp(value, "text") == 0) {
@@ -1076,6 +1104,10 @@ static void pulse_delay(void)
     tuned_delay *= symbiosis_delay_scale();
     tuned_delay *= empathic_delay_scale();
 
+    if (isfinite(mirror_gain_tempo) && mirror_gain_tempo > 0.0f) {
+        tuned_delay /= (double)mirror_gain_tempo;
+    }
+
     const double min_delay = 0.03;
     const double max_delay = 0.25;
     if (tuned_delay < min_delay) {
@@ -1196,8 +1228,6 @@ static void exhale(const kernel_options *opts)
     soil_write(&trace);
 
     static const char exhale_signal[] = "ebb";
-    resonant_msg exhale_msg = resonant_msg_make(SENSOR_EXHALE, RESONANT_BROADCAST_ID, ENERGY_EXHALE, exhale_signal, sizeof(exhale_signal) - 1);
-    bus_emit(&exhale_msg);
 
     collective_begin_cycle();
 
@@ -1457,28 +1487,6 @@ static void exhale(const kernel_options *opts)
     const CoherenceField *coherence_field =
         coherence_update(energy_avg, resonance_for_coherence, stability_for_coherence, awareness_for_coherence);
 
-    if (affinity_layer_enabled) {
-        float field_coherence = coherence_field ? clamp_unit(coherence_field->coherence) : 0.0f;
-        float explicit_consent = clamp_unit(explicit_consent_level);
-        float implicit_consent = 0.0f;
-        if (human_bridge_active) {
-            implicit_consent = clamp_unit(human_alignment);
-            if (explicit_consent < 0.6f && implicit_consent > 0.6f) {
-                implicit_consent = 0.6f;
-            }
-        }
-        float consent_level = explicit_consent;
-        if (implicit_consent > consent_level) {
-            consent_level = implicit_consent;
-        }
-        bond_gate_update(&bond_gate_state, &affinity_profile, consent_level, field_coherence);
-        bool allow_personal = bond_gate_state.consent >= 0.3f && bond_gate_state.influence > 0.0f;
-        dream_set_affinity_gate(bond_gate_state.influence, allow_personal);
-        cycle_influence = clamp_unit(bond_gate_state.influence);
-    } else {
-        dream_set_affinity_gate(1.0f, true);
-    }
-
     float coherence_level = coherence_field ? coherence_field->coherence : 0.0f;
     if (empathic_layer_active) {
         coherence_level = empathic_apply_coherence(coherence_level);
@@ -1618,6 +1626,51 @@ static void exhale(const kernel_options *opts)
         }
     }
 
+    if (affinity_layer_enabled) {
+        float field_coherence = coherence_field ? clamp_unit(coherence_field->coherence) : 0.0f;
+        float explicit_consent = clamp_unit(explicit_consent_level);
+        float implicit_consent = 0.0f;
+        if (human_bridge_active) {
+            implicit_consent = clamp_unit(human_alignment);
+            if (explicit_consent < 0.6f && implicit_consent > 0.6f) {
+                implicit_consent = 0.6f;
+            }
+        }
+        float consent_level = explicit_consent;
+        if (implicit_consent > consent_level) {
+            consent_level = implicit_consent;
+        }
+        bond_gate_update(&bond_gate_state, &affinity_profile, consent_level, field_coherence);
+        bool allow_personal = bond_gate_state.consent >= 0.3f && bond_gate_state.influence > 0.0f;
+        dream_set_affinity_gate(bond_gate_state.influence, allow_personal);
+        cycle_influence = clamp_unit(bond_gate_state.influence);
+    } else {
+        dream_set_affinity_gate(1.0f, true);
+        cycle_influence = 1.0f;
+    }
+
+    if (mirror_module_enabled) {
+        float mirror_energy = active_count > 0 ? clamp_unit(energy_avg / 12.0f) : 0.0f;
+        float mirror_calm = clamp_unit(stability);
+        float mirror_tempo = 0.0f;
+        if (coherence_field) {
+            mirror_tempo = clamp_unit(coherence_field->resonance_smooth / 12.0f);
+        } else {
+            mirror_tempo = active_count > 0 ? clamp_unit(resonance_avg / 12.0f) : 0.0f;
+        }
+        float mirror_consent = affinity_layer_enabled ? bond_gate_state.consent : 1.0f;
+        float mirror_influence = affinity_layer_enabled ? cycle_influence : 1.0f;
+        MirrorGains mirror_gains = mirror_update(mirror_influence, mirror_energy, mirror_calm, mirror_tempo, mirror_consent);
+        mirror_gain_amp = mirror_gains.gain_amp;
+        mirror_gain_tempo = mirror_gains.gain_tempo;
+        if (fabsf(mirror_gain_amp - 1.0f) > 0.0001f) {
+            symbol_scale_active(mirror_gain_amp);
+        }
+    } else {
+        mirror_gain_amp = 1.0f;
+        mirror_gain_tempo = 1.0f;
+    }
+
     if (collective_active) {
         ++collective_cycle_count;
     }
@@ -1719,6 +1772,10 @@ static void exhale(const kernel_options *opts)
             weave_mark_echo_emitted();
         }
     }
+
+    resonant_msg exhale_msg =
+        resonant_msg_make(SENSOR_EXHALE, RESONANT_BROADCAST_ID, ENERGY_EXHALE, exhale_signal, sizeof(exhale_signal) - 1);
+    bus_emit(&exhale_msg);
 
     fputs("exhale\n", stdout);
 }
@@ -1852,6 +1909,14 @@ int main(int argc, char **argv)
         symbol_set_affinity_scale(1.0f);
         dream_set_affinity_gate(1.0f, true);
     }
+
+    mirror_reset();
+    mirror_set_softness(opts.mirror_softness);
+    mirror_set_trace(opts.mirror_trace);
+    mirror_enable(opts.mirror_enabled);
+    mirror_module_enabled = opts.mirror_enabled;
+    mirror_gain_amp = 1.0f;
+    mirror_gain_tempo = 1.0f;
 
     ant2_module_enabled = opts.anticipation2_enabled;
     ant2_delay_factor = 1.0f;
