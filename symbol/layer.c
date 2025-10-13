@@ -350,6 +350,34 @@ void symbol_set_affinity_scale(float scale)
     symbol_affinity_scale = scale;
 }
 
+void symbol_scale_active(float gain)
+{
+    if (!isfinite(gain) || gain <= 0.0f) {
+        return;
+    }
+
+    for (size_t i = 0; i < current_active_count; ++i) {
+        Symbol *symbol = current_active[i];
+        if (!symbol) {
+            continue;
+        }
+
+        symbol->energy *= gain;
+        if (symbol->energy > 12.0f) {
+            symbol->energy = 12.0f;
+        } else if (symbol->energy < 0.0f) {
+            symbol->energy = 0.0f;
+        }
+
+        symbol->resonance *= gain;
+        if (symbol->resonance > 12.0f) {
+            symbol->resonance = 12.0f;
+        } else if (symbol->resonance < 0.0f) {
+            symbol->resonance = 0.0f;
+        }
+    }
+}
+
 void symbol_layer_init(void)
 {
     memset(symbol_table, 0, sizeof(symbol_table));
