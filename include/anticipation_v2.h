@@ -17,7 +17,7 @@ typedef struct {
     float mae;
 } Ant2;
 
-#define ANT2_FEEDBACK_WINDUP_THRESHOLD 0.06f
+#define ANT2_FEEDBACK_WINDUP_THRESHOLD 0.03f
 
 void ant2_init(Ant2 *state, float initial_gain);
 void ant2_set_trace(bool enable);
