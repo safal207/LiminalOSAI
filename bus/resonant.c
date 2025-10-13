@@ -1,6 +1,8 @@
 #include "resonant.h"
 
+#include <math.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
 static resonant_msg bus_queue[RESONANT_BUS_CAPACITY];
@@ -157,4 +159,35 @@ resonant_msg resonant_msg_make(int source_id, int target_id, uint32_t energy, co
     }
 
     return msg;
+}
+
+void bus_emit_wave(const char *tag, float level)
+{
+    char payload[RESONANT_MSG_DATA_SIZE];
+    const char *use_tag = tag ? tag : "wave";
+
+    float magnitude = fabsf(level);
+    if (!isfinite(magnitude)) {
+        magnitude = 0.0f;
+    }
+    if (magnitude > 1.0f) {
+        magnitude = 1.0f;
+    }
+
+    int written = snprintf(payload, sizeof(payload), "%s:%.2f", use_tag, magnitude);
+    if (written < 0) {
+        written = 0;
+        payload[0] = '\0';
+    } else if (written >= (int)sizeof(payload)) {
+        written = (int)sizeof(payload) - 1;
+        payload[written] = '\0';
+    }
+
+    uint32_t energy = (uint32_t)(magnitude * 120.0f);
+    if (energy == 0U) {
+        energy = 1U;
+    }
+
+    resonant_msg msg = resonant_msg_make(RESONANT_WAVE_SOURCE_ID, RESONANT_BROADCAST_ID, energy, payload, (size_t)written);
+    bus_emit(&msg);
 }

@@ -12,6 +12,9 @@ extern "C" {
 #define RESONANT_BUS_CAPACITY 32
 #define RESONANT_MSG_DATA_SIZE 32
 #define RESONANT_BROADCAST_ID (-1)
+#ifndef RESONANT_WAVE_SOURCE_ID
+#define RESONANT_WAVE_SOURCE_ID 17
+#endif
 
 typedef struct {
     int source_id;
@@ -22,6 +25,7 @@ typedef struct {
 
 void bus_init(void);
 void bus_emit(const resonant_msg *msg);
+void bus_emit_wave(const char *tag, float level);
 void bus_register_sensor(int sensor_id);
 bool bus_listen(int sensor_id, resonant_msg *out_msg);
 size_t bus_pending(void);

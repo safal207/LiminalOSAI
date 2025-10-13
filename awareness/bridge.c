@@ -31,28 +31,6 @@ static float clamp_unit(float value)
     return value;
 }
 
-static void bus_emit_wave(const char *tag, float awareness_level)
-{
-    char payload[RESONANT_MSG_DATA_SIZE];
-    if (!tag) {
-        tag = "wave";
-    }
-
-    int written = snprintf(payload, sizeof(payload), "%s:%.2f", tag, awareness_level);
-    if (written < 0) {
-        written = 0;
-        payload[0] = '\0';
-    }
-
-    uint32_t energy = (uint32_t)(awareness_level * 100.0f);
-    if (energy == 0U) {
-        energy = 1U;
-    }
-
-    resonant_msg msg = resonant_msg_make(AWARENESS_SOURCE_ID, RESONANT_BROADCAST_ID, energy, payload, (size_t)written);
-    bus_emit(&msg);
-}
-
 void awareness_emit_dialogue(float variance)
 {
     float level = clamp_unit(isfinite(variance) ? variance : 0.0f);
