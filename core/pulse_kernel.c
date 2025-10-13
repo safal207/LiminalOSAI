@@ -1193,12 +1193,52 @@ static void reflect(const kernel_options *opts)
     fputs("reflect\n", stdout);
 }
 
+static float update_affinity_gate_state(bool human_bridge_active,
+                                        float explicit_consent,
+                                        float human_alignment_hint,
+                                        const CoherenceField *field_snapshot)
+{
+    float field_coherence = field_snapshot ? clamp_unit(field_snapshot->coherence) : 0.0f;
+    float consent_level = clamp_unit(explicit_consent);
+    float implicit_consent = 0.0f;
+
+    if (human_bridge_active) {
+        implicit_consent = clamp_unit(human_alignment_hint);
+        if (consent_level < 0.6f && implicit_consent > 0.6f) {
+            implicit_consent = 0.6f;
+        }
+    }
+
+    if (implicit_consent > consent_level) {
+        consent_level = implicit_consent;
+    }
+
+    bond_gate_update(&bond_gate_state, &affinity_profile, consent_level, field_coherence);
+    bool allow_personal = bond_gate_state.consent >= 0.3f && bond_gate_state.influence > 0.0f;
+    dream_set_affinity_gate(bond_gate_state.influence, allow_personal);
+    float cycle_influence = clamp_unit(bond_gate_state.influence);
+    symbol_set_affinity_scale(cycle_influence);
+    return cycle_influence;
+}
+
 static void exhale(const kernel_options *opts)
 {
     soil_decay();
 
-    float cycle_influence = affinity_layer_enabled ? clamp_unit(bond_gate_state.influence) : 1.0f;
-    symbol_set_affinity_scale(cycle_influence);
+    bool human_bridge_active = opts && opts->human_bridge_enabled;
+    float gate_alignment_hint = human_bridge_active ? symbiosis_alignment() : 0.0f;
+    const CoherenceField *gate_field_snapshot = coherence_state();
+    float explicit_consent = clamp_unit(explicit_consent_level);
+    float cycle_influence = 1.0f;
+    if (affinity_layer_enabled) {
+        cycle_influence = update_affinity_gate_state(human_bridge_active,
+                                                     explicit_consent,
+                                                     gate_alignment_hint,
+                                                     gate_field_snapshot);
+    } else {
+        dream_set_affinity_gate(1.0f, true);
+        symbol_set_affinity_scale(1.0f);
+    }
 
     const char *label = "exhale";
     soil_trace trace = soil_trace_make(ENERGY_EXHALE, label, strlen(label));
@@ -1290,7 +1330,7 @@ static void exhale(const kernel_options *opts)
     float human_reflection_boost = 0.0f;
     float human_metabolic_intake = 0.0f;
     float human_metabolic_output = 0.0f;
-    bool human_bridge_active = opts && opts->human_bridge_enabled;
+    human_bridge_active = opts && opts->human_bridge_enabled;
     EmpathicResponse empathic_response = {0};
     bool empathic_layer_active = opts && opts->empathic_enabled;
     bool emotional_memory_active = opts && opts->emotional_memory_enabled;
@@ -1639,24 +1679,10 @@ static void exhale(const kernel_options *opts)
     }
 
     if (affinity_layer_enabled) {
-        float field_coherence = coherence_field ? clamp_unit(coherence_field->coherence) : 0.0f;
-        float explicit_consent = clamp_unit(explicit_consent_level);
-        float implicit_consent = 0.0f;
-        if (human_bridge_active) {
-            implicit_consent = clamp_unit(human_alignment);
-            if (explicit_consent < 0.6f && implicit_consent > 0.6f) {
-                implicit_consent = 0.6f;
-            }
-        }
-        float consent_level = explicit_consent;
-        if (implicit_consent > consent_level) {
-            consent_level = implicit_consent;
-        }
-        bond_gate_update(&bond_gate_state, &affinity_profile, consent_level, field_coherence);
-        bool allow_personal = bond_gate_state.consent >= 0.3f && bond_gate_state.influence > 0.0f;
-        dream_set_affinity_gate(bond_gate_state.influence, allow_personal);
-        cycle_influence = clamp_unit(bond_gate_state.influence);
-        symbol_set_affinity_scale(cycle_influence);
+        cycle_influence = update_affinity_gate_state(human_bridge_active,
+                                                     explicit_consent,
+                                                     human_alignment,
+                                                     coherence_field);
     } else {
         dream_set_affinity_gate(1.0f, true);
         symbol_set_affinity_scale(1.0f);
