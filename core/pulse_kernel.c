@@ -1491,6 +1491,30 @@ static void exhale(const kernel_options *opts)
     if (empathic_layer_active) {
         coherence_level = empathic_apply_coherence(coherence_level);
     }
+
+    if (affinity_layer_enabled) {
+        float field_coherence = coherence_field ? clamp_unit(coherence_field->coherence) : 0.0f;
+        float explicit_consent = clamp_unit(explicit_consent_level);
+        float implicit_consent = 0.0f;
+        if (human_bridge_active) {
+            implicit_consent = clamp_unit(human_alignment);
+            if (explicit_consent < 0.6f && implicit_consent > 0.6f) {
+                implicit_consent = 0.6f;
+            }
+        }
+        float consent_level = explicit_consent;
+        if (implicit_consent > consent_level) {
+            consent_level = implicit_consent;
+        }
+        bond_gate_update(&bond_gate_state, &affinity_profile, consent_level, field_coherence);
+        bool allow_personal = bond_gate_state.consent >= 0.3f && bond_gate_state.influence > 0.0f;
+        dream_set_affinity_gate(bond_gate_state.influence, allow_personal);
+        cycle_influence = clamp_unit(bond_gate_state.influence);
+    } else {
+        dream_set_affinity_gate(1.0f, true);
+        cycle_influence = 1.0f;
+    }
+
     dream_update(coherence_level,
                   awareness_snapshot.awareness_level,
                   anticipation_field,
@@ -1624,29 +1648,6 @@ static void exhale(const kernel_options *opts)
                 }
             }
         }
-    }
-
-    if (affinity_layer_enabled) {
-        float field_coherence = coherence_field ? clamp_unit(coherence_field->coherence) : 0.0f;
-        float explicit_consent = clamp_unit(explicit_consent_level);
-        float implicit_consent = 0.0f;
-        if (human_bridge_active) {
-            implicit_consent = clamp_unit(human_alignment);
-            if (explicit_consent < 0.6f && implicit_consent > 0.6f) {
-                implicit_consent = 0.6f;
-            }
-        }
-        float consent_level = explicit_consent;
-        if (implicit_consent > consent_level) {
-            consent_level = implicit_consent;
-        }
-        bond_gate_update(&bond_gate_state, &affinity_profile, consent_level, field_coherence);
-        bool allow_personal = bond_gate_state.consent >= 0.3f && bond_gate_state.influence > 0.0f;
-        dream_set_affinity_gate(bond_gate_state.influence, allow_personal);
-        cycle_influence = clamp_unit(bond_gate_state.influence);
-    } else {
-        dream_set_affinity_gate(1.0f, true);
-        cycle_influence = 1.0f;
     }
 
     if (mirror_module_enabled) {
