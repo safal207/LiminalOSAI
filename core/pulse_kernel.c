@@ -1058,10 +1058,15 @@ static void pulse_delay(void)
         }
         final_factor *= warm_factor;
     }
+    double baseline_factor = final_factor;
     if (ant2_module_enabled) {
-        float feedback_delta = (float)(1.0 - final_factor);
-        ant2_feedback_adjust(&ant2_state, feedback_delta);
-        final_factor *= (double)ant2_delay_factor;
+        double adjusted_factor = final_factor * (double)ant2_delay_factor;
+        float feedback_delta_rel = 0.0f;
+        if (baseline_factor > 0.0) {
+            feedback_delta_rel = (float)(adjusted_factor / baseline_factor - 1.0);
+        }
+        ant2_feedback_adjust(&ant2_state, feedback_delta_rel, ANT2_FEEDBACK_WINDUP_THRESHOLD);
+        final_factor = adjusted_factor;
     }
     if (final_factor < 0.1) {
         final_factor = 0.1;

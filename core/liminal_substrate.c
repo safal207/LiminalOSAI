@@ -891,8 +891,13 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
             float after_rate = fmaxf(state->breath_rate, 0.05f);
             float delay_before = SUBSTRATE_BASE_RATE / before_rate;
             float delay_after = SUBSTRATE_BASE_RATE / after_rate;
-            float feedback_delta = delay_after - delay_before;
-            ant2_feedback_adjust(&substrate_ant2_state, feedback_delta);
+            float feedback_delta_rel = 0.0f;
+            if (delay_before > 0.0f) {
+                feedback_delta_rel = delay_after / delay_before - 1.0f;
+            }
+            ant2_feedback_adjust(&substrate_ant2_state,
+                                  feedback_delta_rel,
+                                  ANT2_FEEDBACK_WINDUP_THRESHOLD);
         }
         if (cfg->emotional_memory_enabled) {
             EmotionField field_snapshot = cfg->empathic_enabled ? response.field : empathic_field();
