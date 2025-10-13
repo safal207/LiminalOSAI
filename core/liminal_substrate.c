@@ -27,6 +27,7 @@
 #include "emotion_memory.h"
 #include "council.h"
 #include "affinity.h"
+#include "anticipation_v2.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -69,6 +70,9 @@ typedef struct {
     bool empathic_enabled;
     bool empathic_trace;
     bool anticipation_trace;
+    bool anticipation2_enabled;
+    bool ant2_trace;
+    float ant2_gain;
     EmpathicSource emotional_source;
     float empathy_gain;
     bool emotional_memory_enabled;
@@ -86,6 +90,9 @@ static bool substrate_affinity_enabled = false;
 static Affinity substrate_affinity_profile = {0.0f, 0.0f, 0.0f};
 static BondGate substrate_bond_gate = {0.0f, 0.0f, 0.0f, 0.0f};
 static float substrate_explicit_consent = 0.2f;
+static bool substrate_ant2_enabled = false;
+static Ant2 substrate_ant2_state;
+static const float SUBSTRATE_BASE_RATE = 0.72f;
 
 static void rebirth(liminal_state *state)
 {
@@ -280,8 +287,11 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.lip_interval_ms = 1000U;
     cfg.lip_host[0] = '\0';
     cfg.empathic_enabled = false;
-    cfg.empathic_trace = false;
-    cfg.anticipation_trace = false;
+   cfg.empathic_trace = false;
+   cfg.anticipation_trace = false;
+    cfg.anticipation2_enabled = false;
+    cfg.ant2_trace = false;
+    cfg.ant2_gain = 0.6f;
     cfg.emotional_source = EMPATHIC_SOURCE_AUDIO;
     cfg.empathy_gain = 1.0f;
     cfg.emotional_memory_enabled = false;
@@ -344,6 +354,26 @@ static substrate_config parse_args(int argc, char **argv)
             cfg.empathic_enabled = true;
             cfg.empathic_trace = true;
             cfg.anticipation_trace = true; // merged by Codex
+        } else if (strcmp(arg, "--anticipation2") == 0) {
+            cfg.anticipation2_enabled = true;
+        } else if (strcmp(arg, "--ant2-trace") == 0) {
+            cfg.anticipation2_enabled = true;
+            cfg.ant2_trace = true;
+        } else if (strncmp(arg, "--ant2-gain=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    cfg.anticipation2_enabled = true;
+                    cfg.ant2_gain = parsed;
+                }
+            }
         } else if (strcmp(arg, "--affinity") == 0) {
             cfg.affinity_enabled = true;
         } else if (strncmp(arg, "--affinity-cfg=", 15) == 0) {
@@ -735,6 +765,40 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
             bond_gate_update(&substrate_bond_gate, &substrate_affinity_profile, consent_level, field_coh);
         }
         bool logged_gate = false;
+        float cycle_influence = substrate_affinity_enabled ? clamp_unit(substrate_bond_gate.influence) : 1.0f;
+        float rate_after_feedforward = state->breath_rate;
+        if (substrate_ant2_enabled) {
+            float target_coh = 0.80f;
+            float actual_coh = clamp_unit(state->sync_quality);
+            float rate = state->breath_rate;
+            if (!isfinite(rate) || rate <= 0.0f) {
+                rate = SUBSTRATE_BASE_RATE;
+            }
+            float delay_norm = SUBSTRATE_BASE_RATE / fmaxf(rate, 0.05f);
+            if (!isfinite(delay_norm) || delay_norm < 0.0f) {
+                delay_norm = 1.0f;
+            }
+            float pred_coh = 0.0f;
+            float pred_delay = 0.0f;
+            float ff = 0.0f;
+            float scale = ant2_feedforward(&substrate_ant2_state,
+                                           target_coh,
+                                           actual_coh,
+                                           delay_norm,
+                                           cycle_influence,
+                                           &pred_coh,
+                                           &pred_delay,
+                                           &ff);
+            if (isfinite(scale) && scale > 0.0f) {
+                state->breath_rate /= scale;
+            }
+            if (state->breath_rate < 0.20f) {
+                state->breath_rate = 0.20f;
+            } else if (state->breath_rate > 2.4f) {
+                state->breath_rate = 2.4f;
+            }
+            rate_after_feedforward = state->breath_rate;
+        }
 
         unsigned int cycle_before = state->cycles;
         pulse(state, 0.25f);
@@ -822,6 +886,14 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                        phase_bias);
             }
         }
+        if (substrate_ant2_enabled) {
+            float before_rate = fmaxf(rate_after_feedforward, 0.05f);
+            float after_rate = fmaxf(state->breath_rate, 0.05f);
+            float delay_before = SUBSTRATE_BASE_RATE / before_rate;
+            float delay_after = SUBSTRATE_BASE_RATE / after_rate;
+            float feedback_delta = delay_after - delay_before;
+            ant2_feedback_adjust(&substrate_ant2_state, feedback_delta);
+        }
         if (cfg->emotional_memory_enabled) {
             EmotionField field_snapshot = cfg->empathic_enabled ? response.field : empathic_field();
             emotion_memory_update(field_snapshot);
@@ -888,6 +960,12 @@ int main(int argc, char **argv)
         substrate_bond_gate.consent = 0.0f;
         substrate_bond_gate.bond_coh = 0.0f;
         substrate_bond_gate.safety = 0.0f;
+    }
+
+    substrate_ant2_enabled = cfg.anticipation2_enabled;
+    if (substrate_ant2_enabled) {
+        ant2_init(&substrate_ant2_state, cfg.ant2_gain);
+        ant2_set_trace(cfg.ant2_trace);
     }
 
     if (cfg.adaptive) {

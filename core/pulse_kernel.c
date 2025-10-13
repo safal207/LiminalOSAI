@@ -32,6 +32,7 @@
 #include "symbiosis.h"
 #include "empathic.h"
 #include "emotion_memory.h"
+#include "anticipation_v2.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -77,6 +78,9 @@ typedef struct {
     bool empathic_enabled;
     bool empathic_trace;
     bool anticipation_trace;
+    bool anticipation2_enabled;
+    bool ant2_trace;
+    float ant2_gain;
     EmpathicSource emotional_source;
     float empathy_gain;
     bool emotional_memory_enabled;
@@ -194,6 +198,10 @@ static bool affinity_layer_enabled = false;
 static Affinity affinity_profile = {0.0f, 0.0f, 0.0f};
 static BondGate bond_gate_state = {0.0f, 0.0f, 0.0f, 0.0f};
 static float explicit_consent_level = 0.2f;
+static bool ant2_module_enabled = false;
+static Ant2 ant2_state;
+static float ant2_delay_factor = 1.0f;
+static const float ANT2_BASE_DELAY = 0.1f;
 
 static const char *ensemble_strategy_name(ensemble_strategy mode)
 {
@@ -563,6 +571,9 @@ static kernel_options parse_options(int argc, char **argv)
         .empathic_enabled = false,
         .empathic_trace = false,
         .anticipation_trace = false,
+        .anticipation2_enabled = false,
+        .ant2_trace = false,
+        .ant2_gain = 0.6f,
         .emotional_source = EMPATHIC_SOURCE_AUDIO,
         .empathy_gain = 1.0f,
         .emotional_memory_enabled = false,
@@ -811,6 +822,26 @@ static kernel_options parse_options(int argc, char **argv)
         } else if (strcmp(arg, "--anticipation") == 0) {
             opts.empathic_enabled = true;
             opts.anticipation_trace = true; // merged by Codex
+        } else if (strcmp(arg, "--anticipation2") == 0) {
+            opts.anticipation2_enabled = true;
+        } else if (strcmp(arg, "--ant2-trace") == 0) {
+            opts.anticipation2_enabled = true;
+            opts.ant2_trace = true;
+        } else if (strncmp(arg, "--ant2-gain=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    opts.anticipation2_enabled = true;
+                    opts.ant2_gain = parsed;
+                }
+            }
         } else if (strcmp(arg, "--affinity") == 0) {
             opts.affinity_enabled = true;
         } else if (strncmp(arg, "--affinity-cfg=", 15) == 0) {
@@ -1027,6 +1058,11 @@ static void pulse_delay(void)
         }
         final_factor *= warm_factor;
     }
+    if (ant2_module_enabled) {
+        float feedback_delta = (float)(1.0 - final_factor);
+        ant2_feedback_adjust(&ant2_state, feedback_delta);
+        final_factor *= (double)ant2_delay_factor;
+    }
     if (final_factor < 0.1) {
         final_factor = 0.1;
     } else if (final_factor > 2.0) {
@@ -1127,6 +1163,32 @@ static void exhale(const kernel_options *opts)
     soil_decay();
 
     float cycle_influence = affinity_layer_enabled ? clamp_unit(bond_gate_state.influence) : 1.0f;
+    if (ant2_module_enabled) {
+        float target_coh = opts ? opts->target_coherence : 0.8f;
+        const CoherenceField *previous_field = coherence_state();
+        float actual_coh = previous_field ? clamp_unit(previous_field->coherence) : target_coh;
+        double last_delay = coherence_last_delay();
+        float delay_norm = 1.0f;
+        if (isfinite(last_delay) && ANT2_BASE_DELAY > 0.0f) {
+            delay_norm = (float)(last_delay / ANT2_BASE_DELAY);
+        }
+        if (!isfinite(delay_norm) || delay_norm < 0.0f) {
+            delay_norm = 1.0f;
+        }
+        float pred_coh = 0.0f;
+        float pred_delay = 0.0f;
+        float ff = 0.0f;
+        ant2_delay_factor = ant2_feedforward(&ant2_state,
+                                             target_coh,
+                                             actual_coh,
+                                             delay_norm,
+                                             cycle_influence,
+                                             &pred_coh,
+                                             &pred_delay,
+                                             &ff);
+    } else {
+        ant2_delay_factor = 1.0f;
+    }
     symbol_set_affinity_scale(cycle_influence);
 
     const char *label = "exhale";
@@ -1789,6 +1851,13 @@ int main(int argc, char **argv)
         bond_gate_state.safety = 0.0f;
         symbol_set_affinity_scale(1.0f);
         dream_set_affinity_gate(1.0f, true);
+    }
+
+    ant2_module_enabled = opts.anticipation2_enabled;
+    ant2_delay_factor = 1.0f;
+    if (ant2_module_enabled) {
+        ant2_init(&ant2_state, opts.ant2_gain);
+        ant2_set_trace(opts.ant2_trace);
     }
     uint64_t pulses = 0;
     while (!opts.limit || pulses < opts.limit) {
