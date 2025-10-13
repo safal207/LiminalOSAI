@@ -17,6 +17,7 @@
 #include "awareness.h"
 #include "council.h"
 #include "coherence.h"
+#include "collective.h"
 #include "health_scan.h"
 #include "weave.h"
 #include "dream.h"
@@ -37,6 +38,12 @@
 #ifndef EMOTION_TRACE_PATH_MAX
 #define EMOTION_TRACE_PATH_MAX 256
 #endif
+
+typedef enum {
+    ENSEMBLE_STRATEGY_AVG = 0,
+    ENSEMBLE_STRATEGY_MEDIAN,
+    ENSEMBLE_STRATEGY_LEADER
+} ensemble_strategy;
 
 typedef struct {
     bool show_trace;
@@ -72,6 +79,10 @@ typedef struct {
     uint64_t limit;
     uint32_t scan_interval;
     float target_coherence;
+    bool collective_enabled;
+    bool collective_trace;
+    float group_target;
+    ensemble_strategy ensemble_mode;
     float council_threshold;
     int phase_count;
     float phase_shift_deg[WEAVE_MODULE_COUNT];
@@ -99,6 +110,234 @@ static float clamp_unit(float value)
         return 1.0f;
     }
     return value;
+}
+
+static RGraph collective_graph = {0};
+static bool collective_active = false;
+static bool collective_trace_enabled = false;
+static ensemble_strategy collective_strategy = ENSEMBLE_STRATEGY_MEDIAN;
+static float collective_target_level = 0.82f;
+static float collective_pending_adjust = 0.0f;
+static int collective_node_capacity = 0;
+static int collective_edge_capacity = 0;
+static const int COLLECTIVE_DEFAULT_NODES = 16;
+
+static const char *ensemble_strategy_name(ensemble_strategy mode)
+{
+    switch (mode) {
+    case ENSEMBLE_STRATEGY_AVG:
+        return "avg";
+    case ENSEMBLE_STRATEGY_LEADER:
+        return "leader";
+    case ENSEMBLE_STRATEGY_MEDIAN:
+    default:
+        return "median";
+    }
+}
+
+static void collective_begin_cycle(void)
+{
+    collective_pending_adjust = 0.0f;
+    if (!collective_active) {
+        return;
+    }
+    if (!collective_graph.nodes || !collective_graph.edges) {
+        return;
+    }
+    collective_graph.n_nodes = 0;
+    collective_graph.n_edges = 0;
+}
+
+static int collective_add_node(const char *id, float vitality, float pulse)
+{
+    if (!collective_active || !collective_graph.nodes) {
+        return -1;
+    }
+    if (collective_graph.n_nodes >= collective_node_capacity || collective_node_capacity <= 0) {
+        return -1;
+    }
+
+    float vitality_clamped = clamp_unit(isfinite(vitality) ? vitality : 0.0f);
+    if (vitality_clamped <= 0.0f) {
+        return -1;
+    }
+
+    RNode *node = &collective_graph.nodes[collective_graph.n_nodes];
+    memset(node, 0, sizeof(*node));
+    if (id && *id) {
+        size_t len = strlen(id);
+        if (len >= sizeof(node->id)) {
+            len = sizeof(node->id) - 1;
+        }
+        memcpy(node->id, id, len);
+        node->id[len] = '\0';
+    } else {
+        snprintf(node->id, sizeof(node->id), "n%d", collective_graph.n_nodes);
+    }
+    node->vitality = vitality_clamped;
+    node->pulse = clamp_unit(isfinite(pulse) ? pulse : 0.0f);
+    ++collective_graph.n_nodes;
+    return collective_graph.n_nodes - 1;
+}
+
+static void collective_connect_complete(void)
+{
+    if (!collective_active || !collective_graph.edges || collective_graph.n_nodes < 2) {
+        collective_graph.n_edges = 0;
+        return;
+    }
+
+    int edge_index = 0;
+    for (int i = 0; i < collective_graph.n_nodes - 1; ++i) {
+        for (int j = i + 1; j < collective_graph.n_nodes; ++j) {
+            if (edge_index >= collective_edge_capacity) {
+                collective_graph.n_edges = edge_index;
+                return;
+            }
+            REdge *edge = &collective_graph.edges[edge_index++];
+            edge->a = i;
+            edge->b = j;
+            edge->harmony = 0.0f;
+            edge->flux = 0.0f;
+        }
+    }
+    collective_graph.n_edges = edge_index;
+}
+
+typedef struct {
+    float harmony;
+    float flux;
+} weighted_edge;
+
+static int compare_weighted_edge(const void *lhs, const void *rhs)
+{
+    const weighted_edge *a = (const weighted_edge *)lhs;
+    const weighted_edge *b = (const weighted_edge *)rhs;
+    if (a->harmony < b->harmony) {
+        return -1;
+    }
+    if (a->harmony > b->harmony) {
+        return 1;
+    }
+    return 0;
+}
+
+static float collective_weighted_median(const RGraph *graph)
+{
+    if (!graph || graph->n_edges <= 0) {
+        return 0.0f;
+    }
+
+    int count = graph->n_edges;
+    weighted_edge *copies = (weighted_edge *)malloc((size_t)count * sizeof(weighted_edge));
+    if (!copies) {
+        return graph->group_coh;
+    }
+
+    int actual = 0;
+    float total_flux = 0.0f;
+    for (int i = 0; i < count; ++i) {
+        const REdge *edge = &graph->edges[i];
+        if (!edge || edge->flux <= 0.0f) {
+            continue;
+        }
+        copies[actual].harmony = clamp_unit(edge->harmony);
+        copies[actual].flux = edge->flux;
+        total_flux += edge->flux;
+        ++actual;
+    }
+
+    if (actual == 0 || total_flux <= 0.0f) {
+        free(copies);
+        return graph->group_coh;
+    }
+
+    qsort(copies, (size_t)actual, sizeof(weighted_edge), compare_weighted_edge);
+    float target = total_flux * 0.5f;
+    float accum = 0.0f;
+    float median = copies[actual - 1].harmony;
+    for (int i = 0; i < actual; ++i) {
+        accum += copies[i].flux;
+        if (accum >= target) {
+            median = copies[i].harmony;
+            break;
+        }
+    }
+
+    free(copies);
+    return clamp_unit(median);
+}
+
+static float collective_leader_pulse(const RGraph *graph)
+{
+    if (!graph || graph->n_nodes <= 0) {
+        return 0.0f;
+    }
+    float best_vitality = -1.0f;
+    float leader_pulse = 0.0f;
+    for (int i = 0; i < graph->n_nodes; ++i) {
+        const RNode *node = &graph->nodes[i];
+        if (!node) {
+            continue;
+        }
+        if (node->vitality > best_vitality) {
+            best_vitality = node->vitality;
+            leader_pulse = node->pulse;
+        }
+    }
+    if (best_vitality <= 0.0f) {
+        return 0.0f;
+    }
+    return clamp_unit(leader_pulse);
+}
+
+static float collective_effective_coherence(const RGraph *graph)
+{
+    if (!graph) {
+        return 0.0f;
+    }
+
+    float base = clamp_unit(graph->group_coh);
+    switch (collective_strategy) {
+    case ENSEMBLE_STRATEGY_AVG:
+        return base;
+    case ENSEMBLE_STRATEGY_LEADER: {
+        float leader = collective_leader_pulse(graph);
+        if (leader <= 0.0f) {
+            return base;
+        }
+        return clamp_unit(0.6f * base + 0.4f * leader);
+    }
+    case ENSEMBLE_STRATEGY_MEDIAN:
+    default: {
+        float median = collective_weighted_median(graph);
+        if (median <= 0.0f) {
+            return base;
+        }
+        return clamp_unit(0.5f * base + 0.5f * median);
+    }
+    }
+}
+
+static void collective_trace_log(const RGraph *graph, float adjust)
+{
+    if (!collective_trace_enabled || !graph) {
+        return;
+    }
+
+    FILE *fp = fopen("logs/collective_trace.log", "a");
+    if (!fp) {
+        return;
+    }
+
+    fprintf(fp,
+            "{\"nodes\":%d,\"edges\":%d,\"group_coh\":%.2f,\"adjust\":%.3f,\"strategy\":\"%s\"}\n",
+            graph->n_nodes,
+            graph->n_edges,
+            graph->group_coh,
+            adjust,
+            ensemble_strategy_name(collective_strategy));
+    fclose(fp);
 }
 
 static kernel_options parse_options(int argc, char **argv)
@@ -137,6 +376,10 @@ static kernel_options parse_options(int argc, char **argv)
         .limit = 0,
         .scan_interval = 10U,
         .target_coherence = 0.80f,
+        .collective_enabled = false,
+        .collective_trace = false,
+        .group_target = 0.82f,
+        .ensemble_mode = ENSEMBLE_STRATEGY_MEDIAN,
         .council_threshold = 0.05f,
         .phase_count = 8,
         .dream_threshold = 0.90f,
@@ -167,6 +410,10 @@ static kernel_options parse_options(int argc, char **argv)
             opts.show_coherence = true;
         } else if (strcmp(arg, "--auto-tune") == 0) {
             opts.auto_tune = true;
+        } else if (strcmp(arg, "--collective") == 0) {
+            opts.collective_enabled = true;
+        } else if (strcmp(arg, "--collective-trace") == 0) {
+            opts.collective_trace = true;
         } else if (strcmp(arg, "--climate-log") == 0) {
             opts.climate_log = true;
         } else if (strcmp(arg, "--health-scan") == 0) {
@@ -206,6 +453,31 @@ static kernel_options parse_options(int argc, char **argv)
                         parsed = 1.0f;
                     }
                     opts.target_coherence = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--group-target=", 15) == 0) {
+            const char *value = arg + 15;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    opts.group_target = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--ensemble-strategy=", 20) == 0) {
+            const char *value = arg + 20;
+            if (value && *value) {
+                if (strcmp(value, "avg") == 0) {
+                    opts.ensemble_mode = ENSEMBLE_STRATEGY_AVG;
+                } else if (strcmp(value, "median") == 0) {
+                    opts.ensemble_mode = ENSEMBLE_STRATEGY_MEDIAN;
+                } else if (strcmp(value, "leader") == 0) {
+                    opts.ensemble_mode = ENSEMBLE_STRATEGY_LEADER;
                 }
             }
         } else if (strncmp(arg, "--council-threshold=", 21) == 0) {
@@ -438,8 +710,57 @@ static kernel_options parse_options(int argc, char **argv)
 static void pulse_delay(void)
 {
     const double base_delay = 0.1;
-    double tuned_delay = base_delay * coherence_delay_scale();
-    tuned_delay = awareness_adjust_delay(tuned_delay);
+    double delay_after_coherence = base_delay * coherence_delay_scale();
+    if (!isfinite(delay_after_coherence) || delay_after_coherence <= 0.0) {
+        delay_after_coherence = base_delay;
+    }
+
+    double awareness_scaled = awareness_adjust_delay(delay_after_coherence);
+    double awareness_factor = 1.0;
+    if (delay_after_coherence > 0.0) {
+        awareness_factor = awareness_scaled / delay_after_coherence;
+    }
+    if (!isfinite(awareness_factor) || awareness_factor <= 0.0) {
+        awareness_factor = 1.0;
+    }
+
+    float awareness_adj = (float)(1.0 - awareness_factor);
+    if (!isfinite(awareness_adj)) {
+        awareness_adj = 0.0f;
+    }
+
+    double final_factor = awareness_factor;
+    if (collective_active) {
+        float collective_adj = collective_pending_adjust;
+        if (!isfinite(collective_adj)) {
+            collective_adj = 0.0f;
+        }
+        if (fabsf(collective_adj) > 0.0001f) {
+            float total_adj = collective_adj;
+            if (fabsf(awareness_adj) > 0.0001f) {
+                total_adj = 0.5f * awareness_adj + 0.5f * collective_adj;
+            }
+            if (total_adj > 0.95f) {
+                total_adj = 0.95f;
+            } else if (total_adj < -0.95f) {
+                total_adj = -0.95f;
+            }
+            final_factor = 1.0 - (double)total_adj;
+        }
+    }
+
+    if (!isfinite(final_factor)) {
+        final_factor = 1.0;
+    }
+    if (final_factor < 0.1) {
+        final_factor = 0.1;
+    } else if (final_factor > 2.0) {
+        final_factor = 2.0;
+    }
+
+    double tuned_delay = delay_after_coherence * final_factor;
+    collective_pending_adjust = 0.0f;
+
     tuned_delay *= metabolic_delay_scale();
     tuned_delay *= symbiosis_delay_scale();
     tuned_delay *= empathic_delay_scale();
@@ -537,6 +858,8 @@ static void exhale(const kernel_options *opts)
     static const char exhale_signal[] = "ebb";
     resonant_msg exhale_msg = resonant_msg_make(SENSOR_EXHALE, RESONANT_BROADCAST_ID, ENERGY_EXHALE, exhale_signal, sizeof(exhale_signal) - 1);
     bus_emit(&exhale_msg);
+
+    collective_begin_cycle();
 
     size_t activated = symbol_layer_pulse();
 
@@ -794,6 +1117,74 @@ static void exhale(const kernel_options *opts)
                   anticipation_trend,
                   dream_balance.balance_strength); // unified merge by Codex
 
+    if (collective_active) {
+        if (!collective_graph.nodes || !collective_graph.edges) {
+            collective_pending_adjust = 0.0f;
+        } else {
+            float awareness_vitality = clamp_unit(awareness_snapshot.awareness_level);
+            if (awareness_vitality > 0.0f) {
+                collective_add_node("awareness", awareness_vitality, clamp_unit(awareness_snapshot.self_coherence));
+            }
+
+            float coherence_vitality = clamp_unit(coherence_level);
+            float coherence_pulse = coherence_field ? clamp_unit(coherence_field->resonance_smooth) : coherence_vitality;
+            if (coherence_vitality > 0.0f) {
+                collective_add_node("coherence", coherence_vitality, coherence_pulse);
+            }
+
+            float stability_vitality = clamp_unit(stability_for_coherence);
+            if (stability_vitality > 0.0f) {
+                collective_add_node("stability", stability_vitality, stability_vitality);
+            }
+
+            float dream_vitality = clamp_unit(fabsf(dream_balance.balance_strength));
+            if (dream_vitality > 0.0f) {
+                float dream_pulse = clamp_unit(0.5f + 0.5f * dream_balance.anticipation_sync);
+                collective_add_node("dream", dream_vitality, dream_pulse);
+            }
+
+            if (council_active) {
+                float council_vitality = clamp_unit(fabsf(council.final_decision));
+                if (council_vitality > 0.0f) {
+                    float council_pulse = clamp_unit(0.5f + 0.5f * council.final_decision);
+                    collective_add_node("council", council_vitality, council_pulse);
+                }
+            }
+
+            if (human_bridge_active) {
+                float human_vitality = clamp_unit(human_alignment);
+                if (human_vitality > 0.0f) {
+                    float human_pulse_norm = clamp_unit(human_pulse.beat_rate * 0.5f);
+                    collective_add_node("human", human_vitality, human_pulse_norm);
+                }
+            }
+
+            if (empathic_layer_active) {
+                float empathy_vitality = clamp_unit(empathic_response.field.harmony);
+                if (empathy_vitality > 0.0f) {
+                    float empathy_pulse = clamp_unit(empathic_response.field.anticipation);
+                    collective_add_node("empathy", empathy_vitality, empathy_pulse);
+                }
+            }
+
+            float anticipation_vitality = clamp_unit((anticipation_level + anticipation_trend) * 0.5f);
+            if (anticipation_vitality > 0.0f) {
+                collective_add_node("anticipation", anticipation_vitality, clamp_unit(anticipation_field));
+            }
+
+            collective_connect_complete();
+            rgraph_update_edges(&collective_graph);
+            rgraph_compute_coh(&collective_graph);
+            collective_graph.group_coh = collective_effective_coherence(&collective_graph);
+            float adjust = rgraph_ensemble_adjust(&collective_graph, collective_target_level);
+            collective_pending_adjust = adjust;
+            if (collective_graph.n_edges > 0 && fabsf(adjust) > 0.0001f) {
+                bus_emit_wave("ensemble", fabsf(adjust));
+            }
+            collective_trace_log(&collective_graph, adjust);
+        }
+    }
+
     if (opts && opts->show_symbols) {
         if (activated == 0) {
             fputs("symbols: (quiet)\n", stdout);
@@ -920,6 +1311,23 @@ static void print_recent_traces(void)
 int main(int argc, char **argv)
 {
     kernel_options opts = parse_options(argc, argv);
+
+    collective_active = opts.collective_enabled || opts.collective_trace;
+    collective_trace_enabled = opts.collective_trace;
+    collective_strategy = opts.ensemble_mode;
+    collective_target_level = clamp_unit(opts.group_target);
+    collective_pending_adjust = 0.0f;
+    if (collective_active) {
+        collective_node_capacity = COLLECTIVE_DEFAULT_NODES;
+        if (collective_node_capacity < 2) {
+            collective_node_capacity = 2;
+        }
+        collective_edge_capacity = (collective_node_capacity * (collective_node_capacity - 1)) / 2;
+        rgraph_init(&collective_graph, collective_node_capacity, collective_edge_capacity);
+    } else {
+        collective_node_capacity = 0;
+        collective_edge_capacity = 0;
+    }
 
     soil_init();
     bus_init();

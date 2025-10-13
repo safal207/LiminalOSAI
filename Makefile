@@ -13,13 +13,14 @@ REF_SRCS    := reflection/layer.c
 AWARE_SRCS  := awareness/bridge.c
 COUNCIL_SRCS:= council/inner.c
 COH_SRCS    := coherence/field.c
+COLLECTIVE_SRCS := collective/graph.c
 DIAG_SRCS   := diagnostics/health_scan.c
 SYNC_SRCS   := synchrony/weave.c
 DREAM_SRCS  := dream/state.c dream/balancer.c
 METAB_SRCS  := metabolic/flow.c
 SYMBIOTIC_SRCS := symbiosis/bridge.c
 EMPATHIC_SRCS := empathic/field.c
-SRCS        := $(CORE_SRCS) $(MEM_SRCS) $(BUS_SRCS) $(SYM_SRCS) $(REF_SRCS) $(AWARE_SRCS) $(COUNCIL_SRCS) $(COH_SRCS) $(DIAG_SRCS) $(SYNC_SRCS) $(DREAM_SRCS) $(METAB_SRCS) $(SYMBIOTIC_SRCS) $(EMPATHIC_SRCS)
+SRCS        := $(CORE_SRCS) $(MEM_SRCS) $(BUS_SRCS) $(SYM_SRCS) $(REF_SRCS) $(AWARE_SRCS) $(COUNCIL_SRCS) $(COH_SRCS) $(COLLECTIVE_SRCS) $(DIAG_SRCS) $(SYNC_SRCS) $(DREAM_SRCS) $(METAB_SRCS) $(SYMBIOTIC_SRCS) $(EMPATHIC_SRCS)
 OBJS        := $(SRCS:.c=.o)
 SUBSTRATE_OBJS := $(SUBSTRATE_SRCS:.c=.o)
 ALL_OBJS    := $(OBJS) $(SUBSTRATE_OBJS)
