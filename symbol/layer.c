@@ -3,6 +3,7 @@
 #include "resonant.h"
 #include "soil.h"
 
+#include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -42,6 +43,8 @@ typedef struct {
 static symbol_link_entry link_buffer[SYMBOL_LINK_CAPACITY];
 static size_t link_count = 0;
 static size_t link_cursor = 0;
+
+static float symbol_affinity_scale = 1.0f;
 
 static const symbol_pattern pattern_table[] = {
     { "breath_cycle",    { 3U, 5U, 2U }, 3U, 1.5f },
@@ -99,12 +102,13 @@ static bool symbol_record_activation(Symbol *symbol, float impulse)
         return false;
     }
 
-    symbol->energy += impulse;
+    float impulse_scaled = impulse * symbol_affinity_scale;
+    symbol->energy += impulse_scaled;
     if (symbol->energy > 12.0f) {
         symbol->energy = 12.0f;
     }
 
-    symbol->resonance += impulse * 0.2f;
+    symbol->resonance += impulse_scaled * 0.2f;
     if (symbol->resonance > 12.0f) {
         symbol->resonance = 12.0f;
     }
@@ -333,6 +337,19 @@ void symbol_create_link(const char *from_key, const char *to_key, float weight)
     }
 }
 
+void symbol_set_affinity_scale(float scale)
+{
+    if (!isfinite(scale)) {
+        scale = 0.0f;
+    }
+    if (scale < 0.0f) {
+        scale = 0.0f;
+    } else if (scale > 1.0f) {
+        scale = 1.0f;
+    }
+    symbol_affinity_scale = scale;
+}
+
 void symbol_layer_init(void)
 {
     memset(symbol_table, 0, sizeof(symbol_table));
@@ -344,6 +361,7 @@ void symbol_layer_init(void)
     memset(link_buffer, 0, sizeof(link_buffer));
     link_count = 0;
     link_cursor = 0;
+    symbol_affinity_scale = 1.0f;
 
     for (size_t i = 0; i < sizeof(pattern_table) / sizeof(pattern_table[0]); ++i) {
         symbol_register(pattern_table[i].key, 0.4f);
