@@ -34,6 +34,7 @@ void dream_update(float coherence,
                   float anticipation_micro,
                   float anticipation_trend,
                   float alignment_balance); // unified merge by Codex
+void dream_set_affinity_gate(float influence, bool allow_personal);
 
 #ifdef __cplusplus
 }

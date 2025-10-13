@@ -32,6 +32,8 @@ static float observed_anticipation_level = 0.5f;
 static float observed_anticipation_micro = 0.5f;
 static float observed_anticipation_trend = 0.5f;
 static float dream_alignment_feedback = 0.0f; // unified merge by Codex
+static float dream_affinity_scale = 1.0f;
+static bool dream_allow_personal = true;
 
 static float clamp01(float value)
 {
@@ -173,6 +175,20 @@ void dream_set_entry_threshold(float threshold)
     dream_state_data.entry_threshold = clamp01(threshold);
 }
 
+void dream_set_affinity_gate(float influence, bool allow_personal)
+{
+    if (!isfinite(influence)) {
+        influence = 0.0f;
+    }
+    if (influence < 0.0f) {
+        influence = 0.0f;
+    } else if (influence > 1.0f) {
+        influence = 1.0f;
+    }
+    dream_affinity_scale = influence;
+    dream_allow_personal = allow_personal;
+}
+
 const DreamState *dream_state(void)
 {
     return &dream_state_data;
@@ -195,6 +211,12 @@ void dream_enter(void)
     dream_state_data.anticipation_sync = anticipation_mix; // unified merge by Codex
     dream_state_data.resonance_bias = anticipation_mix;
     dream_state_data.alignment_balance = dream_alignment_feedback;
+
+    dream_state_data.dream_intensity = clamp01(dream_state_data.dream_intensity * dream_affinity_scale);
+    dream_state_data.anticipation_sync = clamp01(dream_state_data.anticipation_sync * dream_affinity_scale +
+                                                0.5f * (1.0f - dream_affinity_scale));
+    dream_state_data.resonance_bias = clamp01(dream_state_data.resonance_bias * dream_affinity_scale);
+    dream_state_data.alignment_balance *= dream_affinity_scale;
 
     awareness_set_coherence_scale(0.85);
 
@@ -234,12 +256,17 @@ void dream_iterate(void)
     dream_state_data.anticipation_sync = clamp01(dream_state_data.anticipation_sync * 0.6f + anticipation_wave * 0.4f);
     float alignment_wave = clamp01(0.5f + dream_alignment_feedback * 0.5f);
     float intensity_target = clamp01(observed_coherence * 0.55f + dream_state_data.anticipation_sync * 0.30f + alignment_wave * 0.15f);
+    intensity_target = clamp01(intensity_target * dream_affinity_scale);
     dream_state_data.dream_intensity = clamp01(dream_state_data.dream_intensity * 0.65f + intensity_target * 0.35f);
     dream_state_data.resonance_bias = intensity_target;
-    dream_state_data.alignment_balance = dream_alignment_feedback; // unified merge by Codex
+    dream_state_data.alignment_balance = dream_alignment_feedback * dream_affinity_scale; // unified merge by Codex
 
     char candidates[DREAM_SYMBOL_CHOICES][32];
     size_t count = dream_collect_symbols(candidates, DREAM_SYMBOL_CHOICES);
+
+    if (!dream_allow_personal) {
+        count = 0;
+    }
 
     if (count >= 2U) {
         dream_seed_random();
@@ -253,8 +280,12 @@ void dream_iterate(void)
         float anticipation_bias = (dream_state_data.anticipation_sync - 0.5f) * 0.25f;
         float alignment_bias = dream_alignment_feedback * 0.10f;
         float weight = clamp01(base_weight + anticipation_bias + alignment_bias);
+        weight *= dream_affinity_scale;
         if (weight < 0.05f) {
-            weight = 0.05f;
+            weight = 0.05f * dream_affinity_scale;
+        }
+        if (weight <= 0.0f) {
+            return;
         }
         symbol_create_link(candidates[first], candidates[second], weight);
 
@@ -322,6 +353,8 @@ void dream_exit(void)
     dream_state_data.resonance_bias = 0.0f;
     dream_state_data.alignment_balance = 0.0f;
     dream_alignment_feedback = 0.0f; // unified merge by Codex
+    dream_affinity_scale = 1.0f;
+    dream_allow_personal = true;
 
     awareness_set_coherence_scale(0.95);
 

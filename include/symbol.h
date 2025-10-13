@@ -16,6 +16,7 @@ typedef struct {
 void symbol_layer_init(void);
 size_t symbol_layer_pulse(void);
 size_t symbol_layer_active(const Symbol **out_symbols, size_t max_count);
+void symbol_set_affinity_scale(float scale);
 
 void symbol_register(const char *key, float resonance);
 Symbol *symbol_find(const char *key);

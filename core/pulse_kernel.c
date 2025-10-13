@@ -23,6 +23,7 @@
 #include "coherence.h"
 #include "collective.h"
 #include "collective_memory.h"
+#include "affinity.h"
 #include "health_scan.h"
 #include "weave.h"
 #include "dream.h"
@@ -100,6 +101,10 @@ typedef struct {
     float dream_threshold;
     float vitality_rest_threshold;
     float vitality_creative_threshold;
+    bool affinity_enabled;
+    bool bond_trace_enabled;
+    Affinity affinity_config;
+    float allow_align_consent;
 } kernel_options;
 
 static size_t bounded_string_length(const uint8_t *data, size_t max_len)
@@ -120,6 +125,43 @@ static float clamp_unit(float value)
         return 1.0f;
     }
     return value;
+}
+
+static void parse_affinity_config(Affinity *aff, const char *value)
+{
+    if (!aff || !value) {
+        return;
+    }
+
+    char buffer[128];
+    strncpy(buffer, value, sizeof(buffer) - 1U);
+    buffer[sizeof(buffer) - 1U] = '\0';
+
+    char *token = strtok(buffer, ",");
+    while (token) {
+        while (*token == ' ') {
+            ++token;
+        }
+        char *colon = strchr(token, ':');
+        if (colon && colon[1] != '\0') {
+            *colon = '\0';
+            const char *name = token;
+            const char *val_text = colon + 1;
+            char *end = NULL;
+            float parsed = strtof(val_text, &end);
+            if (end != val_text && isfinite(parsed)) {
+                float clamped = clamp_unit(parsed);
+                if (strcmp(name, "care") == 0) {
+                    aff->care = clamped;
+                } else if (strcmp(name, "respect") == 0) {
+                    aff->respect = clamped;
+                } else if (strcmp(name, "presence") == 0) {
+                    aff->presence = clamped;
+                }
+            }
+        }
+        token = strtok(NULL, ",");
+    }
 }
 
 static RGraph collective_graph = {0};
@@ -147,6 +189,11 @@ static bool collective_flag_anticipation = false;
 static bool collective_flag_dream = false;
 static bool collective_flag_balancer = false;
 static const int COLLECTIVE_WARMUP_LIMIT = 4;
+
+static bool affinity_layer_enabled = false;
+static Affinity affinity_profile = {0.0f, 0.0f, 0.0f};
+static BondGate bond_gate_state = {0.0f, 0.0f, 0.0f, 0.0f};
+static float explicit_consent_level = 0.2f;
 
 static const char *ensemble_strategy_name(ensemble_strategy mode)
 {
@@ -537,13 +584,19 @@ static kernel_options parse_options(int argc, char **argv)
         .phase_count = 8,
         .dream_threshold = 0.90f,
         .vitality_rest_threshold = 0.30f,
-        .vitality_creative_threshold = 0.90f
+        .vitality_creative_threshold = 0.90f,
+        .affinity_enabled = false,
+        .bond_trace_enabled = false,
+        .affinity_config = {0.0f, 0.0f, 0.0f},
+        .allow_align_consent = 0.2f
     };
 
     for (size_t i = 0; i < weave_module_count(); ++i) {
         opts.phase_shift_deg[i] = 0.0f;
         opts.phase_shift_set[i] = false;
     }
+
+    affinity_default(&opts.affinity_config);
 
     if (!opts.cm_path[0]) {
         const char *default_path = "soil/collective_memory.jsonl";
@@ -758,6 +811,29 @@ static kernel_options parse_options(int argc, char **argv)
         } else if (strcmp(arg, "--anticipation") == 0) {
             opts.empathic_enabled = true;
             opts.anticipation_trace = true; // merged by Codex
+        } else if (strcmp(arg, "--affinity") == 0) {
+            opts.affinity_enabled = true;
+        } else if (strncmp(arg, "--affinity-cfg=", 15) == 0) {
+            const char *value = arg + 15;
+            if (value && *value) {
+                parse_affinity_config(&opts.affinity_config, value);
+            }
+        } else if (strncmp(arg, "--allow-align=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    opts.allow_align_consent = parsed;
+                }
+            }
+        } else if (strcmp(arg, "--bond-trace") == 0) {
+            opts.bond_trace_enabled = true;
         } else if (strncmp(arg, "--emotional-source=", 20) == 0) {
             const char *value = arg + 20;
             if (strcmp(value, "text") == 0) {
@@ -918,6 +994,13 @@ static void pulse_delay(void)
         if (!isfinite(collective_adj)) {
             collective_adj = 0.0f;
         }
+        if (affinity_layer_enabled) {
+            float gated_adj = bond_gate_apply(collective_adj, &bond_gate_state);
+            if (bond_gate_log_enabled()) {
+                bond_gate_trace(&affinity_profile, &bond_gate_state, gated_adj);
+            }
+            collective_adj = gated_adj;
+        }
         if (fabsf(collective_adj) > 0.0001f) {
             float total_adj = collective_adj;
             if (fabsf(awareness_adj) > 0.0001f) {
@@ -1043,6 +1126,9 @@ static void exhale(const kernel_options *opts)
 {
     soil_decay();
 
+    float cycle_influence = affinity_layer_enabled ? clamp_unit(bond_gate_state.influence) : 1.0f;
+    symbol_set_affinity_scale(cycle_influence);
+
     const char *label = "exhale";
     soil_trace trace = soil_trace_make(ENERGY_EXHALE, label, strlen(label));
     soil_write(&trace);
@@ -1075,6 +1161,11 @@ static void exhale(const kernel_options *opts)
         resonance_avg = resonance_sum / (float)active_count;
     }
 
+    if (affinity_layer_enabled) {
+        energy_avg *= cycle_influence;
+        resonance_avg *= cycle_influence;
+    }
+
     float stability = 0.0f;
     if (active_count > 0) {
         const float max_signal = 12.0f;
@@ -1091,6 +1182,13 @@ static void exhale(const kernel_options *opts)
             presence = 1.0f;
         }
         stability = (energy_norm + resonance_norm) * 0.45f + presence * 0.10f;
+        if (stability > 1.0f) {
+            stability = 1.0f;
+        }
+    }
+
+    if (affinity_layer_enabled) {
+        stability *= cycle_influence;
         if (stability > 1.0f) {
             stability = 1.0f;
         }
@@ -1296,6 +1394,28 @@ static void exhale(const kernel_options *opts)
 
     const CoherenceField *coherence_field =
         coherence_update(energy_avg, resonance_for_coherence, stability_for_coherence, awareness_for_coherence);
+
+    if (affinity_layer_enabled) {
+        float field_coherence = coherence_field ? clamp_unit(coherence_field->coherence) : 0.0f;
+        float explicit_consent = clamp_unit(explicit_consent_level);
+        float implicit_consent = 0.0f;
+        if (human_bridge_active) {
+            implicit_consent = clamp_unit(human_alignment);
+            if (explicit_consent < 0.6f && implicit_consent > 0.6f) {
+                implicit_consent = 0.6f;
+            }
+        }
+        float consent_level = explicit_consent;
+        if (implicit_consent > consent_level) {
+            consent_level = implicit_consent;
+        }
+        bond_gate_update(&bond_gate_state, &affinity_profile, consent_level, field_coherence);
+        bool allow_personal = bond_gate_state.consent >= 0.3f && bond_gate_state.influence > 0.0f;
+        dream_set_affinity_gate(bond_gate_state.influence, allow_personal);
+        cycle_influence = clamp_unit(bond_gate_state.influence);
+    } else {
+        dream_set_affinity_gate(1.0f, true);
+    }
 
     float coherence_level = coherence_field ? coherence_field->coherence : 0.0f;
     if (empathic_layer_active) {
@@ -1651,6 +1771,25 @@ int main(int argc, char **argv)
                              opts.recognition_threshold);
     symbiosis_init(opts.human_source, opts.human_trace, opts.human_resonance_gain);
     symbiosis_enable(opts.human_bridge_enabled);
+
+    bond_gate_set_log_enabled(opts.bond_trace_enabled);
+    affinity_layer_enabled = opts.affinity_enabled;
+    affinity_profile = opts.affinity_config;
+    explicit_consent_level = clamp_unit(opts.allow_align_consent);
+    bond_gate_reset(&bond_gate_state);
+    if (affinity_layer_enabled) {
+        bond_gate_update(&bond_gate_state, &affinity_profile, explicit_consent_level, 0.0f);
+        float initial_influence = clamp_unit(bond_gate_state.influence);
+        symbol_set_affinity_scale(initial_influence);
+        dream_set_affinity_gate(bond_gate_state.influence, bond_gate_state.consent >= 0.3f);
+    } else {
+        bond_gate_state.influence = 1.0f;
+        bond_gate_state.consent = 0.0f;
+        bond_gate_state.bond_coh = 0.0f;
+        bond_gate_state.safety = 0.0f;
+        symbol_set_affinity_scale(1.0f);
+        dream_set_affinity_gate(1.0f, true);
+    }
     uint64_t pulses = 0;
     while (!opts.limit || pulses < opts.limit) {
         inhale();

@@ -26,6 +26,7 @@
 #include "empathic.h"
 #include "emotion_memory.h"
 #include "council.h"
+#include "affinity.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -75,7 +76,16 @@ typedef struct {
     float recognition_threshold;
     char emotion_trace_path[EMOTION_TRACE_PATH_MAX];
     unsigned int cycle_limit;
+    bool affinity_enabled;
+    bool bond_trace;
+    Affinity affinity_config;
+    float allow_align_consent;
 } substrate_config;
+
+static bool substrate_affinity_enabled = false;
+static Affinity substrate_affinity_profile = {0.0f, 0.0f, 0.0f};
+static BondGate substrate_bond_gate = {0.0f, 0.0f, 0.0f, 0.0f};
+static float substrate_explicit_consent = 0.2f;
 
 static void rebirth(liminal_state *state)
 {
@@ -100,6 +110,43 @@ static float clamp_unit(float value)
         return 1.0f;
     }
     return value;
+}
+
+static void parse_affinity_config(Affinity *aff, const char *value)
+{
+    if (!aff || !value) {
+        return;
+    }
+
+    char buffer[128];
+    strncpy(buffer, value, sizeof(buffer) - 1U);
+    buffer[sizeof(buffer) - 1U] = '\0';
+
+    char *token = strtok(buffer, ",");
+    while (token) {
+        while (*token == ' ') {
+            ++token;
+        }
+        char *colon = strchr(token, ':');
+        if (colon && colon[1] != '\0') {
+            *colon = '\0';
+            const char *name = token;
+            const char *val_text = colon + 1;
+            char *end = NULL;
+            float parsed = strtof(val_text, &end);
+            if (end != val_text && isfinite(parsed)) {
+                float clamped = clamp_unit(parsed);
+                if (strcmp(name, "care") == 0) {
+                    aff->care = clamped;
+                } else if (strcmp(name, "respect") == 0) {
+                    aff->respect = clamped;
+                } else if (strcmp(name, "presence") == 0) {
+                    aff->presence = clamped;
+                }
+            }
+        }
+        token = strtok(NULL, ",");
+    }
 }
 
 static void remember(liminal_state *state, float imprint)
@@ -242,6 +289,10 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.recognition_threshold = 0.18f;
     cfg.emotion_trace_path[0] = '\0';
     cfg.cycle_limit = 6U;
+    cfg.affinity_enabled = false;
+    cfg.bond_trace = false;
+    affinity_default(&cfg.affinity_config);
+    cfg.allow_align_consent = 0.2f;
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -293,6 +344,29 @@ static substrate_config parse_args(int argc, char **argv)
             cfg.empathic_enabled = true;
             cfg.empathic_trace = true;
             cfg.anticipation_trace = true; // merged by Codex
+        } else if (strcmp(arg, "--affinity") == 0) {
+            cfg.affinity_enabled = true;
+        } else if (strncmp(arg, "--affinity-cfg=", 15) == 0) {
+            const char *value = arg + 15;
+            if (value && *value) {
+                parse_affinity_config(&cfg.affinity_config, value);
+            }
+        } else if (strncmp(arg, "--allow-align=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    cfg.allow_align_consent = parsed;
+                }
+            }
+        } else if (strcmp(arg, "--bond-trace") == 0) {
+            cfg.bond_trace = true;
         } else if (strncmp(arg, "--emotional-source=", 20) == 0) {
             const char *value = arg + 20;
             if (strcmp(value, "text") == 0) {
@@ -647,6 +721,21 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
     }
     emit_analysis_trace(state, cfg, NULL);
     while (state->cycles < max_cycles) {
+        if (substrate_affinity_enabled) {
+            float field_coh = clamp_unit(state->sync_quality);
+            float explicit_consent = clamp_unit(substrate_explicit_consent);
+            float implicit_consent = clamp_unit(state->sync_quality);
+            if (explicit_consent < 0.6f && implicit_consent > 0.6f) {
+                implicit_consent = 0.6f;
+            }
+            float consent_level = explicit_consent;
+            if (implicit_consent > consent_level) {
+                consent_level = implicit_consent;
+            }
+            bond_gate_update(&substrate_bond_gate, &substrate_affinity_profile, consent_level, field_coh);
+        }
+        bool logged_gate = false;
+
         unsigned int cycle_before = state->cycles;
         pulse(state, 0.25f);
         reflect(state);
@@ -665,7 +754,19 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
             state->resonance = response.resonance;
             float scale = response.delay_scale;
             if (isfinite(scale) && scale > 0.0f) {
-                float adjust = 1.0f + (scale - 1.0f) * 0.3f;
+                float base_delta = (scale - 1.0f) * 0.3f;
+                float applied_delta = base_delta;
+                if (substrate_affinity_enabled) {
+                    applied_delta = bond_gate_apply(base_delta, &substrate_bond_gate);
+                    if (!logged_gate && bond_gate_log_enabled()) {
+                        bond_gate_trace(&substrate_affinity_profile, &substrate_bond_gate, applied_delta);
+                        logged_gate = true;
+                    }
+                }
+                float adjust = 1.0f + applied_delta;
+                if (adjust < 0.1f) {
+                    adjust = 0.1f;
+                }
                 state->breath_rate *= adjust;
                 if (state->breath_rate < 0.20f) {
                     state->breath_rate = 0.20f;
@@ -678,7 +779,15 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                 state->phase_offset += 1.0f;
             }
             float anticipation_shift = (response.anticipation_level - 0.5f) * 0.05f;
-            state->breath_rate *= (1.0f + anticipation_shift);
+            float anticipation_delta = anticipation_shift;
+            if (substrate_affinity_enabled) {
+                anticipation_delta = bond_gate_apply(anticipation_shift, &substrate_bond_gate);
+                if (!logged_gate && bond_gate_log_enabled()) {
+                    bond_gate_trace(&substrate_affinity_profile, &substrate_bond_gate, anticipation_delta);
+                    logged_gate = true;
+                }
+            }
+            state->breath_rate *= (1.0f + anticipation_delta);
             if (state->breath_rate < 0.20f) {
                 state->breath_rate = 0.20f;
             } else if (state->breath_rate > 2.4f) {
@@ -766,6 +875,20 @@ int main(int argc, char **argv)
                              cfg.memory_trace,
                              cfg.emotion_trace_path[0] ? cfg.emotion_trace_path : NULL,
                              cfg.recognition_threshold);
+
+    bond_gate_set_log_enabled(cfg.bond_trace);
+    substrate_affinity_enabled = cfg.affinity_enabled;
+    substrate_affinity_profile = cfg.affinity_config;
+    substrate_explicit_consent = clamp_unit(cfg.allow_align_consent);
+    bond_gate_reset(&substrate_bond_gate);
+    if (substrate_affinity_enabled) {
+        bond_gate_update(&substrate_bond_gate, &substrate_affinity_profile, substrate_explicit_consent, 0.0f);
+    } else {
+        substrate_bond_gate.influence = 1.0f;
+        substrate_bond_gate.consent = 0.0f;
+        substrate_bond_gate.bond_coh = 0.0f;
+        substrate_bond_gate.safety = 0.0f;
+    }
 
     if (cfg.adaptive) {
         auto_adapt(&state, cfg.trace);
