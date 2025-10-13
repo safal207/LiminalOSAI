@@ -20,6 +20,7 @@
 #include "health_scan.h"
 #include "weave.h"
 #include "dream.h"
+#include "dream_balance.h"
 #include "metabolic.h"
 #include "symbiosis.h"
 #include "empathic.h"
@@ -680,6 +681,7 @@ static void exhale(const kernel_options *opts)
 
     const DreamState *dream_snapshot = dream_state();
     bool dream_active = dream_snapshot && dream_snapshot->active;
+    DreamAlignmentBalance dream_balance = {0.0f, 0.0f, 0.5f};
     float awareness_energy = awareness_snapshot.awareness_level * 0.6f;
     if (human_bridge_active) {
         awareness_energy += (human_resonance_level - 0.5f) * 0.12f;
@@ -731,6 +733,20 @@ static void exhale(const kernel_options *opts)
         }
     }
 
+    dream_balance = dream_alignment_balance(council_active ? &council : NULL,
+                                            dream_snapshot,
+                                            anticipation_field,
+                                            anticipation_level,
+                                            anticipation_trend);
+    anticipation_level = clamp_unit(anticipation_level * 0.7f + dream_balance.anticipation_sync * 0.3f);
+    anticipation_field = clamp_unit(anticipation_field * 0.8f + dream_balance.anticipation_sync * 0.2f);
+    anticipation_trend = clamp_unit(anticipation_trend * 0.85f + dream_balance.balance_strength * 0.08f + dream_balance.anticipation_sync * 0.07f);
+    if (council_active) {
+        pid_scale += dream_balance.balance_strength * 0.05f;
+    } else {
+        pid_scale += dream_balance.balance_strength * 0.02f;
+    } // unified merge by Codex
+
     if (!isfinite(pid_scale) || pid_scale <= 0.0f) {
         pid_scale = 1.0f;
     }
@@ -754,6 +770,15 @@ static void exhale(const kernel_options *opts)
         awareness_for_coherence = clamp_unit(awareness_snapshot.awareness_level + (anticipation_trend - 0.5f) * 0.10f);
     }
 
+    resonance_for_coherence += dream_balance.balance_strength * 0.6f;
+    if (resonance_for_coherence < 0.0f) {
+        resonance_for_coherence = 0.0f;
+    } else if (resonance_for_coherence > 12.0f) {
+        resonance_for_coherence = 12.0f;
+    }
+    stability_for_coherence = clamp_unit(stability_for_coherence + dream_balance.coherence_bias);
+    awareness_for_coherence = clamp_unit(awareness_for_coherence + dream_balance.coherence_bias * 0.5f); // unified merge by Codex
+
     const CoherenceField *coherence_field =
         coherence_update(energy_avg, resonance_for_coherence, stability_for_coherence, awareness_for_coherence);
 
@@ -761,7 +786,13 @@ static void exhale(const kernel_options *opts)
     if (empathic_layer_active) {
         coherence_level = empathic_apply_coherence(coherence_level);
     }
-    dream_update(coherence_level, awareness_snapshot.awareness_level);
+    dream_update(coherence_level,
+                  awareness_snapshot.awareness_level,
+                  anticipation_field,
+                  anticipation_level,
+                  anticipation_micro,
+                  anticipation_trend,
+                  dream_balance.balance_strength); // unified merge by Codex
 
     if (opts && opts->show_symbols) {
         if (activated == 0) {
@@ -815,7 +846,7 @@ static void exhale(const kernel_options *opts)
     }
 
     if (opts && opts->council_log && council_active) {
-        printf("council: refl=%+0.2f aware=%+0.2f coh=%+0.2f health=%+0.2f anti=%+0.2f (field=%+0.2f level=%+0.2f micro=%+0.2f trend=%+0.2f) => decision=%+0.2f\n",
+        printf("council: refl=%+0.2f aware=%+0.2f coh=%+0.2f health=%+0.2f anti=%+0.2f (field=%+0.2f level=%+0.2f micro=%+0.2f trend=%+0.2f) bal=%+0.2f => decision=%+0.2f\n",
                council.reflection_vote,
                council.awareness_vote,
                council.coherence_vote,
@@ -825,6 +856,7 @@ static void exhale(const kernel_options *opts)
                council.anticipation_level_vote,
                council.anticipation_micro_vote,
                council.anticipation_trend_vote,
+               dream_balance.balance_strength,
                council.final_decision);
     }
 

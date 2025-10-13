@@ -27,6 +27,12 @@ static float observed_coherence = 0.0f;
 static float observed_awareness = 0.0f;
 static bool random_seeded = false;
 
+static float observed_anticipation_field = 0.5f;
+static float observed_anticipation_level = 0.5f;
+static float observed_anticipation_micro = 0.5f;
+static float observed_anticipation_trend = 0.5f;
+static float dream_alignment_feedback = 0.0f; // unified merge by Codex
+
 static float clamp01(float value)
 {
     if (value < 0.0f) {
@@ -134,10 +140,18 @@ void dream_init(void)
     memset(&dream_state_data, 0, sizeof(dream_state_data));
     dream_state_data.entry_threshold = 0.90f;
     dream_state_data.dream_intensity = 0.0f;
+    dream_state_data.anticipation_sync = 0.5f;
+    dream_state_data.resonance_bias = 0.0f;
+    dream_state_data.alignment_balance = 0.0f;
     dream_enabled = false;
     dream_logging = false;
     observed_coherence = 0.0f;
     observed_awareness = 0.0f;
+    observed_anticipation_field = 0.5f;
+    observed_anticipation_level = 0.5f;
+    observed_anticipation_micro = 0.5f;
+    observed_anticipation_trend = 0.5f;
+    dream_alignment_feedback = 0.0f; // unified merge by Codex
     random_seeded = false;
 }
 
@@ -174,6 +188,14 @@ void dream_enter(void)
     dream_state_data.cycle_count = 0;
     dream_state_data.dream_intensity = clamp01(observed_coherence * 0.8f + 0.2f);
 
+    float anticipation_mix = clamp01(0.35f * observed_anticipation_level +
+                                          0.25f * observed_anticipation_field +
+                                          0.20f * observed_anticipation_trend +
+                                          0.20f * observed_anticipation_micro);
+    dream_state_data.anticipation_sync = anticipation_mix; // unified merge by Codex
+    dream_state_data.resonance_bias = anticipation_mix;
+    dream_state_data.alignment_balance = dream_alignment_feedback;
+
     awareness_set_coherence_scale(0.85);
 
     char summary[SOIL_TRACE_DATA_SIZE];
@@ -204,7 +226,17 @@ void dream_iterate(void)
     }
 
     ++dream_state_data.cycle_count;
-    dream_state_data.dream_intensity = clamp01(dream_state_data.dream_intensity * 0.75f + observed_coherence * 0.25f);
+
+    float anticipation_wave = clamp01(0.4f * observed_anticipation_level +
+                                      0.2f * observed_anticipation_field +
+                                      0.2f * observed_anticipation_micro +
+                                      0.2f * observed_anticipation_trend);
+    dream_state_data.anticipation_sync = clamp01(dream_state_data.anticipation_sync * 0.6f + anticipation_wave * 0.4f);
+    float alignment_wave = clamp01(0.5f + dream_alignment_feedback * 0.5f);
+    float intensity_target = clamp01(observed_coherence * 0.55f + dream_state_data.anticipation_sync * 0.30f + alignment_wave * 0.15f);
+    dream_state_data.dream_intensity = clamp01(dream_state_data.dream_intensity * 0.65f + intensity_target * 0.35f);
+    dream_state_data.resonance_bias = intensity_target;
+    dream_state_data.alignment_balance = dream_alignment_feedback; // unified merge by Codex
 
     char candidates[DREAM_SYMBOL_CHOICES][32];
     size_t count = dream_collect_symbols(candidates, DREAM_SYMBOL_CHOICES);
@@ -217,7 +249,13 @@ void dream_iterate(void)
             ++second;
         }
 
-        float weight = dream_random_range(0.1f, 0.5f);
+        float base_weight = dream_random_range(0.1f, 0.5f);
+        float anticipation_bias = (dream_state_data.anticipation_sync - 0.5f) * 0.25f;
+        float alignment_bias = dream_alignment_feedback * 0.10f;
+        float weight = clamp01(base_weight + anticipation_bias + alignment_bias);
+        if (weight < 0.05f) {
+            weight = 0.05f;
+        }
         symbol_create_link(candidates[first], candidates[second], weight);
 
         char imprint[SOIL_TRACE_DATA_SIZE];
@@ -231,26 +269,36 @@ void dream_iterate(void)
             imprint[0] = '\0';
             written = 0;
         }
+        soil_pre_echo pre_echo = soil_pre_echo_make((uint32_t)(weight * 40.0f + 1.0f),
+                                                    imprint,
+                                                    (size_t)written,
+                                                    dream_state_data.anticipation_sync,
+                                                    dream_state_data.resonance_bias);
+        soil_store_pre_echo(&pre_echo); // unified merge by Codex
         dream_write_trace(imprint, 2U);
 
         if (dream_logging) {
             char log_line[128];
             snprintf(log_line,
                      sizeof(log_line),
-                     "link %s -> %s w=%.2f (int=%.2f)",
+                     "link %s -> %s w=%.2f (int=%.2f sync=%.2f align=%.2f)",
                      candidates[first],
                      candidates[second],
                      weight,
-                     dream_state_data.dream_intensity);
+                     dream_state_data.dream_intensity,
+                     dream_state_data.anticipation_sync,
+                     dream_alignment_feedback);
             dream_log(log_line);
         }
     } else if (dream_logging) {
         char log_line[96];
         snprintf(log_line,
                  sizeof(log_line),
-                 "rest cycle %d (int=%.2f)",
+                 "rest cycle %d (int=%.2f sync=%.2f align=%.2f)",
                  dream_state_data.cycle_count,
-                 dream_state_data.dream_intensity);
+                 dream_state_data.dream_intensity,
+                 dream_state_data.anticipation_sync,
+                 dream_alignment_feedback);
         dream_log(log_line);
     }
 
@@ -269,6 +317,11 @@ void dream_exit(void)
     dream_state_data.active = false;
     dream_state_data.dream_intensity = 0.0f;
     dream_state_data.cycle_count = 0;
+
+    dream_state_data.anticipation_sync = 0.5f;
+    dream_state_data.resonance_bias = 0.0f;
+    dream_state_data.alignment_balance = 0.0f;
+    dream_alignment_feedback = 0.0f; // unified merge by Codex
 
     awareness_set_coherence_scale(0.95);
 
@@ -293,7 +346,13 @@ void dream_exit(void)
     dream_log(log_line);
 }
 
-void dream_update(float coherence, float awareness_level)
+void dream_update(float coherence,
+                  float awareness_level,
+                  float anticipation_field,
+                  float anticipation_level,
+                  float anticipation_micro,
+                  float anticipation_trend,
+                  float alignment_balance)
 {
     if (!isfinite(coherence)) {
         coherence = 0.0f;
@@ -301,9 +360,35 @@ void dream_update(float coherence, float awareness_level)
     if (!isfinite(awareness_level)) {
         awareness_level = 0.0f;
     }
+    if (!isfinite(anticipation_field)) {
+        anticipation_field = 0.5f;
+    }
+    if (!isfinite(anticipation_level)) {
+        anticipation_level = 0.5f;
+    }
+    if (!isfinite(anticipation_micro)) {
+        anticipation_micro = 0.5f;
+    }
+    if (!isfinite(anticipation_trend)) {
+        anticipation_trend = 0.5f;
+    }
+    if (!isfinite(alignment_balance)) {
+        alignment_balance = 0.0f;
+    }
 
     observed_coherence = clamp01(coherence);
     observed_awareness = clamp01(awareness_level);
+    observed_anticipation_field = clamp01(anticipation_field);
+    observed_anticipation_level = clamp01(anticipation_level);
+    observed_anticipation_micro = clamp01(anticipation_micro);
+    observed_anticipation_trend = clamp01(anticipation_trend);
+
+    if (alignment_balance < -1.0f) {
+        alignment_balance = -1.0f;
+    } else if (alignment_balance > 1.0f) {
+        alignment_balance = 1.0f;
+    }
+    dream_alignment_feedback = alignment_balance;
 
     if (!dream_enabled) {
         if (dream_state_data.active) {
@@ -314,15 +399,34 @@ void dream_update(float coherence, float awareness_level)
         return;
     }
 
+    float anticipation_gate = clamp01(0.32f - (observed_anticipation_trend - 0.5f) * 0.10f - alignment_balance * 0.04f);
+    float entry_threshold = clamp01(dream_state_data.entry_threshold -
+                                    (observed_anticipation_level - 0.5f) * 0.12f -
+                                    alignment_balance * 0.05f);
+    // unified merge by Codex
     if (!dream_state_data.active) {
-        awareness_set_coherence_scale(1.0);
-        if (observed_coherence >= dream_state_data.entry_threshold && observed_awareness < 0.3f) {
+        if (observed_coherence >= entry_threshold && observed_awareness < anticipation_gate) {
             dream_enter();
+        } else {
+            awareness_set_coherence_scale(1.0);
         }
         return;
     }
 
-    if (observed_coherence < dream_state_data.entry_threshold * 0.85f || observed_awareness >= 0.45f) {
+    dream_state_data.alignment_balance = dream_alignment_feedback;
+
+    float sync_target = clamp01(0.30f * observed_anticipation_field +
+                                0.35f * observed_anticipation_level +
+                                0.15f * observed_anticipation_micro +
+                                0.20f * observed_anticipation_trend +
+                                dream_alignment_feedback * 0.10f);
+    dream_state_data.anticipation_sync = clamp01(dream_state_data.anticipation_sync * 0.5f + sync_target * 0.5f);
+    dream_state_data.resonance_bias = clamp01(observed_coherence * 0.5f + dream_state_data.anticipation_sync * 0.5f);
+
+    float exit_threshold = clamp01(entry_threshold * 0.85f - (observed_anticipation_micro - 0.5f) * 0.05f - alignment_balance * 0.04f);
+    float awareness_exit = clamp01(0.45f + (observed_anticipation_field - 0.5f) * 0.10f + alignment_balance * 0.05f);
+
+    if (observed_coherence < exit_threshold || observed_awareness >= awareness_exit) {
         dream_exit();
         return;
     }
