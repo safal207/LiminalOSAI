@@ -9,6 +9,10 @@
 #include <time.h>
 #include <unistd.h>
 #include <math.h>
+#include <limits.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
 
 #include "soil.h"
 #include "resonant.h"
@@ -18,6 +22,7 @@
 #include "council.h"
 #include "coherence.h"
 #include "collective.h"
+#include "collective_memory.h"
 #include "health_scan.h"
 #include "weave.h"
 #include "dream.h"
@@ -61,6 +66,7 @@ typedef struct {
     bool sync_trace;
     bool dream_enabled;
     bool dream_log;
+    bool balancer_enabled;
     bool metabolic_enabled;
     bool metabolic_trace;
     bool human_bridge_enabled;
@@ -81,6 +87,10 @@ typedef struct {
     float target_coherence;
     bool collective_enabled;
     bool collective_trace;
+    bool collective_memory_enabled;
+    bool collective_memory_trace;
+    int cm_snapshot_interval;
+    char cm_path[CM_PATH_MAX];
     float group_target;
     ensemble_strategy ensemble_mode;
     float council_threshold;
@@ -121,6 +131,22 @@ static float collective_pending_adjust = 0.0f;
 static int collective_node_capacity = 0;
 static int collective_edge_capacity = 0;
 static const int COLLECTIVE_DEFAULT_NODES = 16;
+static bool collective_memory_enabled = false;
+static bool collective_memory_trace_enabled = false;
+static bool collective_memory_initialized = false;
+static bool collective_signature_ready = false;
+static uint32_t collective_signature_value = 0;
+static CMemRing collective_memory_ring = {{0.0f}, {0.0f}, 0, 0};
+static char collective_memory_store_path[CM_PATH_MAX] = {0};
+static CMemTrace *collective_memory_match_trace = NULL;
+static float collective_memory_match_score = 0.0f;
+static float collective_warmup_adjust = 0.0f;
+static int collective_warmup_cycles_remaining = 0;
+static uint64_t collective_cycle_count = 0;
+static bool collective_flag_anticipation = false;
+static bool collective_flag_dream = false;
+static bool collective_flag_balancer = false;
+static const int COLLECTIVE_WARMUP_LIMIT = 4;
 
 static const char *ensemble_strategy_name(ensemble_strategy mode)
 {
@@ -319,13 +345,23 @@ static float collective_effective_coherence(const RGraph *graph)
     }
 }
 
+static FILE *collective_log_open(void)
+{
+    if (mkdir("logs", 0777) != 0) {
+        if (errno != EEXIST) {
+            return NULL;
+        }
+    }
+    return fopen("logs/collective_trace.log", "a");
+}
+
 static void collective_trace_log(const RGraph *graph, float adjust)
 {
     if (!collective_trace_enabled || !graph) {
         return;
     }
 
-    FILE *fp = fopen("logs/collective_trace.log", "a");
+    FILE *fp = collective_log_open();
     if (!fp) {
         return;
     }
@@ -338,6 +374,118 @@ static void collective_trace_log(const RGraph *graph, float adjust)
             adjust,
             ensemble_strategy_name(collective_strategy));
     fclose(fp);
+}
+
+static void collective_memory_log_echo(uint32_t signature, float match_score, const CMemTrace *match, float warmup)
+{
+    if (!collective_memory_trace_enabled && !collective_trace_enabled) {
+        return;
+    }
+    FILE *fp = collective_log_open();
+    if (!fp) {
+        return;
+    }
+    float coh = match ? match->group_coh_avg : 0.0f;
+    float adj = match ? match->adjust_avg : 0.0f;
+    fprintf(fp,
+            "memory_echo: sig=0x%08" PRIX32 " match=%.2f coh_avg=%.2f adj_avg=%+.2f warmup=%+.2f\n",
+            signature,
+            match_score,
+            coh,
+            adj,
+            warmup);
+    fclose(fp);
+}
+
+static void collective_memory_log_snapshot(const CMemTrace *snapshot)
+{
+    if (!snapshot) {
+        return;
+    }
+    if (!collective_memory_trace_enabled && !collective_trace_enabled) {
+        return;
+    }
+    FILE *fp = collective_log_open();
+    if (!fp) {
+        return;
+    }
+    fprintf(fp,
+            "snapshot:    coh_avg=%.2f adj_avg=%+.2f vol=%.3f saved=%s\n",
+            snapshot->group_coh_avg,
+            snapshot->adjust_avg,
+            snapshot->volatility,
+            collective_memory_store_path[0] ? collective_memory_store_path : "soil/collective_memory.jsonl");
+    fclose(fp);
+}
+
+typedef struct {
+    uint8_t version;
+    uint8_t strategy;
+    uint8_t flags;
+    uint8_t reserved;
+    uint16_t nodes;
+    uint16_t edges;
+    int16_t vitality_q;
+    int16_t leader_q;
+    int16_t average_q;
+    int16_t median_q;
+} CollectiveSignatureContext;
+
+static uint32_t collective_compute_signature(const RGraph *graph)
+{
+    CollectiveSignatureContext ctx = {0};
+    ctx.version = 1;
+    ctx.strategy = (uint8_t)collective_strategy;
+    uint8_t flags = 0;
+    if (collective_flag_anticipation) {
+        flags |= 0x01u;
+    }
+    if (collective_flag_dream) {
+        flags |= 0x02u;
+    }
+    if (collective_flag_balancer) {
+        flags |= 0x04u;
+    }
+    ctx.flags = flags;
+    if (graph) {
+        if (graph->n_nodes < 0) {
+            ctx.nodes = 0;
+        } else if (graph->n_nodes > UINT16_MAX) {
+            ctx.nodes = UINT16_MAX;
+        } else {
+            ctx.nodes = (uint16_t)graph->n_nodes;
+        }
+        if (graph->n_edges < 0) {
+            ctx.edges = 0;
+        } else if (graph->n_edges > UINT16_MAX) {
+            ctx.edges = UINT16_MAX;
+        } else {
+            ctx.edges = (uint16_t)graph->n_edges;
+        }
+
+        if (graph->n_nodes > 0) {
+            double vitality_sum = 0.0;
+            double pulse_sum = 0.0;
+            for (int i = 0; i < graph->n_nodes; ++i) {
+                const RNode *node = &graph->nodes[i];
+                vitality_sum += clamp_unit(isfinite(node->vitality) ? node->vitality : 0.0f);
+                pulse_sum += clamp_unit(isfinite(node->pulse) ? node->pulse : 0.0f);
+            }
+            float vitality_avg = (float)(vitality_sum / (double)graph->n_nodes);
+            float pulse_avg = (float)(pulse_sum / (double)graph->n_nodes);
+            vitality_avg = cm_clamp(vitality_avg, 0.0f, 1.0f);
+            pulse_avg = cm_clamp(pulse_avg, 0.0f, 1.0f);
+            ctx.vitality_q = (int16_t)lrintf(vitality_avg * 100.0f);
+            ctx.average_q = (int16_t)lrintf(pulse_avg * 100.0f);
+        }
+
+        float leader = cm_clamp(collective_leader_pulse(graph), 0.0f, 1.0f);
+        float median = cm_clamp(collective_weighted_median(graph), 0.0f, 1.0f);
+        ctx.leader_q = (int16_t)lrintf(leader * 100.0f);
+        ctx.median_q = (int16_t)lrintf(median * 100.0f);
+    }
+
+    return cm_signature_hash(&ctx, sizeof(ctx));
 }
 
 static kernel_options parse_options(int argc, char **argv)
@@ -358,6 +506,7 @@ static kernel_options parse_options(int argc, char **argv)
         .sync_trace = false,
         .dream_enabled = false,
         .dream_log = false,
+        .balancer_enabled = false,
         .metabolic_enabled = false,
         .metabolic_trace = false,
         .human_bridge_enabled = false,
@@ -378,6 +527,10 @@ static kernel_options parse_options(int argc, char **argv)
         .target_coherence = 0.80f,
         .collective_enabled = false,
         .collective_trace = false,
+        .collective_memory_enabled = false,
+        .collective_memory_trace = false,
+        .cm_snapshot_interval = 20,
+        .cm_path = {0},
         .group_target = 0.82f,
         .ensemble_mode = ENSEMBLE_STRATEGY_MEDIAN,
         .council_threshold = 0.05f,
@@ -390,6 +543,12 @@ static kernel_options parse_options(int argc, char **argv)
     for (size_t i = 0; i < weave_module_count(); ++i) {
         opts.phase_shift_deg[i] = 0.0f;
         opts.phase_shift_set[i] = false;
+    }
+
+    if (!opts.cm_path[0]) {
+        const char *default_path = "soil/collective_memory.jsonl";
+        strncpy(opts.cm_path, default_path, sizeof(opts.cm_path) - 1);
+        opts.cm_path[sizeof(opts.cm_path) - 1] = '\0';
     }
 
     for (int i = 1; i < argc; ++i) {
@@ -414,6 +573,28 @@ static kernel_options parse_options(int argc, char **argv)
             opts.collective_enabled = true;
         } else if (strcmp(arg, "--collective-trace") == 0) {
             opts.collective_trace = true;
+        } else if (strcmp(arg, "--collective-memory") == 0) {
+            opts.collective_memory_enabled = true;
+        } else if (strcmp(arg, "--cm-trace") == 0) {
+            opts.collective_memory_trace = true;
+        } else if (strncmp(arg, "--cm-path=", 10) == 0) {
+            const char *value = arg + 10;
+            if (value && *value) {
+                strncpy(opts.cm_path, value, sizeof(opts.cm_path) - 1);
+                opts.cm_path[sizeof(opts.cm_path) - 1] = '\0';
+            }
+        } else if (strncmp(arg, "--cm-snapshot-interval=", 24) == 0) {
+            const char *value = arg + 24;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed > 0) {
+                    if (parsed > INT_MAX) {
+                        parsed = INT_MAX;
+                    }
+                    opts.cm_snapshot_interval = (int)parsed;
+                }
+            }
         } else if (strcmp(arg, "--climate-log") == 0) {
             opts.climate_log = true;
         } else if (strcmp(arg, "--health-scan") == 0) {
@@ -516,6 +697,8 @@ static kernel_options parse_options(int argc, char **argv)
             opts.dream_enabled = true;
         } else if (strcmp(arg, "--dream-log") == 0) {
             opts.dream_log = true;
+        } else if (strcmp(arg, "--balancer") == 0) {
+            opts.balancer_enabled = true;
         } else if (strncmp(arg, "--dream-threshold=", 18) == 0) {
             const char *value = arg + 18;
             if (*value) {
@@ -751,6 +934,15 @@ static void pulse_delay(void)
 
     if (!isfinite(final_factor)) {
         final_factor = 1.0;
+    }
+    if (collective_memory_enabled && collective_cycle_count <= 1 && fabsf(collective_warmup_adjust) > 0.0001f) {
+        double warm_factor = 1.0 - (double)collective_warmup_adjust;
+        if (warm_factor < 0.5) {
+            warm_factor = 0.5;
+        } else if (warm_factor > 1.5) {
+            warm_factor = 1.5;
+        }
+        final_factor *= warm_factor;
     }
     if (final_factor < 0.1) {
         final_factor = 0.1;
@@ -1176,13 +1368,76 @@ static void exhale(const kernel_options *opts)
             rgraph_update_edges(&collective_graph);
             rgraph_compute_coh(&collective_graph);
             collective_graph.group_coh = collective_effective_coherence(&collective_graph);
+            if (collective_memory_enabled) {
+                collective_signature_value = collective_compute_signature(&collective_graph);
+                collective_signature_ready = true;
+                if (!collective_memory_initialized) {
+                    const char *store_path = collective_memory_store_path[0] ? collective_memory_store_path
+                                                                             : "soil/collective_memory.jsonl";
+                    collective_memory_match_trace = cm_best_match(collective_signature_value, store_path);
+                    if (collective_memory_match_trace) {
+                        collective_memory_match_score = cm_signature_similarity(collective_signature_value,
+                                                                                 collective_memory_match_trace->signature);
+                        int distance = cm_signature_distance(collective_signature_value,
+                                                             collective_memory_match_trace->signature);
+                        float match_coh = collective_memory_match_trace->group_coh_avg;
+                        if (!isfinite(match_coh)) {
+                            match_coh = collective_target_level;
+                        }
+                        match_coh = cm_clamp(match_coh, 0.0f, 1.0f);
+                        float blended = 0.5f * 0.82f + 0.5f * match_coh;
+                        collective_target_level = clamp_unit(blended);
+                        float warmup = collective_memory_match_trace->adjust_avg;
+                        if (!isfinite(warmup)) {
+                            warmup = 0.0f;
+                        }
+                        warmup = cm_clamp(warmup, -0.05f, 0.05f);
+                        if (distance > 4) {
+                            warmup = 0.0f;
+                        }
+                        collective_warmup_adjust = warmup;
+                        collective_warmup_cycles_remaining = warmup != 0.0f ? COLLECTIVE_WARMUP_LIMIT : 0;
+                    } else {
+                        collective_memory_match_score = 0.0f;
+                        collective_warmup_adjust = 0.0f;
+                        collective_warmup_cycles_remaining = 0;
+                    }
+                    collective_memory_initialized = true;
+                    collective_memory_log_echo(collective_signature_value,
+                                               collective_memory_match_score,
+                                               collective_memory_match_trace,
+                                               collective_warmup_adjust);
+                }
+            } else {
+                collective_signature_ready = false;
+            }
             float adjust = rgraph_ensemble_adjust(&collective_graph, collective_target_level);
             collective_pending_adjust = adjust;
             if (collective_graph.n_edges > 0 && fabsf(adjust) > 0.0001f) {
                 bus_emit_wave("ensemble", fabsf(adjust));
             }
             collective_trace_log(&collective_graph, adjust);
+            if (collective_memory_enabled && collective_signature_ready) {
+                cm_ring_push(&collective_memory_ring, collective_graph.group_coh, adjust);
+                if (collective_warmup_cycles_remaining > 0) {
+                    --collective_warmup_cycles_remaining;
+                    if (collective_warmup_cycles_remaining == 0) {
+                        collective_warmup_adjust = 0.0f;
+                    }
+                }
+                if (cm_should_snapshot(&collective_memory_ring)) {
+                    CMemTrace snapshot = cm_build_snapshot(&collective_memory_ring, collective_signature_value);
+                    const char *store_path = collective_memory_store_path[0] ? collective_memory_store_path
+                                                                             : "soil/collective_memory.jsonl";
+                    cm_store(&snapshot, store_path);
+                    collective_memory_log_snapshot(&snapshot);
+                }
+            }
         }
+    }
+
+    if (collective_active) {
+        ++collective_cycle_count;
     }
 
     if (opts && opts->show_symbols) {
@@ -1317,6 +1572,29 @@ int main(int argc, char **argv)
     collective_strategy = opts.ensemble_mode;
     collective_target_level = clamp_unit(opts.group_target);
     collective_pending_adjust = 0.0f;
+    collective_memory_enabled = collective_active && opts.collective_memory_enabled;
+    collective_memory_trace_enabled = opts.collective_memory_trace;
+    collective_memory_initialized = false;
+    collective_signature_ready = false;
+    collective_memory_match_score = 0.0f;
+    collective_warmup_adjust = 0.0f;
+    collective_warmup_cycles_remaining = 0;
+    collective_cycle_count = 0;
+    if (collective_memory_match_trace) {
+        cm_trace_free(collective_memory_match_trace);
+        collective_memory_match_trace = NULL;
+    }
+    collective_flag_anticipation = opts.anticipation_trace;
+    collective_flag_dream = opts.dream_enabled;
+    collective_flag_balancer = opts.balancer_enabled;
+    if (collective_memory_enabled) {
+        strncpy(collective_memory_store_path, opts.cm_path, sizeof(collective_memory_store_path) - 1);
+        collective_memory_store_path[sizeof(collective_memory_store_path) - 1] = '\0';
+        cm_ring_reset(&collective_memory_ring);
+        cm_set_snapshot_interval(opts.cm_snapshot_interval);
+    } else {
+        collective_memory_store_path[0] = '\0';
+    }
     if (collective_active) {
         collective_node_capacity = COLLECTIVE_DEFAULT_NODES;
         if (collective_node_capacity < 2) {
@@ -1408,6 +1686,11 @@ int main(int argc, char **argv)
 
     emotion_memory_finalize();
     metabolic_shutdown();
+
+    if (collective_memory_match_trace) {
+        cm_trace_free(collective_memory_match_trace);
+        collective_memory_match_trace = NULL;
+    }
 
     return 0;
 }
