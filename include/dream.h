@@ -12,6 +12,10 @@ typedef struct {
     int cycle_count;
     float entry_threshold;
     float dream_intensity;
+    // unified merge by Codex
+    float anticipation_sync;
+    float resonance_bias;
+    float alignment_balance;
 } DreamState;
 
 void dream_init(void);
@@ -23,7 +27,13 @@ const DreamState *dream_state(void);
 void dream_enter(void);
 void dream_iterate(void);
 void dream_exit(void);
-void dream_update(float coherence, float awareness_level);
+void dream_update(float coherence,
+                  float awareness_level,
+                  float anticipation_field,
+                  float anticipation_level,
+                  float anticipation_micro,
+                  float anticipation_trend,
+                  float alignment_balance); // unified merge by Codex
 
 #ifdef __cplusplus
 }

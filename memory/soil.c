@@ -9,6 +9,18 @@ static soil_trace soil_buffer[SOIL_CAPACITY];
 static size_t soil_head = 0;
 static size_t soil_count = 0;
 
+static soil_pre_echo soil_pre_echo_buffer[SOIL_PRE_ECHO_CAPACITY];
+static size_t soil_pre_echo_head = 0;
+static size_t soil_pre_echo_count = 0;
+
+static void soil_reset_pre_echo(void)
+{
+    // unified merge by Codex
+    memset(soil_pre_echo_buffer, 0, sizeof(soil_pre_echo_buffer));
+    soil_pre_echo_head = 0;
+    soil_pre_echo_count = 0;
+}
+
 static uint64_t soil_now_timestamp(void)
 {
     struct timespec ts;
@@ -26,6 +38,42 @@ void soil_init(void)
     memset(soil_buffer, 0, sizeof(soil_buffer));
     soil_head = 0;
     soil_count = 0;
+    soil_reset_pre_echo(); // unified merge by Codex
+}
+
+void soil_pre_echo_clear(void)
+{
+    soil_reset_pre_echo();
+}
+
+void soil_store_pre_echo(const soil_pre_echo *echo)
+{
+    if (!echo) {
+        return;
+    }
+
+    soil_pre_echo_buffer[soil_pre_echo_head] = *echo;
+    soil_pre_echo_buffer[soil_pre_echo_head].trace.timestamp = soil_now_timestamp(); // unified merge by Codex
+    soil_pre_echo_head = (soil_pre_echo_head + 1) % SOIL_PRE_ECHO_CAPACITY;
+    if (soil_pre_echo_count < SOIL_PRE_ECHO_CAPACITY) {
+        ++soil_pre_echo_count;
+    }
+}
+
+size_t soil_recent_pre_echo(soil_pre_echo *out_buffer, size_t max_count)
+{
+    if (!out_buffer || max_count == 0) {
+        return 0;
+    }
+
+    size_t to_copy = soil_pre_echo_count < max_count ? soil_pre_echo_count : max_count;
+    size_t start = (soil_pre_echo_head + SOIL_PRE_ECHO_CAPACITY - to_copy) % SOIL_PRE_ECHO_CAPACITY;
+
+    for (size_t i = 0; i < to_copy; ++i) {
+        out_buffer[i] = soil_pre_echo_buffer[(start + i) % SOIL_PRE_ECHO_CAPACITY];
+    }
+
+    return to_copy;
 }
 
 void soil_write(const soil_trace *trace)
@@ -101,4 +149,17 @@ soil_trace soil_trace_make(uint32_t energy, const void *data, size_t data_len)
     }
 
     return trace;
+}
+
+soil_pre_echo soil_pre_echo_make(uint32_t energy,
+                                const void *data,
+                                size_t data_len,
+                                float anticipation_hint,
+                                float resonance_hint)
+{
+    soil_pre_echo echo;
+    echo.trace = soil_trace_make(energy, data, data_len);
+    echo.anticipation_hint = anticipation_hint; // unified merge by Codex
+    echo.resonance_hint = resonance_hint;
+    return echo;
 }
