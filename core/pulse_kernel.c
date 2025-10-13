@@ -1059,9 +1059,12 @@ static void pulse_delay(void)
         final_factor *= warm_factor;
     }
     if (ant2_module_enabled) {
-        float feedback_delta = (float)(1.0 - final_factor);
-        ant2_feedback_adjust(&ant2_state, feedback_delta);
+        double baseline_factor = final_factor;
+        double delay_before = delay_after_coherence * baseline_factor;
         final_factor *= (double)ant2_delay_factor;
+        double delay_after = delay_after_coherence * final_factor;
+        float feedback_delta = (float)(delay_after - delay_before);
+        ant2_feedback_adjust(&ant2_state, feedback_delta);
     }
     if (final_factor < 0.1) {
         final_factor = 0.1;
