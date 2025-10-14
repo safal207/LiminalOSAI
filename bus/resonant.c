@@ -128,6 +128,13 @@ bool bus_listen(int sensor_id, resonant_msg *out_msg)
         return false;
     }
 
+    if (sensor_id == RESONANT_BROADCAST_ID) {
+        // Broadcast fan-out relies on per-sensor delivery tracking. Allowing the
+        // broadcast ID to poll directly would drain the message before other
+        // registered sensors have a chance to consume it.
+        return false;
+    }
+
     bus_register_sensor(sensor_id);
 
     int registry_index = sensor_index_of(sensor_id);
