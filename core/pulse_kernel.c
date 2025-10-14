@@ -28,6 +28,7 @@
 #include "weave.h"
 #include "dream.h"
 #include "dream_balance.h"
+#include "dream_coupler.h"
 #include "metabolic.h"
 #include "symbiosis.h"
 #include "empathic.h"
@@ -327,6 +328,8 @@ static bool mirror_module_enabled = false;
 static float mirror_gain_amp = 1.0f;
 static float mirror_gain_tempo = 1.0f;
 static State introspect_state;
+
+static void harmony_sync(Metrics *metrics);
 
 typedef struct {
     AwarenessState awareness_snapshot;
@@ -1989,8 +1992,27 @@ static void exhale(const kernel_options *opts)
         .consent = introspect_consent,
         .influence = introspect_influence,
         .bond_coh = introspect_bond,
-        .error_margin = fabsf(mirror_gain_amp - mirror_gain_tempo)
+        .error_margin = fabsf(mirror_gain_amp - mirror_gain_tempo),
+        .harmony = coherence_level
     };
+    harmony_sync(&introspect_metrics);
+    if (opts && opts->dream_enabled) {
+        Metrics coupling_metrics = introspect_metrics;
+        coupling_metrics.amp = clamp_unit(energy_avg / 12.0f);
+        float harmony_signal = coherence_level;
+        if (dream_balance.balance_strength > 0.0f) {
+            harmony_signal += dream_balance.balance_strength * 0.3f;
+        }
+        float tempo_balance = clamp_unit(mirror_gain_tempo);
+        harmony_signal += (1.0f - tempo_balance) * 0.25f;
+        coupling_metrics.harmony = clamp_unit(harmony_signal);
+        float tempo_signal = mirror_gain_tempo * (1.0f + cycle_influence);
+        if (!isfinite(tempo_signal)) {
+            tempo_signal = mirror_gain_tempo;
+        }
+        coupling_metrics.tempo = tempo_signal;
+        dream_couple(&introspect_state, &coupling_metrics);
+    }
     introspect_tick(&introspect_state, &introspect_metrics);
 
     if (collective_active) {
@@ -2307,4 +2329,21 @@ int main(int argc, char **argv)
     }
 
     return 0;
+}
+static void harmony_sync(Metrics *metrics)
+{
+    if (!metrics) {
+        return;
+    }
+
+    float harmony = metrics->harmony;
+    if (!isfinite(harmony)) {
+        harmony = 0.0f;
+    }
+    if (harmony < 0.0f) {
+        harmony = 0.0f;
+    } else if (harmony > 1.0f) {
+        harmony = 1.0f;
+    }
+    metrics->harmony = harmony;
 }

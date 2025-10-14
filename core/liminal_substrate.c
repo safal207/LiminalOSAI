@@ -29,6 +29,7 @@
 #include "affinity.h"
 #include "anticipation_v2.h"
 #include "introspect.h"
+#include "dream_coupler.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -92,6 +93,7 @@ typedef struct {
     bool strict_order;
     bool dry_run;
     bool introspect_enabled;
+    bool dream_enabled;
 } substrate_config;
 
 static bool substrate_affinity_enabled = false;
@@ -412,6 +414,7 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.mirror_tempo_max = MIRROR_GAIN_TEMPO_MAX_DEFAULT;
     cfg.strict_order = false;
     cfg.dry_run = false;
+    cfg.dream_enabled = false;
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -542,6 +545,8 @@ static substrate_config parse_args(int argc, char **argv)
             }
         } else if (strcmp(arg, "--introspect") == 0) {
             cfg.introspect_enabled = true;
+        } else if (strcmp(arg, "--dream") == 0) {
+            cfg.dream_enabled = true;
         } else if (strcmp(arg, "--strict-order") == 0) {
             cfg.strict_order = true;
         } else if (strcmp(arg, "--dry-run") == 0) {
@@ -1094,8 +1099,21 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                 .consent = consent,
                 .influence = influence,
                 .bond_coh = bond_coh,
-                .error_margin = fabsf(amp - tempo_gain)
+                .error_margin = fabsf(amp - tempo_gain),
+                .harmony = clamp_unit(state->resonance)
             };
+            if (cfg->dream_enabled) {
+                Metrics coupling_metrics = metrics;
+                coupling_metrics.amp = clamp_unit(state->resonance);
+                float harmony_signal = state->sync_quality + (1.0f - tempo_gain) * 0.4f;
+                coupling_metrics.harmony = clamp_unit(harmony_signal);
+                float tempo_signal = sanitize_positive(state->breath_rate, 0.0f) * 1.6f;
+                if (!isfinite(tempo_signal)) {
+                    tempo_signal = sanitize_positive(state->breath_rate, 0.0f);
+                }
+                coupling_metrics.tempo = tempo_signal;
+                dream_couple(&substrate_introspect_state, &coupling_metrics);
+            }
             introspect_tick(&substrate_introspect_state, &metrics);
         }
     }

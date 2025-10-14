@@ -5,6 +5,7 @@
 #endif
 
 #include "introspect.h"
+#include "dream_coupler.h"
 
 #include <inttypes.h>
 #include <limits.h>
@@ -74,6 +75,7 @@ void introspect_state_init(State *state)
     state->tempo_sum = 0.0;
     state->sample_count = 0;
     state->stream = NULL;
+    state->dream_phase = DREAM_COUPLER_PHASE_REST;
 }
 
 void introspect_enable(State *state, bool enabled)
@@ -96,6 +98,7 @@ void introspect_finalize(State *state)
     state->amp_sum = 0.0;
     state->tempo_sum = 0.0;
     state->sample_count = 0;
+    state->dream_phase = DREAM_COUPLER_PHASE_REST;
 }
 
 void introspect_tick(State *state, const Metrics *metrics)
@@ -130,8 +133,13 @@ void introspect_tick(State *state, const Metrics *metrics)
     char timestamp[32];
     format_timestamp(timestamp, sizeof(timestamp));
 
+    const char *dream_label = dream_coupler_phase_name(state->dream_phase);
+    if (!dream_label) {
+        dream_label = "REST";
+    }
+
     fprintf(state->stream,
-            "%s cycle=%" PRIu64 " avg_amp=%.4f avg_tempo=%.4f consent=%.4f influence=%.4f bond_coh=%.4f err=%.4f\n",
+            "%s cycle=%" PRIu64 " avg_amp=%.4f avg_tempo=%.4f consent=%.4f influence=%.4f bond_coh=%.4f err=%.4f dream=%s\n",
             timestamp,
             state->cycle_index,
             avg_amp,
@@ -139,7 +147,8 @@ void introspect_tick(State *state, const Metrics *metrics)
             sanitize_value(metrics->consent),
             sanitize_value(metrics->influence),
             sanitize_value(metrics->bond_coh),
-            sanitize_value(metrics->error_margin));
+            sanitize_value(metrics->error_margin),
+            dream_label);
     fflush(state->stream);
 
     state->amp_sum = 0.0;
