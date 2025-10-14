@@ -19,11 +19,6 @@ void harmony_sync(State *state, Metrics *metrics)
     if (!state->enabled || !state->harmony_enabled) {
         return;
     }
-
-    if (!state->stream || !state->harmony_line_open) {
-        return;
-    }
-
     double amp = sanitize_metric(metrics->amp);
     double tempo = sanitize_metric(metrics->tempo);
     double influence = sanitize_metric(metrics->influence);
@@ -46,9 +41,4 @@ void harmony_sync(State *state, Metrics *metrics)
 
     metrics->harmony = (float)harmony;
     state->last_harmony = harmony;
-
-    if (fprintf(state->stream, "harmony=%.4f\n", harmony) >= 0) {
-        fflush(state->stream);
-    }
-    state->harmony_line_open = false;
 }
