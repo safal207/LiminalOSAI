@@ -28,6 +28,7 @@
 #include "council.h"
 #include "affinity.h"
 #include "anticipation_v2.h"
+#include "introspect.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -90,6 +91,7 @@ typedef struct {
     float mirror_tempo_max;
     bool strict_order;
     bool dry_run;
+    bool introspect_enabled;
 } substrate_config;
 
 static bool substrate_affinity_enabled = false;
@@ -103,6 +105,7 @@ static const float MIRROR_GAIN_AMP_MIN_DEFAULT = 0.5f;
 static const float MIRROR_GAIN_AMP_MAX_DEFAULT = 1.2f;
 static const float MIRROR_GAIN_TEMPO_MIN_DEFAULT = 0.8f;
 static const float MIRROR_GAIN_TEMPO_MAX_DEFAULT = 1.2f;
+static State substrate_introspect_state;
 
 static float sanitize_positive(float value, float fallback)
 {
@@ -537,6 +540,8 @@ static substrate_config parse_args(int argc, char **argv)
                     cfg.mirror_tempo_max = parsed;
                 }
             }
+        } else if (strcmp(arg, "--introspect") == 0) {
+            cfg.introspect_enabled = true;
         } else if (strcmp(arg, "--strict-order") == 0) {
             cfg.strict_order = true;
         } else if (strcmp(arg, "--dry-run") == 0) {
@@ -1078,6 +1083,20 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
         }
         if (state->cycles != cycle_before) {
             emit_analysis_trace(state, cfg, cfg->empathic_enabled ? &response : NULL);
+            float consent = substrate_affinity_enabled ? clamp_unit(substrate_bond_gate.consent) : 1.0f;
+            float influence = substrate_affinity_enabled ? clamp_unit(substrate_bond_gate.influence) : 1.0f;
+            float bond_coh = substrate_affinity_enabled ? clamp_unit(substrate_bond_gate.bond_coh) : 0.0f;
+            float amp = clamp_unit(state->resonance);
+            float tempo_gain = clamp_unit(state->breath_rate / 2.4f);
+            Metrics metrics = {
+                .amp = amp,
+                .tempo = tempo_gain,
+                .consent = consent,
+                .influence = influence,
+                .bond_coh = bond_coh,
+                .error_margin = fabsf(amp - tempo_gain)
+            };
+            introspect_tick(&substrate_introspect_state, &metrics);
         }
     }
 }
@@ -1085,6 +1104,10 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
 int main(int argc, char **argv)
 {
     substrate_config cfg = parse_args(argc, argv);
+
+    introspect_state_init(&substrate_introspect_state);
+    introspect_enable(&substrate_introspect_state, cfg.introspect_enabled);
+
     if (cfg.dry_run) {
         char sequence[128];
         format_exhale_sequence(&cfg, sequence, sizeof(sequence));
@@ -1166,6 +1189,8 @@ int main(int argc, char **argv)
                state.memory_trace,
                state.vitality);
     }
+
+    introspect_finalize(&substrate_introspect_state);
 
     emotion_memory_finalize();
 

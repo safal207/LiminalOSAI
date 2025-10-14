@@ -34,6 +34,7 @@
 #include "emotion_memory.h"
 #include "anticipation_v2.h"
 #include "mirror.h"
+#include "introspect.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -117,6 +118,7 @@ typedef struct {
     float mirror_amp_max;
     float mirror_tempo_min;
     float mirror_tempo_max;
+    bool introspect_enabled;
     bool strict_order;
     bool dry_run;
 } kernel_options;
@@ -324,6 +326,7 @@ static const float ANT2_BASE_DELAY = 0.1f;
 static bool mirror_module_enabled = false;
 static float mirror_gain_amp = 1.0f;
 static float mirror_gain_tempo = 1.0f;
+static State introspect_state;
 
 typedef struct {
     AwarenessState awareness_snapshot;
@@ -754,6 +757,7 @@ static kernel_options parse_options(int argc, char **argv)
         .mirror_amp_max = MIRROR_GAIN_AMP_MAX_DEFAULT,
         .mirror_tempo_min = MIRROR_GAIN_TEMPO_MIN_DEFAULT,
         .mirror_tempo_max = MIRROR_GAIN_TEMPO_MAX_DEFAULT,
+        .introspect_enabled = false,
         .strict_order = false,
         .dry_run = false
     };
@@ -1025,6 +1029,8 @@ static kernel_options parse_options(int argc, char **argv)
             opts.mirror_enabled = true;
         } else if (strcmp(arg, "--mirror-trace") == 0) {
             opts.mirror_trace = true;
+        } else if (strcmp(arg, "--introspect") == 0) {
+            opts.introspect_enabled = true;
         } else if (strncmp(arg, "--mirror-soft=", 14) == 0) {
             const char *value = arg + 14;
             if (*value) {
@@ -1941,6 +1947,9 @@ static void exhale(const kernel_options *opts)
     float tempo_max = opts ? opts->mirror_tempo_max : MIRROR_GAIN_TEMPO_MAX_DEFAULT;
 
     bool mirror_stage_required = mirror_module_enabled || (opts && opts->strict_order);
+    float introspect_consent = affinity_layer_enabled ? bond_gate_state.consent : 1.0f;
+    float introspect_influence = affinity_layer_enabled ? cycle_influence : 1.0f;
+    float introspect_bond = affinity_layer_enabled ? bond_gate_state.bond_coh : 0.0f;
     if (mirror_stage_required) {
         float mirror_energy = active_count > 0 ? clamp_unit(energy_avg / 12.0f) : 0.0f;
         float mirror_calm = clamp_unit(stability);
@@ -1950,8 +1959,8 @@ static void exhale(const kernel_options *opts)
         } else {
             mirror_tempo = active_count > 0 ? clamp_unit(resonance_avg / 12.0f) : 0.0f;
         }
-        float mirror_consent = affinity_layer_enabled ? bond_gate_state.consent : 1.0f;
-        float mirror_influence = affinity_layer_enabled ? cycle_influence : 1.0f;
+        float mirror_consent = introspect_consent;
+        float mirror_influence = introspect_influence;
         if (mirror_consent < 0.3f || mirror_influence < 0.3f) {
             mirror_reset();
             mirror_gain_amp = clamp_range(1.0f, amp_min, amp_max);
@@ -1973,6 +1982,16 @@ static void exhale(const kernel_options *opts)
         mirror_gain_amp = clamp_range(1.0f, amp_min, amp_max);
         mirror_gain_tempo = clamp_range(1.0f, tempo_min, tempo_max);
     }
+
+    Metrics introspect_metrics = {
+        .amp = mirror_gain_amp,
+        .tempo = mirror_gain_tempo,
+        .consent = introspect_consent,
+        .influence = introspect_influence,
+        .bond_coh = introspect_bond,
+        .error_margin = fabsf(mirror_gain_amp - mirror_gain_tempo)
+    };
+    introspect_tick(&introspect_state, &introspect_metrics);
 
     if (collective_active) {
         ++collective_cycle_count;
@@ -2108,6 +2127,9 @@ static void print_recent_traces(void)
 int main(int argc, char **argv)
 {
     kernel_options opts = parse_options(argc, argv);
+
+    introspect_state_init(&introspect_state);
+    introspect_enable(&introspect_state, opts.introspect_enabled);
 
     if (opts.dry_run) {
         char sequence[128];
@@ -2276,6 +2298,8 @@ int main(int argc, char **argv)
 
     emotion_memory_finalize();
     metabolic_shutdown();
+
+    introspect_finalize(&introspect_state);
 
     if (collective_memory_match_trace) {
         cm_trace_free(collective_memory_match_trace);
