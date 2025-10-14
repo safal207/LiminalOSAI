@@ -41,7 +41,17 @@ void introspect_enable(State *state, bool enabled);
 void introspect_enable_harmony(State *state, bool enabled);
 void introspect_finalize(State *state);
 void introspect_tick(State *state, Metrics *metrics);
-void introspect_configure_trs(bool enabled, float alpha, int warmup);
+void introspect_configure_trs(bool enabled,
+                              float alpha,
+                              int warmup,
+                              bool adapt_enabled,
+                              float alpha_min,
+                              float alpha_max,
+                              float target_delta,
+                              float k_p,
+                              float k_i,
+                              float k_d,
+                              bool dry_run);
 void introspect_set_dream_preview(State *state, DreamCouplerPhase phase, bool active);
 
 #endif /* LIMINAL_INTROSPECT_H */

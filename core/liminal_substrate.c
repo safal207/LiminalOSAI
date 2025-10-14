@@ -99,6 +99,13 @@ typedef struct {
     bool trs_enabled;
     float trs_alpha;
     int trs_warmup;
+    bool trs_adapt_enabled;
+    float trs_alpha_min;
+    float trs_alpha_max;
+    float trs_target_delta;
+    float trs_kp;
+    float trs_ki;
+    float trs_kd;
 } substrate_config;
 
 static bool substrate_affinity_enabled = false;
@@ -437,6 +444,13 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.trs_enabled = false;
     cfg.trs_alpha = 0.3f;
     cfg.trs_warmup = 5;
+    cfg.trs_adapt_enabled = false;
+    cfg.trs_alpha_min = 0.10f;
+    cfg.trs_alpha_max = 0.60f;
+    cfg.trs_target_delta = 0.015f;
+    cfg.trs_kp = 0.4f;
+    cfg.trs_ki = 0.05f;
+    cfg.trs_kd = 0.1f;
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -597,6 +611,75 @@ static substrate_config parse_args(int argc, char **argv)
                         parsed = 10;
                     }
                     cfg.trs_warmup = (int)parsed;
+                }
+            }
+        } else if (strcmp(arg, "--trs-adapt") == 0) {
+            cfg.trs_adapt_enabled = true;
+            cfg.trs_enabled = true;
+        } else if (strncmp(arg, "--trs-alpha-min=", 16) == 0) {
+            const char *value = arg + 16;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.trs_alpha_min = parsed;
+                    cfg.trs_adapt_enabled = true;
+                    cfg.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-alpha-max=", 16) == 0) {
+            const char *value = arg + 16;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.trs_alpha_max = parsed;
+                    cfg.trs_adapt_enabled = true;
+                    cfg.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-target-delta=", 20) == 0) {
+            const char *value = arg + 20;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.trs_target_delta = parsed;
+                    cfg.trs_adapt_enabled = true;
+                    cfg.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-kp=", 9) == 0) {
+            const char *value = arg + 9;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.trs_kp = parsed;
+                    cfg.trs_adapt_enabled = true;
+                    cfg.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-ki=", 9) == 0) {
+            const char *value = arg + 9;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.trs_ki = parsed;
+                    cfg.trs_adapt_enabled = true;
+                    cfg.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-kd=", 9) == 0) {
+            const char *value = arg + 9;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.trs_kd = parsed;
+                    cfg.trs_adapt_enabled = true;
+                    cfg.trs_enabled = true;
                 }
             }
         } else if (strcmp(arg, "--dream") == 0) {
@@ -1207,7 +1290,17 @@ int main(int argc, char **argv)
     introspect_enable_harmony(
         &substrate_introspect_state,
         cfg.harmony_enabled || cfg.dream_enabled);
-    introspect_configure_trs(cfg.trs_enabled && !cfg.dry_run, cfg.trs_alpha, cfg.trs_warmup);
+    introspect_configure_trs(cfg.trs_enabled,
+                             cfg.trs_alpha,
+                             cfg.trs_warmup,
+                             cfg.trs_adapt_enabled,
+                             cfg.trs_alpha_min,
+                             cfg.trs_alpha_max,
+                             cfg.trs_target_delta,
+                             cfg.trs_kp,
+                             cfg.trs_ki,
+                             cfg.trs_kd,
+                             cfg.dry_run);
 
     if (cfg.dry_run) {
         char sequence[128];

@@ -125,6 +125,13 @@ typedef struct {
     bool trs_enabled;
     float trs_alpha;
     int trs_warmup;
+    bool trs_adapt_enabled;
+    float trs_alpha_min;
+    float trs_alpha_max;
+    float trs_target_delta;
+    float trs_kp;
+    float trs_ki;
+    float trs_kd;
     bool strict_order;
     bool dry_run;
 } kernel_options;
@@ -781,6 +788,13 @@ static kernel_options parse_options(int argc, char **argv)
         .trs_enabled = false,
         .trs_alpha = 0.3f,
         .trs_warmup = 5,
+        .trs_adapt_enabled = false,
+        .trs_alpha_min = 0.10f,
+        .trs_alpha_max = 0.60f,
+        .trs_target_delta = 0.015f,
+        .trs_kp = 0.4f,
+        .trs_ki = 0.05f,
+        .trs_kd = 0.1f,
         .strict_order = false,
         .dry_run = false
     };
@@ -1084,6 +1098,75 @@ static kernel_options parse_options(int argc, char **argv)
                         parsed = 10;
                     }
                     opts.trs_warmup = (int)parsed;
+                }
+            }
+        } else if (strcmp(arg, "--trs-adapt") == 0) {
+            opts.trs_adapt_enabled = true;
+            opts.trs_enabled = true;
+        } else if (strncmp(arg, "--trs-alpha-min=", 16) == 0) {
+            const char *value = arg + 16;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_alpha_min = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-alpha-max=", 16) == 0) {
+            const char *value = arg + 16;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_alpha_max = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-target-delta=", 20) == 0) {
+            const char *value = arg + 20;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_target_delta = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-kp=", 9) == 0) {
+            const char *value = arg + 9;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_kp = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-ki=", 9) == 0) {
+            const char *value = arg + 9;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_ki = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-kd=", 9) == 0) {
+            const char *value = arg + 9;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_kd = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
                 }
             }
         } else if (strncmp(arg, "--mirror-soft=", 14) == 0) {
@@ -2237,7 +2320,17 @@ int main(int argc, char **argv)
     introspect_enable_harmony(
         &introspect_state,
         opts.harmony_enabled || opts.dream_enabled);
-    introspect_configure_trs(opts.trs_enabled && !opts.dry_run, opts.trs_alpha, opts.trs_warmup);
+    introspect_configure_trs(opts.trs_enabled,
+                             opts.trs_alpha,
+                             opts.trs_warmup,
+                             opts.trs_adapt_enabled,
+                             opts.trs_alpha_min,
+                             opts.trs_alpha_max,
+                             opts.trs_target_delta,
+                             opts.trs_kp,
+                             opts.trs_ki,
+                             opts.trs_kd,
+                             opts.dry_run);
 
     if (opts.dry_run) {
         char sequence[128];
