@@ -1535,6 +1535,17 @@ static void exhale(const kernel_options *opts)
     if (empathic_layer_active) {
         coherence_level = empathic_apply_coherence(coherence_level);
     }
+
+    if (affinity_layer_enabled) {
+        cycle_influence = update_affinity_gate_state(human_bridge_active,
+                                                     explicit_consent,
+                                                     human_alignment,
+                                                     coherence_field);
+    } else {
+        dream_set_affinity_gate(1.0f, true);
+        symbol_set_affinity_scale(1.0f);
+    }
+
     dream_update(coherence_level,
                   awareness_snapshot.awareness_level,
                   anticipation_field,
@@ -1676,16 +1687,6 @@ static void exhale(const kernel_options *opts)
 
     if (collective_active) {
         ++collective_cycle_count;
-    }
-
-    if (affinity_layer_enabled) {
-        cycle_influence = update_affinity_gate_state(human_bridge_active,
-                                                     explicit_consent,
-                                                     human_alignment,
-                                                     coherence_field);
-    } else {
-        dream_set_affinity_gate(1.0f, true);
-        symbol_set_affinity_scale(1.0f);
     }
 
     ant2_feedback(&ant2_state, ant2_feedback_delta);
