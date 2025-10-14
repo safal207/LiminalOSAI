@@ -259,12 +259,17 @@ void introspect_tick(State *state, Metrics *metrics)
     double bond_coh = sanitize_value(metrics->bond_coh);
     double err = sanitize_value(metrics->error_margin);
 
-    double harmony_raw = 0.7 * influence_raw + 0.3 * consent_raw;
-    double diff = fabs(avg_amp - avg_tempo);
-    if (diff < 0.1 && influence_raw > 0.6) {
-        harmony_raw = 1.0;
+    double harmony_input = sanitize_value(metrics->harmony);
+    harmony_input = clamp_unit_value(harmony_input);
+    double harmony_raw = harmony_input;
+    if (g_trs_enabled) {
+        harmony_raw = 0.7 * influence_raw + 0.3 * consent_raw;
+        double diff = fabs(avg_amp - avg_tempo);
+        if (diff < 0.1 && influence_raw > 0.6) {
+            harmony_raw = 1.0;
+        }
+        harmony_raw = clamp_unit_value(harmony_raw);
     }
-    harmony_raw = clamp_unit_value(harmony_raw);
 
     double sm_consent = consent_raw;
     double sm_influence = influence_raw;
@@ -301,7 +306,13 @@ void introspect_tick(State *state, Metrics *metrics)
 
     metrics->influence = (float)sm_influence;
     metrics->consent = (float)sm_consent;
-    metrics->harmony = (float)sm_harmony;
+    if (g_trs_enabled) {
+        metrics->harmony = (float)sm_harmony;
+    } else {
+        sm_harmony = harmony_input;
+        harmony_raw = harmony_input;
+        metrics->harmony = (float)harmony_input;
+    }
 
     if (fprintf(state->stream,
                 "{\"timestamp\":\"%s\",\"cycle\":%" PRIu64 ",\"amp\":%.4f,\"tempo\":%.4f,"
