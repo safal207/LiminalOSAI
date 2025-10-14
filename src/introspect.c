@@ -69,11 +69,14 @@ void introspect_state_init(State *state)
         return;
     }
     state->enabled = false;
+    state->harmony_enabled = false;
+    state->harmony_line_open = false;
     state->cycle_index = 0;
     state->amp_sum = 0.0;
     state->tempo_sum = 0.0;
     state->sample_count = 0;
     state->stream = NULL;
+    state->last_harmony = 0.0;
 }
 
 void introspect_enable(State *state, bool enabled)
@@ -82,6 +85,21 @@ void introspect_enable(State *state, bool enabled)
         return;
     }
     state->enabled = enabled;
+    if (!enabled) {
+        state->harmony_line_open = false;
+    }
+}
+
+void introspect_enable_harmony(State *state, bool enabled)
+{
+    if (!state) {
+        return;
+    }
+    state->harmony_enabled = enabled;
+    if (!enabled) {
+        state->harmony_line_open = false;
+        state->last_harmony = 0.0;
+    }
 }
 
 void introspect_finalize(State *state)
@@ -96,6 +114,8 @@ void introspect_finalize(State *state)
     state->amp_sum = 0.0;
     state->tempo_sum = 0.0;
     state->sample_count = 0;
+    state->harmony_line_open = false;
+    state->last_harmony = 0.0;
 }
 
 void introspect_tick(State *state, const Metrics *metrics)
@@ -130,17 +150,42 @@ void introspect_tick(State *state, const Metrics *metrics)
     char timestamp[32];
     format_timestamp(timestamp, sizeof(timestamp));
 
-    fprintf(state->stream,
-            "%s cycle=%" PRIu64 " avg_amp=%.4f avg_tempo=%.4f consent=%.4f influence=%.4f bond_coh=%.4f err=%.4f\n",
-            timestamp,
-            state->cycle_index,
-            avg_amp,
-            avg_tempo,
-            sanitize_value(metrics->consent),
-            sanitize_value(metrics->influence),
-            sanitize_value(metrics->bond_coh),
-            sanitize_value(metrics->error_margin));
-    fflush(state->stream);
+    double consent = sanitize_value(metrics->consent);
+    double influence = sanitize_value(metrics->influence);
+    double bond_coh = sanitize_value(metrics->bond_coh);
+    double err = sanitize_value(metrics->error_margin);
+
+    if (state->harmony_enabled) {
+        if (fprintf(state->stream,
+                    "%s cycle=%" PRIu64 " avg_amp=%.4f avg_tempo=%.4f consent=%.4f influence=%.4f bond_coh=%.4f err=%.4f ",
+                    timestamp,
+                    state->cycle_index,
+                    avg_amp,
+                    avg_tempo,
+                    consent,
+                    influence,
+                    bond_coh,
+                    err) < 0) {
+            state->harmony_line_open = false;
+        } else {
+            state->harmony_line_open = true;
+        }
+    } else {
+        if (fprintf(state->stream,
+                    "%s cycle=%" PRIu64 " avg_amp=%.4f avg_tempo=%.4f consent=%.4f influence=%.4f bond_coh=%.4f err=%.4f\n",
+                    timestamp,
+                    state->cycle_index,
+                    avg_amp,
+                    avg_tempo,
+                    consent,
+                    influence,
+                    bond_coh,
+                    err) >= 0) {
+            fflush(state->stream);
+        }
+        state->harmony_line_open = false;
+        state->last_harmony = 0.0;
+    }
 
     state->amp_sum = 0.0;
     state->tempo_sum = 0.0;
