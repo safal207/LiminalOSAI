@@ -5,6 +5,12 @@
 #include <stdint.h>
 #include <stdio.h>
 
+typedef enum {
+    DREAM_COUPLER_PHASE_REST = 0,
+    DREAM_COUPLER_PHASE_DREAM,
+    DREAM_COUPLER_PHASE_WAKE
+} DreamCouplerPhase;
+
 typedef struct introspect_state {
     bool enabled;
     uint64_t cycle_index;
@@ -12,6 +18,9 @@ typedef struct introspect_state {
     double tempo_sum;
     uint32_t sample_count;
     FILE *stream;
+    DreamCouplerPhase dream_phase;
+    DreamCouplerPhase next_dream_phase;
+    bool has_dream_preview;
 } State;
 
 typedef struct introspect_metrics {
@@ -21,11 +30,13 @@ typedef struct introspect_metrics {
     float influence;
     float bond_coh;
     float error_margin;
+    float harmony;
 } Metrics;
 
 void introspect_state_init(State *state);
 void introspect_enable(State *state, bool enabled);
 void introspect_finalize(State *state);
 void introspect_tick(State *state, const Metrics *metrics);
+void introspect_set_dream_preview(State *state, DreamCouplerPhase phase, bool active);
 
 #endif /* LIMINAL_INTROSPECT_H */

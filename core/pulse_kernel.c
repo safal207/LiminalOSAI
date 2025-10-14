@@ -28,6 +28,7 @@
 #include "weave.h"
 #include "dream.h"
 #include "dream_balance.h"
+#include "dream_coupler.h"
 #include "metabolic.h"
 #include "symbiosis.h"
 #include "empathic.h"
@@ -164,6 +165,9 @@ static size_t build_exhale_sequence(const kernel_options *opts, const char **ste
     bool include_collective = strict || (opts && (opts->collective_enabled || opts->collective_trace));
     bool include_affinity = strict || (opts && opts->affinity_enabled);
     bool include_mirror = strict || (opts && opts->mirror_enabled);
+    bool include_introspect = strict || (opts && opts->introspect_enabled);
+    bool include_harmony = strict || include_introspect || (opts && opts->dream_enabled);
+    bool include_dream = opts && opts->dream_enabled;
 
     if (include_ant2 && count < capacity) {
         steps[count++] = "ant2";
@@ -179,6 +183,15 @@ static size_t build_exhale_sequence(const kernel_options *opts, const char **ste
     }
     if (include_mirror && count < capacity) {
         steps[count++] = "mirror";
+    }
+    if (include_introspect && count < capacity) {
+        steps[count++] = "introspect";
+    }
+    if (include_harmony && count < capacity) {
+        steps[count++] = "harmony";
+    }
+    if (include_dream && count < capacity) {
+        steps[count++] = "dream";
     }
 
     return count;
@@ -327,6 +340,8 @@ static bool mirror_module_enabled = false;
 static float mirror_gain_amp = 1.0f;
 static float mirror_gain_tempo = 1.0f;
 static State introspect_state;
+
+static void harmony_sync(Metrics *metrics);
 
 typedef struct {
     AwarenessState awareness_snapshot;
@@ -1989,9 +2004,52 @@ static void exhale(const kernel_options *opts)
         .consent = introspect_consent,
         .influence = introspect_influence,
         .bond_coh = introspect_bond,
-        .error_margin = fabsf(mirror_gain_amp - mirror_gain_tempo)
+        .error_margin = fabsf(mirror_gain_amp - mirror_gain_tempo),
+        .harmony = clamp_unit(coherence_level)
     };
+
+    if (opts && opts->dream_enabled) {
+        Metrics preview_metrics = introspect_metrics;
+        preview_metrics.amp = clamp_unit(energy_avg / 12.0f);
+        float harmony_signal = coherence_level;
+        if (dream_balance.balance_strength > 0.0f) {
+            harmony_signal += dream_balance.balance_strength * 0.3f;
+        }
+        float tempo_balance = clamp_unit(mirror_gain_tempo);
+        harmony_signal += (1.0f - tempo_balance) * 0.25f;
+        preview_metrics.harmony = clamp_unit(harmony_signal);
+        float tempo_signal = mirror_gain_tempo * (1.0f + cycle_influence);
+        if (!isfinite(tempo_signal)) {
+            tempo_signal = mirror_gain_tempo;
+        }
+        preview_metrics.tempo = tempo_signal;
+        DreamCouplerPhase preview_phase = dream_coupler_evaluate(&preview_metrics);
+        introspect_set_dream_preview(&introspect_state, preview_phase, true);
+    } else {
+        introspect_set_dream_preview(&introspect_state, introspect_state.dream_phase, false);
+    }
+
     introspect_tick(&introspect_state, &introspect_metrics);
+
+    Metrics harmony_metrics = introspect_metrics;
+    harmony_sync(&harmony_metrics);
+    if (opts && opts->dream_enabled) {
+        Metrics coupling_metrics = harmony_metrics;
+        coupling_metrics.amp = clamp_unit(energy_avg / 12.0f);
+        float harmony_signal = coherence_level;
+        if (dream_balance.balance_strength > 0.0f) {
+            harmony_signal += dream_balance.balance_strength * 0.3f;
+        }
+        float tempo_balance = clamp_unit(mirror_gain_tempo);
+        harmony_signal += (1.0f - tempo_balance) * 0.25f;
+        coupling_metrics.harmony = clamp_unit(harmony_signal);
+        float tempo_signal = mirror_gain_tempo * (1.0f + cycle_influence);
+        if (!isfinite(tempo_signal)) {
+            tempo_signal = mirror_gain_tempo;
+        }
+        coupling_metrics.tempo = tempo_signal;
+        dream_couple(&introspect_state, &coupling_metrics);
+    }
 
     if (collective_active) {
         ++collective_cycle_count;
@@ -2307,4 +2365,21 @@ int main(int argc, char **argv)
     }
 
     return 0;
+}
+static void harmony_sync(Metrics *metrics)
+{
+    if (!metrics) {
+        return;
+    }
+
+    float harmony = metrics->harmony;
+    if (!isfinite(harmony)) {
+        harmony = 0.0f;
+    }
+    if (harmony < 0.0f) {
+        harmony = 0.0f;
+    } else if (harmony > 1.0f) {
+        harmony = 1.0f;
+    }
+    metrics->harmony = harmony;
 }
