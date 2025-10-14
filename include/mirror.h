@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_MIRROR_H
-#define LIMINAL_INCLUDE_MIRROR_H
+#ifndef LIMINAL_MIRROR_H
+#define LIMINAL_MIRROR_H
 
 #include <stdbool.h>
 
@@ -22,4 +22,4 @@ MirrorGains mirror_update(float influence, float energy, float calm, float tempo
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_MIRROR_H */
+#endif /* LIMINAL_MIRROR_H */

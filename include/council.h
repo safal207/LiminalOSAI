@@ -1,5 +1,5 @@
-#ifndef COUNCIL_H
-#define COUNCIL_H
+#ifndef LIMINAL_COUNCIL_H
+#define LIMINAL_COUNCIL_H
 
 #include <stddef.h>
 
@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-typedef struct {
+typedef struct InnerCouncil {
     float reflection_vote;
     float awareness_vote;
     float coherence_vote;
@@ -38,4 +38,4 @@ const InnerCouncil *council_state(void);
 }
 #endif
 
-#endif /* COUNCIL_H */
+#endif /* LIMINAL_COUNCIL_H */

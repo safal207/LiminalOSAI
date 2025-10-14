@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_REFLECTION_H
-#define LIMINAL_INCLUDE_REFLECTION_H
+#ifndef LIMINAL_REFLECTION_H
+#define LIMINAL_REFLECTION_H
 
 #include <stdint.h>
 
@@ -22,4 +22,4 @@ void reflect_dump(int n);
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_REFLECTION_H */
+#endif /* LIMINAL_REFLECTION_H */

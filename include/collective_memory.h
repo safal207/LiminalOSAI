@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_COLLECTIVE_MEMORY_H
-#define LIMINAL_INCLUDE_COLLECTIVE_MEMORY_H
+#ifndef LIMINAL_COLLECTIVE_MEMORY_H
+#define LIMINAL_COLLECTIVE_MEMORY_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -47,4 +47,4 @@ float cm_clamp(float value, float min_value, float max_value);
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_COLLECTIVE_MEMORY_H */
+#endif /* LIMINAL_COLLECTIVE_MEMORY_H */

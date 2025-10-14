@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_SYMBOL_H
-#define LIMINAL_INCLUDE_SYMBOL_H
+#ifndef LIMINAL_SYMBOL_H
+#define LIMINAL_SYMBOL_H
 
 #include <stddef.h>
 
@@ -28,4 +28,4 @@ void symbol_create_link(const char *from_key, const char *to_key, float weight);
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_SYMBOL_H */
+#endif /* LIMINAL_SYMBOL_H */

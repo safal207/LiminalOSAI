@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_WEAVE_H
-#define LIMINAL_INCLUDE_WEAVE_H
+#ifndef LIMINAL_WEAVE_H
+#define LIMINAL_WEAVE_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -48,4 +48,4 @@ void weave_mark_echo_emitted(void);
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_WEAVE_H */
+#endif /* LIMINAL_WEAVE_H */

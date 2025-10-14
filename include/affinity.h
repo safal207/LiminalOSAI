@@ -1,5 +1,5 @@
-#ifndef AFFINITY_H
-#define AFFINITY_H
+#ifndef LIMINAL_AFFINITY_H
+#define LIMINAL_AFFINITY_H
 
 #include <stdbool.h>
 
@@ -28,4 +28,4 @@ bool bond_gate_log_enabled(void);
 void bond_gate_set_log_enabled(bool enabled);
 void bond_gate_trace(const Affinity *aff, const BondGate *gate, float adj);
 
-#endif // AFFINITY_H
+#endif /* LIMINAL_AFFINITY_H */

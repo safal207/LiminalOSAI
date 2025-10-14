@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_SOIL_H
-#define LIMINAL_INCLUDE_SOIL_H
+#ifndef LIMINAL_SOIL_H
+#define LIMINAL_SOIL_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -45,4 +45,4 @@ soil_trace soil_trace_make(uint32_t energy, const void *data, size_t data_len);
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_SOIL_H */
+#endif /* LIMINAL_SOIL_H */

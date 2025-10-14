@@ -1,4 +1,6 @@
 #include "dream_balance.h"
+#include "council.h"
+#include "dream.h"
 
 #include <math.h>
 

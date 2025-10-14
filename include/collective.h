@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_COLLECTIVE_H
-#define LIMINAL_INCLUDE_COLLECTIVE_H
+#ifndef LIMINAL_COLLECTIVE_H
+#define LIMINAL_COLLECTIVE_H
 
 #include <stddef.h>
 
@@ -40,4 +40,4 @@ float rgraph_ensemble_adjust(RGraph *g, float target);
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_COLLECTIVE_H */
+#endif /* LIMINAL_COLLECTIVE_H */

@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_EMOTION_MEMORY_H
-#define LIMINAL_INCLUDE_EMOTION_MEMORY_H
+#ifndef LIMINAL_EMOTION_MEMORY_H
+#define LIMINAL_EMOTION_MEMORY_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -36,4 +36,4 @@ void emotion_memory_finalize(void);
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_EMOTION_MEMORY_H */
+#endif /* LIMINAL_EMOTION_MEMORY_H */
