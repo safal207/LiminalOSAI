@@ -35,6 +35,7 @@
 #include "anticipation_v2.h"
 #include "mirror.h"
 #include "introspect.h"
+#include "harmony.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -119,6 +120,7 @@ typedef struct {
     float mirror_tempo_min;
     float mirror_tempo_max;
     bool introspect_enabled;
+    bool harmony_enabled;
     bool strict_order;
     bool dry_run;
 } kernel_options;
@@ -758,6 +760,7 @@ static kernel_options parse_options(int argc, char **argv)
         .mirror_tempo_min = MIRROR_GAIN_TEMPO_MIN_DEFAULT,
         .mirror_tempo_max = MIRROR_GAIN_TEMPO_MAX_DEFAULT,
         .introspect_enabled = false,
+        .harmony_enabled = false,
         .strict_order = false,
         .dry_run = false
     };
@@ -1031,6 +1034,8 @@ static kernel_options parse_options(int argc, char **argv)
             opts.mirror_trace = true;
         } else if (strcmp(arg, "--introspect") == 0) {
             opts.introspect_enabled = true;
+        } else if (strcmp(arg, "--harmony") == 0) {
+            opts.harmony_enabled = true;
         } else if (strncmp(arg, "--mirror-soft=", 14) == 0) {
             const char *value = arg + 14;
             if (*value) {
@@ -1989,9 +1994,14 @@ static void exhale(const kernel_options *opts)
         .consent = introspect_consent,
         .influence = introspect_influence,
         .bond_coh = introspect_bond,
-        .error_margin = fabsf(mirror_gain_amp - mirror_gain_tempo)
+        .error_margin = fabsf(mirror_gain_amp - mirror_gain_tempo),
+        .harmony = 0.0f
     };
     introspect_tick(&introspect_state, &introspect_metrics);
+
+    if (opts && opts->harmony_enabled) {
+        harmony_sync(&introspect_state, &introspect_metrics);
+    }
 
     if (collective_active) {
         ++collective_cycle_count;
@@ -2130,6 +2140,7 @@ int main(int argc, char **argv)
 
     introspect_state_init(&introspect_state);
     introspect_enable(&introspect_state, opts.introspect_enabled);
+    introspect_enable_harmony(&introspect_state, opts.harmony_enabled);
 
     if (opts.dry_run) {
         char sequence[128];

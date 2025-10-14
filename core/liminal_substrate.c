@@ -29,6 +29,7 @@
 #include "affinity.h"
 #include "anticipation_v2.h"
 #include "introspect.h"
+#include "harmony.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -92,6 +93,7 @@ typedef struct {
     bool strict_order;
     bool dry_run;
     bool introspect_enabled;
+    bool harmony_enabled;
 } substrate_config;
 
 static bool substrate_affinity_enabled = false;
@@ -412,6 +414,8 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.mirror_tempo_max = MIRROR_GAIN_TEMPO_MAX_DEFAULT;
     cfg.strict_order = false;
     cfg.dry_run = false;
+    cfg.introspect_enabled = false;
+    cfg.harmony_enabled = false;
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -542,6 +546,8 @@ static substrate_config parse_args(int argc, char **argv)
             }
         } else if (strcmp(arg, "--introspect") == 0) {
             cfg.introspect_enabled = true;
+        } else if (strcmp(arg, "--harmony") == 0) {
+            cfg.harmony_enabled = true;
         } else if (strcmp(arg, "--strict-order") == 0) {
             cfg.strict_order = true;
         } else if (strcmp(arg, "--dry-run") == 0) {
@@ -611,6 +617,10 @@ static substrate_config parse_args(int argc, char **argv)
                      &cfg.mirror_tempo_max,
                      MIRROR_GAIN_TEMPO_MIN_DEFAULT,
                      MIRROR_GAIN_TEMPO_MAX_DEFAULT);
+
+    if (cfg.harmony_enabled && !cfg.introspect_enabled) {
+        cfg.introspect_enabled = true;
+    }
 
     return cfg;
 }
@@ -1094,9 +1104,13 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                 .consent = consent,
                 .influence = influence,
                 .bond_coh = bond_coh,
-                .error_margin = fabsf(amp - tempo_gain)
+                .error_margin = fabsf(amp - tempo_gain),
+                .harmony = 0.0f
             };
             introspect_tick(&substrate_introspect_state, &metrics);
+            if (cfg->harmony_enabled) {
+                harmony_sync(&substrate_introspect_state, &metrics);
+            }
         }
     }
 }
@@ -1107,6 +1121,7 @@ int main(int argc, char **argv)
 
     introspect_state_init(&substrate_introspect_state);
     introspect_enable(&substrate_introspect_state, cfg.introspect_enabled);
+    introspect_enable_harmony(&substrate_introspect_state, cfg.harmony_enabled);
 
     if (cfg.dry_run) {
         char sequence[128];
