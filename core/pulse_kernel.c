@@ -122,6 +122,9 @@ typedef struct {
     float mirror_tempo_max;
     bool introspect_enabled;
     bool harmony_enabled;
+    bool trs_enabled;
+    float trs_alpha;
+    int trs_warmup;
     bool strict_order;
     bool dry_run;
 } kernel_options;
@@ -775,6 +778,9 @@ static kernel_options parse_options(int argc, char **argv)
         .mirror_tempo_max = MIRROR_GAIN_TEMPO_MAX_DEFAULT,
         .introspect_enabled = false,
         .harmony_enabled = false,
+        .trs_enabled = false,
+        .trs_alpha = 0.3f,
+        .trs_warmup = 5,
         .strict_order = false,
         .dry_run = false
     };
@@ -1050,6 +1056,36 @@ static kernel_options parse_options(int argc, char **argv)
             opts.introspect_enabled = true;
         } else if (strcmp(arg, "--harmony") == 0) {
             opts.harmony_enabled = true;
+        } else if (strcmp(arg, "--trs") == 0) {
+            opts.trs_enabled = true;
+        } else if (strncmp(arg, "--trs-alpha=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.05f) {
+                        parsed = 0.05f;
+                    } else if (parsed > 0.8f) {
+                        parsed = 0.8f;
+                    }
+                    opts.trs_alpha = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--trs-warmup=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value) {
+                    if (parsed < 0) {
+                        parsed = 0;
+                    } else if (parsed > 10) {
+                        parsed = 10;
+                    }
+                    opts.trs_warmup = (int)parsed;
+                }
+            }
         } else if (strncmp(arg, "--mirror-soft=", 14) == 0) {
             const char *value = arg + 14;
             if (*value) {
@@ -2201,6 +2237,7 @@ int main(int argc, char **argv)
     introspect_enable_harmony(
         &introspect_state,
         opts.harmony_enabled || opts.dream_enabled);
+    introspect_configure_trs(opts.trs_enabled && !opts.dry_run, opts.trs_alpha, opts.trs_warmup);
 
     if (opts.dry_run) {
         char sequence[128];

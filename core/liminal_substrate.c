@@ -96,6 +96,9 @@ typedef struct {
     bool introspect_enabled;
     bool harmony_enabled;
     bool dream_enabled;
+    bool trs_enabled;
+    float trs_alpha;
+    int trs_warmup;
 } substrate_config;
 
 static bool substrate_affinity_enabled = false;
@@ -431,6 +434,9 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.introspect_enabled = false;
     cfg.harmony_enabled = false;
     cfg.dream_enabled = false;
+    cfg.trs_enabled = false;
+    cfg.trs_alpha = 0.3f;
+    cfg.trs_warmup = 5;
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -563,6 +569,36 @@ static substrate_config parse_args(int argc, char **argv)
             cfg.introspect_enabled = true;
         } else if (strcmp(arg, "--harmony") == 0) {
             cfg.harmony_enabled = true;
+        } else if (strcmp(arg, "--trs") == 0) {
+            cfg.trs_enabled = true;
+        } else if (strncmp(arg, "--trs-alpha=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.05f) {
+                        parsed = 0.05f;
+                    } else if (parsed > 0.8f) {
+                        parsed = 0.8f;
+                    }
+                    cfg.trs_alpha = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--trs-warmup=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value) {
+                    if (parsed < 0) {
+                        parsed = 0;
+                    } else if (parsed > 10) {
+                        parsed = 10;
+                    }
+                    cfg.trs_warmup = (int)parsed;
+                }
+            }
         } else if (strcmp(arg, "--dream") == 0) {
             cfg.dream_enabled = true;
         } else if (strcmp(arg, "--strict-order") == 0) {
@@ -1171,6 +1207,7 @@ int main(int argc, char **argv)
     introspect_enable_harmony(
         &substrate_introspect_state,
         cfg.harmony_enabled || cfg.dream_enabled);
+    introspect_configure_trs(cfg.trs_enabled && !cfg.dry_run, cfg.trs_alpha, cfg.trs_warmup);
 
     if (cfg.dry_run) {
         char sequence[128];
