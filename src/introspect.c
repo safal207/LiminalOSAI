@@ -6,6 +6,7 @@
 
 #include "introspect.h"
 #include "dream_coupler.h"
+#include "trs_filter.h"
 
 #include <inttypes.h>
 #include <limits.h>
@@ -24,10 +25,46 @@
 #define INTROSPECT_LOG_PATH "logs/introspect_v1.log"
 #endif
 
+static const float TRS_ALPHA_DEFAULT = 0.3f;
+static const int TRS_WARMUP_DEFAULT = 5;
+static const uint64_t TRS_SYNC_INTERVAL = 5ULL;
+
+static bool g_trs_enabled = false;
+static bool g_trs_initialized = false;
+static float g_trs_alpha = TRS_ALPHA_DEFAULT;
+static int g_trs_warmup_target = TRS_WARMUP_DEFAULT;
+static TRS g_trs_state;
+static FILE *g_trs_sync_stream = NULL;
+
 static double sanitize_value(double value)
 {
     if (!isfinite(value)) {
         return 0.0;
+    }
+    return value;
+}
+
+static float clamp_trs_alpha_value(float value)
+{
+    if (!isfinite(value)) {
+        return TRS_ALPHA_DEFAULT;
+    }
+    if (value < 0.05f) {
+        return 0.05f;
+    }
+    if (value > 0.8f) {
+        return 0.8f;
+    }
+    return value;
+}
+
+static int clamp_trs_warmup_value(int value)
+{
+    if (value < 0) {
+        return 0;
+    }
+    if (value > 10) {
+        return 10;
     }
     return value;
 }
@@ -95,6 +132,11 @@ void introspect_state_init(State *state)
     state->dream_phase = DREAM_COUPLER_PHASE_REST;
     state->next_dream_phase = DREAM_COUPLER_PHASE_REST;
     state->has_dream_preview = false;
+    if (g_trs_sync_stream) {
+        fclose(g_trs_sync_stream);
+        g_trs_sync_stream = NULL;
+    }
+    g_trs_initialized = false;
 }
 
 void introspect_enable(State *state, bool enabled)
@@ -117,6 +159,23 @@ void introspect_enable_harmony(State *state, bool enabled)
     if (!enabled) {
         state->harmony_line_open = false;
         state->last_harmony = 0.0;
+    }
+}
+
+void introspect_configure_trs(bool enabled, float alpha, int warmup)
+{
+    g_trs_enabled = enabled;
+    g_trs_alpha = clamp_trs_alpha_value(alpha);
+    g_trs_warmup_target = clamp_trs_warmup_value(warmup);
+    g_trs_initialized = false;
+    g_trs_state.alpha = g_trs_alpha;
+    g_trs_state.sm_influence = 0.0f;
+    g_trs_state.sm_harmony = 0.0f;
+    g_trs_state.sm_consent = 0.0f;
+    g_trs_state.warmup = g_trs_warmup_target;
+    if (!g_trs_enabled && g_trs_sync_stream) {
+        fclose(g_trs_sync_stream);
+        g_trs_sync_stream = NULL;
     }
 }
 
@@ -151,7 +210,7 @@ void introspect_set_dream_preview(State *state, DreamCouplerPhase phase, bool ac
     }
 }
 
-void introspect_tick(State *state, const Metrics *metrics)
+void introspect_tick(State *state, Metrics *metrics)
 {
     if (!state || !metrics || !state->enabled) {
         return;
@@ -195,31 +254,98 @@ void introspect_tick(State *state, const Metrics *metrics)
         dream_label = "REST";
     }
 
-    double consent = sanitize_value(metrics->consent);
-    double influence = sanitize_value(metrics->influence);
+    double consent_raw = sanitize_value(metrics->consent);
+    double influence_raw = sanitize_value(metrics->influence);
     double bond_coh = sanitize_value(metrics->bond_coh);
     double err = sanitize_value(metrics->error_margin);
-    double harmony = clamp_unit_value(metrics->harmony);
+
+    double harmony_raw = 0.7 * influence_raw + 0.3 * consent_raw;
+    double diff = fabs(avg_amp - avg_tempo);
+    if (diff < 0.1 && influence_raw > 0.6) {
+        harmony_raw = 1.0;
+    }
+    harmony_raw = clamp_unit_value(harmony_raw);
+
+    double sm_consent = consent_raw;
+    double sm_influence = influence_raw;
+    double sm_harmony = harmony_raw;
+    double trs_delta = 0.0;
+
+    if (g_trs_enabled) {
+        if (!g_trs_initialized) {
+            trs_init(&g_trs_state, g_trs_alpha);
+            g_trs_state.warmup = g_trs_warmup_target;
+            g_trs_initialized = true;
+        }
+        float out_influence = (float)sm_influence;
+        float out_harmony = (float)sm_harmony;
+        float out_consent = (float)sm_consent;
+        float out_delta = 0.0f;
+        trs_step(&g_trs_state,
+                 (float)influence_raw,
+                 (float)harmony_raw,
+                 (float)consent_raw,
+                 &out_influence,
+                 &out_harmony,
+                 &out_consent,
+                 &out_delta);
+        sm_influence = clamp_unit_value(out_influence);
+        sm_harmony = clamp_unit_value(out_harmony);
+        sm_consent = clamp_unit_value(out_consent);
+        trs_delta = sanitize_value(out_delta);
+    }
+
+    sm_consent = clamp_unit_value(sm_consent);
+    sm_influence = clamp_unit_value(sm_influence);
+    sm_harmony = clamp_unit_value(sm_harmony);
+
+    metrics->influence = (float)sm_influence;
+    metrics->consent = (float)sm_consent;
+    metrics->harmony = (float)sm_harmony;
 
     if (fprintf(state->stream,
                 "{\"timestamp\":\"%s\",\"cycle\":%" PRIu64 ",\"amp\":%.4f,\"tempo\":%.4f,"
                 "\"consent\":%.4f,\"influence\":%.4f,\"bond_coh\":%.4f,\"error_margin\":%.4f,"
-                "\"harmony\":%.4f,\"dream\":\"%s\"}\n",
+                "\"harmony\":%.4f,\"dream\":\"%s\",\"inf_raw\":%.4f,\"inf_sm\":%.4f,"
+                "\"harm_raw\":%.4f,\"harm_sm\":%.4f,\"cons_raw\":%.4f,\"cons_sm\":%.4f,\"trs_delta\":%.4f}\n",
                 timestamp,
                 state->cycle_index,
                 sanitize_value(avg_amp),
                 sanitize_value(avg_tempo),
-                consent,
-                influence,
+                sm_consent,
+                sm_influence,
                 bond_coh,
                 err,
-                harmony,
-                dream_label) >= 0) {
+                sm_harmony,
+                dream_label,
+                influence_raw,
+                sm_influence,
+                harmony_raw,
+                sm_harmony,
+                consent_raw,
+                sm_consent,
+                trs_delta) >= 0) {
         fflush(state->stream);
     }
 
+    if (g_trs_enabled && TRS_SYNC_INTERVAL > 0 && (state->cycle_index % TRS_SYNC_INTERVAL) == 0ULL) {
+        if (!g_trs_sync_stream) {
+            ensure_logs_directory();
+            g_trs_sync_stream = fopen("logs/trs_sync_v1.log", "a");
+        }
+        if (g_trs_sync_stream) {
+            if (fprintf(g_trs_sync_stream,
+                        "{\"tick\":%" PRIu64 ",\"harm_sm\":%.4f,\"delta\":%.4f}\n",
+                        state->cycle_index,
+                        sm_harmony,
+                        trs_delta) >= 0) {
+                fflush(g_trs_sync_stream);
+            }
+        }
+    }
+
     state->harmony_line_open = false;
-    state->last_harmony = harmony;
+    state->last_harmony = sm_harmony;
 
     state->amp_sum = 0.0;
     state->tempo_sum = 0.0;
