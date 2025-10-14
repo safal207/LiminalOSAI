@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_SYMBIOSIS_H
-#define LIMINAL_INCLUDE_SYMBIOSIS_H
+#ifndef LIMINAL_SYMBIOSIS_H
+#define LIMINAL_SYMBIOSIS_H
 
 #include <stdbool.h>
 
@@ -32,4 +32,4 @@ double symbiosis_delay_scale(void);
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_SYMBIOSIS_H */
+#endif /* LIMINAL_SYMBIOSIS_H */

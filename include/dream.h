@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_DREAM_H
-#define LIMINAL_INCLUDE_DREAM_H
+#ifndef LIMINAL_DREAM_H
+#define LIMINAL_DREAM_H
 
 #include <stdbool.h>
 
@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-typedef struct {
+typedef struct DreamState {
     bool active;
     int cycle_count;
     float entry_threshold;
@@ -40,4 +40,4 @@ void dream_set_affinity_gate(float influence, bool allow_personal);
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_DREAM_H */
+#endif /* LIMINAL_DREAM_H */

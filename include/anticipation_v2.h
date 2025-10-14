@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_ANTICIPATION_V2_H
-#define LIMINAL_INCLUDE_ANTICIPATION_V2_H
+#ifndef LIMINAL_ANTICIPATION_V2_H
+#define LIMINAL_ANTICIPATION_V2_H
 
 #include <stddef.h>
 #include <stdbool.h>
@@ -37,4 +37,4 @@ void ant2_feedback_adjust(Ant2 *state,
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_ANTICIPATION_V2_H */
+#endif /* LIMINAL_ANTICIPATION_V2_H */

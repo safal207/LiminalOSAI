@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_EMPATHIC_H
-#define LIMINAL_INCLUDE_EMPATHIC_H
+#ifndef LIMINAL_EMPATHIC_H
+#define LIMINAL_EMPATHIC_H
 
 #include <stdbool.h>
 
@@ -39,4 +39,4 @@ float empathic_apply_coherence(float base_value);
 float empathic_coherence_value(float fallback);
 float empathic_target_level(void);
 
-#endif /* LIMINAL_INCLUDE_EMPATHIC_H */
+#endif /* LIMINAL_EMPATHIC_H */

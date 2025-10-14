@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_AWARENESS_H
-#define LIMINAL_INCLUDE_AWARENESS_H
+#ifndef LIMINAL_AWARENESS_H
+#define LIMINAL_AWARENESS_H
 
 #include <stdbool.h>
 
@@ -27,4 +27,4 @@ void awareness_set_coherence_scale(double scale);
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_AWARENESS_H */
+#endif /* LIMINAL_AWARENESS_H */

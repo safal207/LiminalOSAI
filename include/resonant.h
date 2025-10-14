@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_RESONANT_H
-#define LIMINAL_INCLUDE_RESONANT_H
+#ifndef LIMINAL_RESONANT_H
+#define LIMINAL_RESONANT_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -35,4 +35,4 @@ resonant_msg resonant_msg_make(int source_id, int target_id, uint32_t energy, co
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_RESONANT_H */
+#endif /* LIMINAL_RESONANT_H */

@@ -1,8 +1,8 @@
-#ifndef LIMINAL_INCLUDE_DREAM_BALANCE_H
-#define LIMINAL_INCLUDE_DREAM_BALANCE_H
+#ifndef LIMINAL_DREAM_BALANCE_H
+#define LIMINAL_DREAM_BALANCE_H
 
-#include "council.h"
-#include "dream.h"
+struct InnerCouncil;
+struct DreamState;
 
 #ifdef __cplusplus
 extern "C" {
@@ -15,8 +15,8 @@ typedef struct {
     float anticipation_sync;
 } DreamAlignmentBalance;
 
-DreamAlignmentBalance dream_alignment_balance(const InnerCouncil *council,
-                                              const DreamState *dream,
+DreamAlignmentBalance dream_alignment_balance(const struct InnerCouncil *council,
+                                              const struct DreamState *dream,
                                               float anticipation_field,
                                               float anticipation_level,
                                               float anticipation_trend);
@@ -25,4 +25,4 @@ DreamAlignmentBalance dream_alignment_balance(const InnerCouncil *council,
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_DREAM_BALANCE_H */
+#endif /* LIMINAL_DREAM_BALANCE_H */
