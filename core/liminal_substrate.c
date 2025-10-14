@@ -412,6 +412,7 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.mirror_tempo_max = MIRROR_GAIN_TEMPO_MAX_DEFAULT;
     cfg.strict_order = false;
     cfg.dry_run = false;
+    cfg.introspect_enabled = false;
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
