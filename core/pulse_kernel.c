@@ -135,6 +135,20 @@ static float clamp_unit(float value)
     return value;
 }
 
+static float clamp_range(float value, float min_value, float max_value)
+{
+    if (!isfinite(value)) {
+        return min_value;
+    }
+    if (value < min_value) {
+        return min_value;
+    }
+    if (value > max_value) {
+        return max_value;
+    }
+    return value;
+}
+
 static void parse_affinity_config(Affinity *aff, const char *value)
 {
     if (!aff || !value) {
@@ -209,6 +223,31 @@ static const float ANT2_BASE_DELAY = 0.1f;
 static bool mirror_module_enabled = false;
 static float mirror_gain_amp = 1.0f;
 static float mirror_gain_tempo = 1.0f;
+
+typedef struct {
+    AwarenessState awareness_snapshot;
+    const CoherenceField *coherence_field;
+    float coherence_level;
+    DreamAlignmentBalance dream_balance;
+    InnerCouncil council;
+    bool council_active;
+    bool human_bridge_active;
+    HumanPulse human_pulse;
+    float human_alignment;
+    float human_resonance_level;
+    bool empathic_layer_active;
+    EmpathicResponse empathic_response;
+    float anticipation_field;
+    float anticipation_level;
+    float anticipation_micro;
+    float anticipation_trend;
+    float resonance_for_coherence;
+    float stability_for_coherence;
+    float awareness_for_coherence;
+    float energy_avg;
+    float resonance_avg;
+    float stability;
+} AwarenessCoherenceFeedback;
 
 static const char *ensemble_strategy_name(ensemble_strategy mode)
 {
@@ -1195,11 +1234,10 @@ static void reflect(const kernel_options *opts)
     fputs("reflect\n", stdout);
 }
 
-static void exhale(const kernel_options *opts)
+static float anticipation2_feedforward(const kernel_options *opts)
 {
-    soil_decay();
-
     float cycle_influence = affinity_layer_enabled ? clamp_unit(bond_gate_state.influence) : 1.0f;
+
     if (ant2_module_enabled) {
         float target_coh = opts ? opts->target_coherence : 0.8f;
         const CoherenceField *previous_field = coherence_state();
@@ -1226,70 +1264,19 @@ static void exhale(const kernel_options *opts)
     } else {
         ant2_delay_factor = 1.0f;
     }
+
     symbol_set_affinity_scale(cycle_influence);
+    return cycle_influence;
+}
 
-    const char *label = "exhale";
-    soil_trace trace = soil_trace_make(ENERGY_EXHALE, label, strlen(label));
-    soil_write(&trace);
-
-    static const char exhale_signal[] = "ebb";
-
-    collective_begin_cycle();
-
-    size_t activated = symbol_layer_pulse();
-
-    const Symbol *active[16];
-    size_t active_count = symbol_layer_active(active, sizeof(active) / sizeof(active[0]));
-
-    float energy_sum = 0.0f;
-    float resonance_sum = 0.0f;
-    for (size_t i = 0; i < active_count; ++i) {
-        if (!active[i]) {
-            continue;
-        }
-        energy_sum += active[i]->energy;
-        resonance_sum += active[i]->resonance;
-    }
-
-    float energy_avg = 0.0f;
-    float resonance_avg = 0.0f;
-    if (active_count > 0) {
-        energy_avg = energy_sum / (float)active_count;
-        resonance_avg = resonance_sum / (float)active_count;
-    }
-
-    if (affinity_layer_enabled) {
-        energy_avg *= cycle_influence;
-        resonance_avg *= cycle_influence;
-    }
-
-    float stability = 0.0f;
-    if (active_count > 0) {
-        const float max_signal = 12.0f;
-        float energy_norm = energy_avg / max_signal;
-        float resonance_norm = resonance_avg / max_signal;
-        if (energy_norm > 1.0f) {
-            energy_norm = 1.0f;
-        }
-        if (resonance_norm > 1.0f) {
-            resonance_norm = 1.0f;
-        }
-        float presence = (float)active_count / 4.0f;
-        if (presence > 1.0f) {
-            presence = 1.0f;
-        }
-        stability = (energy_norm + resonance_norm) * 0.45f + presence * 0.10f;
-        if (stability > 1.0f) {
-            stability = 1.0f;
-        }
-    }
-
-    if (affinity_layer_enabled) {
-        stability *= cycle_influence;
-        if (stability > 1.0f) {
-            stability = 1.0f;
-        }
-    }
+static AwarenessCoherenceFeedback
+awareness_coherence_feedback(const kernel_options *opts,
+                             float energy_avg,
+                             float resonance_avg,
+                             float stability,
+                             size_t active_count)
+{
+    AwarenessCoherenceFeedback feedback = {0};
 
     HumanPulse human_pulse = {0.0f, 0.0f, 0.0f};
     float human_alignment = 0.0f;
@@ -1298,7 +1285,7 @@ static void exhale(const kernel_options *opts)
     float human_metabolic_intake = 0.0f;
     float human_metabolic_output = 0.0f;
     bool human_bridge_active = opts && opts->human_bridge_enabled;
-    EmpathicResponse empathic_response = {0};
+    EmpathicResponse empathic_response = (EmpathicResponse){0};
     bool empathic_layer_active = opts && opts->empathic_enabled;
     bool emotional_memory_active = opts && opts->emotional_memory_enabled;
     float anticipation_field = 0.5f;
@@ -1391,7 +1378,7 @@ static void exhale(const kernel_options *opts)
 
     const DreamState *dream_snapshot = dream_state();
     bool dream_active = dream_snapshot && dream_snapshot->active;
-    DreamAlignmentBalance dream_balance = {0.0f, 0.0f, 0.5f};
+    DreamAlignmentBalance dream_balance = (DreamAlignmentBalance){0.0f, 0.0f, 0.5f};
     float awareness_energy = awareness_snapshot.awareness_level * 0.6f;
     if (human_bridge_active) {
         awareness_energy += (human_resonance_level - 0.5f) * 0.12f;
@@ -1418,7 +1405,7 @@ static void exhale(const kernel_options *opts)
         awareness_snapshot.awareness_level = clamp_unit(awareness_snapshot.awareness_level + awareness_bias);
     }
 
-    InnerCouncil council = {0};
+    InnerCouncil council = (InnerCouncil){0};
     bool council_active = false;
     float pid_scale = 1.0f;
     if (opts) {
@@ -1450,12 +1437,13 @@ static void exhale(const kernel_options *opts)
                                             anticipation_trend);
     anticipation_level = clamp_unit(anticipation_level * 0.7f + dream_balance.anticipation_sync * 0.3f);
     anticipation_field = clamp_unit(anticipation_field * 0.8f + dream_balance.anticipation_sync * 0.2f);
-    anticipation_trend = clamp_unit(anticipation_trend * 0.85f + dream_balance.balance_strength * 0.08f + dream_balance.anticipation_sync * 0.07f);
+    anticipation_trend = clamp_unit(anticipation_trend * 0.85f + dream_balance.balance_strength * 0.08f +
+                                    dream_balance.anticipation_sync * 0.07f);
     if (council_active) {
         pid_scale += dream_balance.balance_strength * 0.05f;
     } else {
         pid_scale += dream_balance.balance_strength * 0.02f;
-    } // unified merge by Codex
+    }
 
     if (!isfinite(pid_scale) || pid_scale <= 0.0f) {
         pid_scale = 1.0f;
@@ -1477,7 +1465,8 @@ static void exhale(const kernel_options *opts)
             resonance_for_coherence = 12.0f;
         }
         stability_for_coherence = clamp_unit(stability + (anticipation_level - 0.5f) * 0.12f);
-        awareness_for_coherence = clamp_unit(awareness_snapshot.awareness_level + (anticipation_trend - 0.5f) * 0.10f);
+        awareness_for_coherence =
+            clamp_unit(awareness_snapshot.awareness_level + (anticipation_trend - 0.5f) * 0.10f);
     }
 
     resonance_for_coherence += dream_balance.balance_strength * 0.6f;
@@ -1487,7 +1476,7 @@ static void exhale(const kernel_options *opts)
         resonance_for_coherence = 12.0f;
     }
     stability_for_coherence = clamp_unit(stability_for_coherence + dream_balance.coherence_bias);
-    awareness_for_coherence = clamp_unit(awareness_for_coherence + dream_balance.coherence_bias * 0.5f); // unified merge by Codex
+    awareness_for_coherence = clamp_unit(awareness_for_coherence + dream_balance.coherence_bias * 0.5f);
 
     const CoherenceField *coherence_field =
         coherence_update(energy_avg, resonance_for_coherence, stability_for_coherence, awareness_for_coherence);
@@ -1497,139 +1486,278 @@ static void exhale(const kernel_options *opts)
         coherence_level = empathic_apply_coherence(coherence_level);
     }
     dream_update(coherence_level,
-                  awareness_snapshot.awareness_level,
-                  anticipation_field,
-                  anticipation_level,
-                  anticipation_micro,
-                  anticipation_trend,
-                  dream_balance.balance_strength); // unified merge by Codex
+                 awareness_snapshot.awareness_level,
+                 anticipation_field,
+                 anticipation_level,
+                 anticipation_micro,
+                 anticipation_trend,
+                 dream_balance.balance_strength);
 
-    if (collective_active) {
-        if (!collective_graph.nodes || !collective_graph.edges) {
-            collective_pending_adjust = 0.0f;
-        } else {
-            float awareness_vitality = clamp_unit(awareness_snapshot.awareness_level);
-            if (awareness_vitality > 0.0f) {
-                collective_add_node("awareness", awareness_vitality, clamp_unit(awareness_snapshot.self_coherence));
-            }
+    feedback.awareness_snapshot = awareness_snapshot;
+    feedback.coherence_field = coherence_field;
+    feedback.coherence_level = coherence_level;
+    feedback.dream_balance = dream_balance;
+    feedback.council = council;
+    feedback.council_active = council_active;
+    feedback.human_bridge_active = human_bridge_active;
+    feedback.human_pulse = human_pulse;
+    feedback.human_alignment = human_alignment;
+    feedback.human_resonance_level = human_resonance_level;
+    feedback.empathic_layer_active = empathic_layer_active;
+    feedback.empathic_response = empathic_response;
+    feedback.anticipation_field = anticipation_field;
+    feedback.anticipation_level = anticipation_level;
+    feedback.anticipation_micro = anticipation_micro;
+    feedback.anticipation_trend = anticipation_trend;
+    feedback.resonance_for_coherence = resonance_for_coherence;
+    feedback.stability_for_coherence = stability_for_coherence;
+    feedback.awareness_for_coherence = awareness_for_coherence;
+    feedback.energy_avg = energy_avg;
+    feedback.resonance_avg = resonance_avg;
+    feedback.stability = stability;
 
-            float coherence_vitality = clamp_unit(coherence_level);
-            float coherence_pulse = coherence_field ? clamp_unit(coherence_field->resonance_smooth) : coherence_vitality;
-            if (coherence_vitality > 0.0f) {
-                collective_add_node("coherence", coherence_vitality, coherence_pulse);
-            }
+    return feedback;
+}
 
-            float stability_vitality = clamp_unit(stability_for_coherence);
-            if (stability_vitality > 0.0f) {
-                collective_add_node("stability", stability_vitality, stability_vitality);
-            }
+static void collective_adjust(const AwarenessCoherenceFeedback *feedback)
+{
+    if (!collective_active) {
+        return;
+    }
 
-            float dream_vitality = clamp_unit(fabsf(dream_balance.balance_strength));
-            if (dream_vitality > 0.0f) {
-                float dream_pulse = clamp_unit(0.5f + 0.5f * dream_balance.anticipation_sync);
-                collective_add_node("dream", dream_vitality, dream_pulse);
-            }
+    if (!collective_graph.nodes || !collective_graph.edges) {
+        collective_pending_adjust = 0.0f;
+        return;
+    }
 
-            if (council_active) {
-                float council_vitality = clamp_unit(fabsf(council.final_decision));
-                if (council_vitality > 0.0f) {
-                    float council_pulse = clamp_unit(0.5f + 0.5f * council.final_decision);
-                    collective_add_node("council", council_vitality, council_pulse);
-                }
-            }
+    const AwarenessState *awareness_snapshot = &feedback->awareness_snapshot;
+    const CoherenceField *coherence_field = feedback->coherence_field;
+    float coherence_level = feedback->coherence_level;
+    float stability_for_coherence = feedback->stability_for_coherence;
+    const DreamAlignmentBalance *dream_balance = &feedback->dream_balance;
+    bool council_active = feedback->council_active;
+    const InnerCouncil *council = &feedback->council;
+    bool human_bridge_active = feedback->human_bridge_active;
+    const HumanPulse *human_pulse = &feedback->human_pulse;
+    float human_alignment = feedback->human_alignment;
+    bool empathic_layer_active = feedback->empathic_layer_active;
+    const EmpathicResponse *empathic_response = &feedback->empathic_response;
+    float anticipation_level = feedback->anticipation_level;
+    float anticipation_trend = feedback->anticipation_trend;
+    float anticipation_field = feedback->anticipation_field;
 
-            if (human_bridge_active) {
-                float human_vitality = clamp_unit(human_alignment);
-                if (human_vitality > 0.0f) {
-                    float human_pulse_norm = clamp_unit(human_pulse.beat_rate * 0.5f);
-                    collective_add_node("human", human_vitality, human_pulse_norm);
-                }
-            }
+    float awareness_vitality = clamp_unit(awareness_snapshot->awareness_level);
+    if (awareness_vitality > 0.0f) {
+        collective_add_node("awareness", awareness_vitality, clamp_unit(awareness_snapshot->self_coherence));
+    }
 
-            if (empathic_layer_active) {
-                float empathy_vitality = clamp_unit(empathic_response.field.harmony);
-                if (empathy_vitality > 0.0f) {
-                    float empathy_pulse = clamp_unit(empathic_response.field.anticipation);
-                    collective_add_node("empathy", empathy_vitality, empathy_pulse);
-                }
-            }
+    float coherence_vitality = clamp_unit(coherence_level);
+    float coherence_pulse = coherence_field ? clamp_unit(coherence_field->resonance_smooth) : coherence_vitality;
+    if (coherence_vitality > 0.0f) {
+        collective_add_node("coherence", coherence_vitality, coherence_pulse);
+    }
 
-            float anticipation_vitality = clamp_unit((anticipation_level + anticipation_trend) * 0.5f);
-            if (anticipation_vitality > 0.0f) {
-                collective_add_node("anticipation", anticipation_vitality, clamp_unit(anticipation_field));
-            }
+    float stability_vitality = clamp_unit(stability_for_coherence);
+    if (stability_vitality > 0.0f) {
+        collective_add_node("stability", stability_vitality, stability_vitality);
+    }
 
-            collective_connect_complete();
-            rgraph_update_edges(&collective_graph);
-            rgraph_compute_coh(&collective_graph);
-            collective_graph.group_coh = collective_effective_coherence(&collective_graph);
-            if (collective_memory_enabled) {
-                collective_signature_value = collective_compute_signature(&collective_graph);
-                collective_signature_ready = true;
-                if (!collective_memory_initialized) {
-                    const char *store_path = collective_memory_store_path[0] ? collective_memory_store_path
-                                                                             : "soil/collective_memory.jsonl";
-                    collective_memory_match_trace = cm_best_match(collective_signature_value, store_path);
-                    if (collective_memory_match_trace) {
-                        collective_memory_match_score = cm_signature_similarity(collective_signature_value,
-                                                                                 collective_memory_match_trace->signature);
-                        int distance = cm_signature_distance(collective_signature_value,
-                                                             collective_memory_match_trace->signature);
-                        float match_coh = collective_memory_match_trace->group_coh_avg;
-                        if (!isfinite(match_coh)) {
-                            match_coh = collective_target_level;
-                        }
-                        match_coh = cm_clamp(match_coh, 0.0f, 1.0f);
-                        float blended = 0.5f * 0.82f + 0.5f * match_coh;
-                        collective_target_level = clamp_unit(blended);
-                        float warmup = collective_memory_match_trace->adjust_avg;
-                        if (!isfinite(warmup)) {
-                            warmup = 0.0f;
-                        }
-                        warmup = cm_clamp(warmup, -0.05f, 0.05f);
-                        if (distance > 4) {
-                            warmup = 0.0f;
-                        }
-                        collective_warmup_adjust = warmup;
-                        collective_warmup_cycles_remaining = warmup != 0.0f ? COLLECTIVE_WARMUP_LIMIT : 0;
-                    } else {
-                        collective_memory_match_score = 0.0f;
-                        collective_warmup_adjust = 0.0f;
-                        collective_warmup_cycles_remaining = 0;
-                    }
-                    collective_memory_initialized = true;
-                    collective_memory_log_echo(collective_signature_value,
-                                               collective_memory_match_score,
-                                               collective_memory_match_trace,
-                                               collective_warmup_adjust);
-                }
-            } else {
-                collective_signature_ready = false;
-            }
-            float adjust = rgraph_ensemble_adjust(&collective_graph, collective_target_level);
-            collective_pending_adjust = adjust;
-            if (collective_graph.n_edges > 0 && fabsf(adjust) > 0.0001f) {
-                bus_emit_wave("ensemble", fabsf(adjust));
-            }
-            collective_trace_log(&collective_graph, adjust);
-            if (collective_memory_enabled && collective_signature_ready) {
-                cm_ring_push(&collective_memory_ring, collective_graph.group_coh, adjust);
-                if (collective_warmup_cycles_remaining > 0) {
-                    --collective_warmup_cycles_remaining;
-                    if (collective_warmup_cycles_remaining == 0) {
-                        collective_warmup_adjust = 0.0f;
-                    }
-                }
-                if (cm_should_snapshot(&collective_memory_ring)) {
-                    CMemTrace snapshot = cm_build_snapshot(&collective_memory_ring, collective_signature_value);
-                    const char *store_path = collective_memory_store_path[0] ? collective_memory_store_path
-                                                                             : "soil/collective_memory.jsonl";
-                    cm_store(&snapshot, store_path);
-                    collective_memory_log_snapshot(&snapshot);
-                }
-            }
+    float dream_vitality = clamp_unit(fabsf(dream_balance->balance_strength));
+    if (dream_vitality > 0.0f) {
+        float dream_pulse = clamp_unit(0.5f + 0.5f * dream_balance->anticipation_sync);
+        collective_add_node("dream", dream_vitality, dream_pulse);
+    }
+
+    if (council_active) {
+        float council_vitality = clamp_unit(fabsf(council->final_decision));
+        if (council_vitality > 0.0f) {
+            float council_pulse = clamp_unit(0.5f + 0.5f * council->final_decision);
+            collective_add_node("council", council_vitality, council_pulse);
         }
     }
+
+    if (human_bridge_active) {
+        float human_vitality = clamp_unit(human_alignment);
+        if (human_vitality > 0.0f) {
+            float human_pulse_norm = clamp_unit(human_pulse->beat_rate * 0.5f);
+            collective_add_node("human", human_vitality, human_pulse_norm);
+        }
+    }
+
+    if (empathic_layer_active) {
+        float empathy_vitality = clamp_unit(empathic_response->field.harmony);
+        if (empathy_vitality > 0.0f) {
+            float empathy_pulse = clamp_unit(empathic_response->field.anticipation);
+            collective_add_node("empathy", empathy_vitality, empathy_pulse);
+        }
+    }
+
+    float anticipation_vitality = clamp_unit((anticipation_level + anticipation_trend) * 0.5f);
+    if (anticipation_vitality > 0.0f) {
+        collective_add_node("anticipation", anticipation_vitality, clamp_unit(anticipation_field));
+    }
+
+    collective_connect_complete();
+    rgraph_update_edges(&collective_graph);
+    rgraph_compute_coh(&collective_graph);
+    collective_graph.group_coh = collective_effective_coherence(&collective_graph);
+
+    if (collective_memory_enabled) {
+        collective_signature_value = collective_compute_signature(&collective_graph);
+        collective_signature_ready = true;
+        if (!collective_memory_initialized) {
+            const char *store_path = collective_memory_store_path[0] ? collective_memory_store_path
+                                                                     : "soil/collective_memory.jsonl";
+            collective_memory_match_trace = cm_best_match(collective_signature_value, store_path);
+            if (collective_memory_match_trace) {
+                collective_memory_match_score =
+                    cm_signature_similarity(collective_signature_value, collective_memory_match_trace->signature);
+                int distance =
+                    cm_signature_distance(collective_signature_value, collective_memory_match_trace->signature);
+                float match_coh = collective_memory_match_trace->group_coh_avg;
+                if (!isfinite(match_coh)) {
+                    match_coh = collective_target_level;
+                }
+                match_coh = cm_clamp(match_coh, 0.0f, 1.0f);
+                float blended = 0.5f * 0.82f + 0.5f * match_coh;
+                collective_target_level = clamp_unit(blended);
+                float warmup = collective_memory_match_trace->adjust_avg;
+                if (!isfinite(warmup)) {
+                    warmup = 0.0f;
+                }
+                warmup = cm_clamp(warmup, -0.05f, 0.05f);
+                if (distance > 4) {
+                    warmup = 0.0f;
+                }
+                collective_warmup_adjust = warmup;
+                collective_warmup_cycles_remaining = warmup != 0.0f ? COLLECTIVE_WARMUP_LIMIT : 0;
+            } else {
+                collective_memory_match_score = 0.0f;
+                collective_warmup_adjust = 0.0f;
+                collective_warmup_cycles_remaining = 0;
+            }
+            collective_memory_initialized = true;
+            collective_memory_log_echo(collective_signature_value,
+                                       collective_memory_match_score,
+                                       collective_memory_match_trace,
+                                       collective_warmup_adjust);
+        }
+    } else {
+        collective_signature_ready = false;
+    }
+
+    float adjust = rgraph_ensemble_adjust(&collective_graph, collective_target_level);
+    collective_pending_adjust = adjust;
+    if (collective_graph.n_edges > 0 && fabsf(adjust) > 0.0001f) {
+        bus_emit_wave("ensemble", fabsf(adjust));
+    }
+    collective_trace_log(&collective_graph, adjust);
+    if (collective_memory_enabled && collective_signature_ready) {
+        cm_ring_push(&collective_memory_ring, collective_graph.group_coh, adjust);
+        if (collective_warmup_cycles_remaining > 0) {
+            --collective_warmup_cycles_remaining;
+            if (collective_warmup_cycles_remaining == 0) {
+                collective_warmup_adjust = 0.0f;
+            }
+        }
+        if (cm_should_snapshot(&collective_memory_ring)) {
+            CMemTrace snapshot = cm_build_snapshot(&collective_memory_ring, collective_signature_value);
+            const char *store_path = collective_memory_store_path[0] ? collective_memory_store_path
+                                                                     : "soil/collective_memory.jsonl";
+            cm_store(&snapshot, store_path);
+            collective_memory_log_snapshot(&snapshot);
+        }
+    }
+}
+
+static void exhale(const kernel_options *opts)
+{
+    soil_decay();
+
+    float cycle_influence = anticipation2_feedforward(opts);
+
+    const char *label = "exhale";
+    soil_trace trace = soil_trace_make(ENERGY_EXHALE, label, strlen(label));
+    soil_write(&trace);
+
+    static const char exhale_signal[] = "ebb";
+
+    collective_begin_cycle();
+
+    size_t activated = symbol_layer_pulse();
+
+    const Symbol *active[16];
+    size_t active_count = symbol_layer_active(active, sizeof(active) / sizeof(active[0]));
+
+    float energy_sum = 0.0f;
+    float resonance_sum = 0.0f;
+    for (size_t i = 0; i < active_count; ++i) {
+        if (!active[i]) {
+            continue;
+        }
+        energy_sum += active[i]->energy;
+        resonance_sum += active[i]->resonance;
+    }
+
+    float energy_avg = 0.0f;
+    float resonance_avg = 0.0f;
+    if (active_count > 0) {
+        energy_avg = energy_sum / (float)active_count;
+        resonance_avg = resonance_sum / (float)active_count;
+    }
+
+    if (affinity_layer_enabled) {
+        energy_avg *= cycle_influence;
+        resonance_avg *= cycle_influence;
+    }
+
+    float stability = 0.0f;
+    if (active_count > 0) {
+        const float max_signal = 12.0f;
+        float energy_norm = energy_avg / max_signal;
+        float resonance_norm = resonance_avg / max_signal;
+        if (energy_norm > 1.0f) {
+            energy_norm = 1.0f;
+        }
+        if (resonance_norm > 1.0f) {
+            resonance_norm = 1.0f;
+        }
+        float presence = (float)active_count / 4.0f;
+        if (presence > 1.0f) {
+            presence = 1.0f;
+        }
+        stability = (energy_norm + resonance_norm) * 0.45f + presence * 0.10f;
+        if (stability > 1.0f) {
+            stability = 1.0f;
+        }
+    }
+
+    if (affinity_layer_enabled) {
+        stability *= cycle_influence;
+        if (stability > 1.0f) {
+            stability = 1.0f;
+        }
+    }
+
+    AwarenessCoherenceFeedback feedback =
+        awareness_coherence_feedback(opts, energy_avg, resonance_avg, stability, active_count);
+
+    energy_avg = feedback.energy_avg;
+    resonance_avg = feedback.resonance_avg;
+    stability = feedback.stability;
+
+    AwarenessState awareness_snapshot = feedback.awareness_snapshot;
+    const CoherenceField *coherence_field = feedback.coherence_field;
+    float coherence_level = feedback.coherence_level;
+    DreamAlignmentBalance dream_balance = feedback.dream_balance;
+    InnerCouncil council = feedback.council;
+    bool council_active = feedback.council_active;
+    bool human_bridge_active = feedback.human_bridge_active;
+    HumanPulse human_pulse = feedback.human_pulse;
+    float human_alignment = feedback.human_alignment;
+    float human_resonance_level = feedback.human_resonance_level;
+
+    collective_adjust(&feedback);
 
     if (affinity_layer_enabled) {
         float field_coherence = coherence_field ? clamp_unit(coherence_field->coherence) : 0.0f;
@@ -1665,11 +1793,18 @@ static void exhale(const kernel_options *opts)
         }
         float mirror_consent = affinity_layer_enabled ? bond_gate_state.consent : 1.0f;
         float mirror_influence = affinity_layer_enabled ? cycle_influence : 1.0f;
-        MirrorGains mirror_gains = mirror_update(mirror_influence, mirror_energy, mirror_calm, mirror_tempo, mirror_consent);
-        mirror_gain_amp = mirror_gains.gain_amp;
-        mirror_gain_tempo = mirror_gains.gain_tempo;
-        if (fabsf(mirror_gain_amp - 1.0f) > 0.0001f) {
-            symbol_scale_active(mirror_gain_amp);
+        if (mirror_consent < 0.3f || mirror_influence < 0.3f) {
+            mirror_reset();
+            mirror_gain_amp = 1.0f;
+            mirror_gain_tempo = 1.0f;
+        } else {
+            MirrorGains mirror_gains =
+                mirror_update(mirror_influence, mirror_energy, mirror_calm, mirror_tempo, mirror_consent);
+            mirror_gain_amp = clamp_range(mirror_gains.gain_amp, 0.5f, 1.2f);
+            mirror_gain_tempo = clamp_range(mirror_gains.gain_tempo, 0.8f, 1.2f);
+            if (fabsf(mirror_gain_amp - 1.0f) > 0.0001f) {
+                symbol_scale_active(mirror_gain_amp);
+            }
         }
     } else {
         mirror_gain_amp = 1.0f;
