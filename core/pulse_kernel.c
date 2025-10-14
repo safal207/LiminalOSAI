@@ -113,7 +113,108 @@ typedef struct {
     bool mirror_enabled;
     bool mirror_trace;
     float mirror_softness;
+    float mirror_amp_min;
+    float mirror_amp_max;
+    float mirror_tempo_min;
+    float mirror_tempo_max;
+    bool strict_order;
+    bool dry_run;
 } kernel_options;
+
+static const float MIRROR_GAIN_AMP_MIN_DEFAULT = 0.5f;
+static const float MIRROR_GAIN_AMP_MAX_DEFAULT = 1.2f;
+static const float MIRROR_GAIN_TEMPO_MIN_DEFAULT = 0.8f;
+static const float MIRROR_GAIN_TEMPO_MAX_DEFAULT = 1.2f;
+
+static float sanitize_positive(float value, float fallback)
+{
+    if (!isfinite(value) || value <= 0.0f) {
+        return fallback;
+    }
+    return value;
+}
+
+static void normalize_bounds(float *min_value, float *max_value, float default_min, float default_max)
+{
+    if (!min_value || !max_value) {
+        return;
+    }
+    float min_sanitized = sanitize_positive(*min_value, default_min);
+    float max_sanitized = sanitize_positive(*max_value, default_max);
+    if (min_sanitized > max_sanitized) {
+        float tmp = min_sanitized;
+        min_sanitized = max_sanitized;
+        max_sanitized = tmp;
+    }
+    *min_value = min_sanitized;
+    *max_value = max_sanitized;
+}
+
+static size_t build_exhale_sequence(const kernel_options *opts, const char **steps, size_t capacity)
+{
+    if (!steps || capacity == 0) {
+        return 0;
+    }
+
+    size_t count = 0;
+    bool strict = opts && opts->strict_order;
+    bool include_ant2 = strict || (opts && opts->anticipation2_enabled);
+    bool include_collective = strict || (opts && (opts->collective_enabled || opts->collective_trace));
+    bool include_affinity = strict || (opts && opts->affinity_enabled);
+    bool include_mirror = strict || (opts && opts->mirror_enabled);
+
+    if (include_ant2 && count < capacity) {
+        steps[count++] = "ant2";
+    }
+    if (count < capacity) {
+        steps[count++] = "awareness";
+    }
+    if (include_collective && count < capacity) {
+        steps[count++] = "collective";
+    }
+    if (include_affinity && count < capacity) {
+        steps[count++] = "affinity";
+    }
+    if (include_mirror && count < capacity) {
+        steps[count++] = "mirror";
+    }
+
+    return count;
+}
+
+static void format_exhale_sequence(const kernel_options *opts, char *buffer, size_t size)
+{
+    if (!buffer || size == 0) {
+        return;
+    }
+
+    buffer[0] = '\0';
+    const char *steps[8];
+    size_t count = build_exhale_sequence(opts, steps, sizeof(steps) / sizeof(steps[0]));
+    if (count == 0) {
+        return;
+    }
+
+    const char *arrow = "\xE2\x86\x92";
+    size_t written = 0;
+    for (size_t i = 0; i < count; ++i) {
+        int result = 0;
+        if (i == 0) {
+            result = snprintf(buffer + written, size - written, "%s", steps[i]);
+        } else {
+            result = snprintf(buffer + written, size - written, "%s%s", arrow, steps[i]);
+        }
+        if (result < 0) {
+            buffer[written] = '\0';
+            return;
+        }
+        written += (size_t)result;
+        if (written >= size) {
+            buffer[size - 1] = '\0';
+            return;
+        }
+    }
+}
 
 static size_t bounded_string_length(const uint8_t *data, size_t max_len)
 {
@@ -648,7 +749,13 @@ static kernel_options parse_options(int argc, char **argv)
         .allow_align_consent = 0.2f,
         .mirror_enabled = false,
         .mirror_trace = false,
-        .mirror_softness = 0.5f
+        .mirror_softness = 0.5f,
+        .mirror_amp_min = MIRROR_GAIN_AMP_MIN_DEFAULT,
+        .mirror_amp_max = MIRROR_GAIN_AMP_MAX_DEFAULT,
+        .mirror_tempo_min = MIRROR_GAIN_TEMPO_MIN_DEFAULT,
+        .mirror_tempo_max = MIRROR_GAIN_TEMPO_MAX_DEFAULT,
+        .strict_order = false,
+        .dry_run = false
     };
 
     for (size_t i = 0; i < weave_module_count(); ++i) {
@@ -932,6 +1039,46 @@ static kernel_options parse_options(int argc, char **argv)
                     opts.mirror_softness = parsed;
                 }
             }
+        } else if (strncmp(arg, "--amp-min=", 10) == 0) {
+            const char *value = arg + 10;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.mirror_amp_min = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--amp-max=", 10) == 0) {
+            const char *value = arg + 10;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.mirror_amp_max = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--tempo-min=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.mirror_tempo_min = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--tempo-max=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.mirror_tempo_max = parsed;
+                }
+            }
+        } else if (strcmp(arg, "--strict-order") == 0) {
+            opts.strict_order = true;
+        } else if (strcmp(arg, "--dry-run") == 0) {
+            opts.dry_run = true;
         } else if (strncmp(arg, "--emotional-source=", 20) == 0) {
             const char *value = arg + 20;
             if (strcmp(value, "text") == 0) {
@@ -1049,6 +1196,12 @@ static kernel_options parse_options(int argc, char **argv)
             }
         }
     }
+
+    normalize_bounds(&opts.mirror_amp_min, &opts.mirror_amp_max, MIRROR_GAIN_AMP_MIN_DEFAULT, MIRROR_GAIN_AMP_MAX_DEFAULT);
+    normalize_bounds(&opts.mirror_tempo_min,
+                     &opts.mirror_tempo_max,
+                     MIRROR_GAIN_TEMPO_MIN_DEFAULT,
+                     MIRROR_GAIN_TEMPO_MAX_DEFAULT);
 
     if (!opts.limit) {
         const char *env = getenv("LIMINAL_PULSE_LIMIT");
@@ -1782,7 +1935,13 @@ static void exhale(const kernel_options *opts)
         cycle_influence = 1.0f;
     }
 
-    if (mirror_module_enabled) {
+    float amp_min = opts ? opts->mirror_amp_min : MIRROR_GAIN_AMP_MIN_DEFAULT;
+    float amp_max = opts ? opts->mirror_amp_max : MIRROR_GAIN_AMP_MAX_DEFAULT;
+    float tempo_min = opts ? opts->mirror_tempo_min : MIRROR_GAIN_TEMPO_MIN_DEFAULT;
+    float tempo_max = opts ? opts->mirror_tempo_max : MIRROR_GAIN_TEMPO_MAX_DEFAULT;
+
+    bool mirror_stage_required = mirror_module_enabled || (opts && opts->strict_order);
+    if (mirror_stage_required) {
         float mirror_energy = active_count > 0 ? clamp_unit(energy_avg / 12.0f) : 0.0f;
         float mirror_calm = clamp_unit(stability);
         float mirror_tempo = 0.0f;
@@ -1795,20 +1954,24 @@ static void exhale(const kernel_options *opts)
         float mirror_influence = affinity_layer_enabled ? cycle_influence : 1.0f;
         if (mirror_consent < 0.3f || mirror_influence < 0.3f) {
             mirror_reset();
-            mirror_gain_amp = 1.0f;
-            mirror_gain_tempo = 1.0f;
-        } else {
+            mirror_gain_amp = clamp_range(1.0f, amp_min, amp_max);
+            mirror_gain_tempo = clamp_range(1.0f, tempo_min, tempo_max);
+        } else if (mirror_module_enabled) {
             MirrorGains mirror_gains =
                 mirror_update(mirror_influence, mirror_energy, mirror_calm, mirror_tempo, mirror_consent);
-            mirror_gain_amp = clamp_range(mirror_gains.gain_amp, 0.5f, 1.2f);
-            mirror_gain_tempo = clamp_range(mirror_gains.gain_tempo, 0.8f, 1.2f);
+            mirror_gain_amp = clamp_range(mirror_gains.gain_amp, amp_min, amp_max);
+            mirror_gain_tempo = clamp_range(mirror_gains.gain_tempo, tempo_min, tempo_max);
             if (fabsf(mirror_gain_amp - 1.0f) > 0.0001f) {
                 symbol_scale_active(mirror_gain_amp);
             }
+        } else {
+            mirror_reset();
+            mirror_gain_amp = clamp_range(1.0f, amp_min, amp_max);
+            mirror_gain_tempo = clamp_range(1.0f, tempo_min, tempo_max);
         }
     } else {
-        mirror_gain_amp = 1.0f;
-        mirror_gain_tempo = 1.0f;
+        mirror_gain_amp = clamp_range(1.0f, amp_min, amp_max);
+        mirror_gain_tempo = clamp_range(1.0f, tempo_min, tempo_max);
     }
 
     if (collective_active) {
@@ -1945,6 +2108,20 @@ static void print_recent_traces(void)
 int main(int argc, char **argv)
 {
     kernel_options opts = parse_options(argc, argv);
+
+    if (opts.dry_run) {
+        char sequence[128];
+        format_exhale_sequence(&opts, sequence, sizeof(sequence));
+        puts("liminal_core dry run");
+        printf("strict-order: %s\n", opts.strict_order ? "enabled" : "disabled");
+        printf("exhale sequence: %s\n", sequence[0] ? sequence : "(none)");
+        printf("mirror clamps: amp=[%.2f, %.2f] tempo=[%.2f, %.2f]\n",
+               opts.mirror_amp_min,
+               opts.mirror_amp_max,
+               opts.mirror_tempo_min,
+               opts.mirror_tempo_max);
+        return 0;
+    }
 
     collective_active = opts.collective_enabled || opts.collective_trace;
     collective_trace_enabled = opts.collective_trace;

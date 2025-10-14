@@ -84,6 +84,12 @@ typedef struct {
     bool bond_trace;
     Affinity affinity_config;
     float allow_align_consent;
+    float mirror_amp_min;
+    float mirror_amp_max;
+    float mirror_tempo_min;
+    float mirror_tempo_max;
+    bool strict_order;
+    bool dry_run;
 } substrate_config;
 
 static bool substrate_affinity_enabled = false;
@@ -93,6 +99,100 @@ static float substrate_explicit_consent = 0.2f;
 static bool substrate_ant2_enabled = false;
 static Ant2 substrate_ant2_state;
 static const float SUBSTRATE_BASE_RATE = 0.72f;
+static const float MIRROR_GAIN_AMP_MIN_DEFAULT = 0.5f;
+static const float MIRROR_GAIN_AMP_MAX_DEFAULT = 1.2f;
+static const float MIRROR_GAIN_TEMPO_MIN_DEFAULT = 0.8f;
+static const float MIRROR_GAIN_TEMPO_MAX_DEFAULT = 1.2f;
+
+static float sanitize_positive(float value, float fallback)
+{
+    if (!isfinite(value) || value <= 0.0f) {
+        return fallback;
+    }
+    return value;
+}
+
+static void normalize_bounds(float *min_value, float *max_value, float default_min, float default_max)
+{
+    if (!min_value || !max_value) {
+        return;
+    }
+    float min_sanitized = sanitize_positive(*min_value, default_min);
+    float max_sanitized = sanitize_positive(*max_value, default_max);
+    if (min_sanitized > max_sanitized) {
+        float tmp = min_sanitized;
+        min_sanitized = max_sanitized;
+        max_sanitized = tmp;
+    }
+    *min_value = min_sanitized;
+    *max_value = max_sanitized;
+}
+
+static size_t build_exhale_sequence(const substrate_config *cfg, const char **steps, size_t capacity)
+{
+    if (!cfg || !steps || capacity == 0) {
+        return 0;
+    }
+
+    bool strict = cfg->strict_order;
+    size_t count = 0;
+    bool include_ant2 = strict || cfg->anticipation2_enabled;
+    bool include_collective = strict;
+    bool include_affinity = strict || cfg->affinity_enabled;
+    bool include_mirror = strict;
+
+    if (include_ant2 && count < capacity) {
+        steps[count++] = "ant2";
+    }
+    if (count < capacity) {
+        steps[count++] = "awareness";
+    }
+    if (include_collective && count < capacity) {
+        steps[count++] = "collective";
+    }
+    if (include_affinity && count < capacity) {
+        steps[count++] = "affinity";
+    }
+    if (include_mirror && count < capacity) {
+        steps[count++] = "mirror";
+    }
+
+    return count;
+}
+
+static void format_exhale_sequence(const substrate_config *cfg, char *buffer, size_t size)
+{
+    if (!buffer || size == 0) {
+        return;
+    }
+
+    buffer[0] = '\0';
+    const char *steps[8];
+    size_t count = build_exhale_sequence(cfg, steps, sizeof(steps) / sizeof(steps[0]));
+    if (count == 0) {
+        return;
+    }
+
+    const char *arrow = "\xE2\x86\x92";
+    size_t written = 0;
+    for (size_t i = 0; i < count; ++i) {
+        int result = 0;
+        if (i == 0) {
+            result = snprintf(buffer + written, size - written, "%s", steps[i]);
+        } else {
+            result = snprintf(buffer + written, size - written, "%s%s", arrow, steps[i]);
+        }
+        if (result < 0) {
+            buffer[written] = '\0';
+            return;
+        }
+        written += (size_t)result;
+        if (written >= size) {
+            buffer[size - 1] = '\0';
+            return;
+        }
+    }
+}
 
 static void rebirth(liminal_state *state)
 {
@@ -287,8 +387,8 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.lip_interval_ms = 1000U;
     cfg.lip_host[0] = '\0';
     cfg.empathic_enabled = false;
-   cfg.empathic_trace = false;
-   cfg.anticipation_trace = false;
+    cfg.empathic_trace = false;
+    cfg.anticipation_trace = false;
     cfg.anticipation2_enabled = false;
     cfg.ant2_trace = false;
     cfg.ant2_gain = 0.6f;
@@ -303,6 +403,12 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.bond_trace = false;
     affinity_default(&cfg.affinity_config);
     cfg.allow_align_consent = 0.2f;
+    cfg.mirror_amp_min = MIRROR_GAIN_AMP_MIN_DEFAULT;
+    cfg.mirror_amp_max = MIRROR_GAIN_AMP_MAX_DEFAULT;
+    cfg.mirror_tempo_min = MIRROR_GAIN_TEMPO_MIN_DEFAULT;
+    cfg.mirror_tempo_max = MIRROR_GAIN_TEMPO_MAX_DEFAULT;
+    cfg.strict_order = false;
+    cfg.dry_run = false;
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -395,6 +501,46 @@ static substrate_config parse_args(int argc, char **argv)
                     cfg.allow_align_consent = parsed;
                 }
             }
+        } else if (strncmp(arg, "--amp-min=", 10) == 0) {
+            const char *value = arg + 10;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.mirror_amp_min = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--amp-max=", 10) == 0) {
+            const char *value = arg + 10;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.mirror_amp_max = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--tempo-min=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.mirror_tempo_min = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--tempo-max=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.mirror_tempo_max = parsed;
+                }
+            }
+        } else if (strcmp(arg, "--strict-order") == 0) {
+            cfg.strict_order = true;
+        } else if (strcmp(arg, "--dry-run") == 0) {
+            cfg.dry_run = true;
         } else if (strcmp(arg, "--bond-trace") == 0) {
             cfg.bond_trace = true;
         } else if (strncmp(arg, "--emotional-source=", 20) == 0) {
@@ -454,6 +600,12 @@ static substrate_config parse_args(int argc, char **argv)
             }
         }
     }
+
+    normalize_bounds(&cfg.mirror_amp_min, &cfg.mirror_amp_max, MIRROR_GAIN_AMP_MIN_DEFAULT, MIRROR_GAIN_AMP_MAX_DEFAULT);
+    normalize_bounds(&cfg.mirror_tempo_min,
+                     &cfg.mirror_tempo_max,
+                     MIRROR_GAIN_TEMPO_MIN_DEFAULT,
+                     MIRROR_GAIN_TEMPO_MAX_DEFAULT);
 
     return cfg;
 }
@@ -933,6 +1085,19 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
 int main(int argc, char **argv)
 {
     substrate_config cfg = parse_args(argc, argv);
+    if (cfg.dry_run) {
+        char sequence[128];
+        format_exhale_sequence(&cfg, sequence, sizeof(sequence));
+        puts("liminal_core dry run");
+        printf("strict-order: %s\n", cfg.strict_order ? "enabled" : "disabled");
+        printf("exhale sequence: %s\n", sequence[0] ? sequence : "(none)");
+        printf("mirror clamps: amp=[%.2f, %.2f] tempo=[%.2f, %.2f]\n",
+               cfg.mirror_amp_min,
+               cfg.mirror_amp_max,
+               cfg.mirror_tempo_min,
+               cfg.mirror_tempo_max);
+        return 0;
+    }
     if (!cfg.run_substrate) {
         fprintf(stderr, "Liminal Substrate: use --substrate to start the universal core.\n");
         return 1;
