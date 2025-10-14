@@ -2,10 +2,16 @@
 
 #include <math.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
-static resonant_msg bus_queue[RESONANT_BUS_CAPACITY];
+typedef struct {
+    resonant_msg msg;
+    uint32_t read_mask;
+} bus_entry;
+
+static bus_entry bus_queue[RESONANT_BUS_CAPACITY];
 static size_t bus_count = 0;
 
 static int sensor_registry[RESONANT_BUS_CAPACITY];
@@ -24,17 +30,6 @@ static bool sensor_registered(int sensor_id)
     }
 
     return false;
-}
-
-static void queue_duplicate(const resonant_msg *msg, int sensor_id)
-{
-    if (!msg || sensor_id == RESONANT_BROADCAST_ID) {
-        return;
-    }
-
-    resonant_msg duplicate = *msg;
-    duplicate.target_id = sensor_id;
-    bus_emit(&duplicate);
 }
 
 void bus_register_sensor(int sensor_id)
@@ -68,6 +63,31 @@ static void shift_left_from(size_t index)
     }
 }
 
+static uint32_t sensor_bit(int sensor_id)
+{
+    if (sensor_id == RESONANT_BROADCAST_ID || sensor_id == 0) {
+        return 0U;
+    }
+
+    for (size_t i = 0; i < sensor_count && i < 32; ++i) {
+        if (sensor_registry[i] == sensor_id) {
+            return 1U << i;
+        }
+    }
+
+    return 0U;
+}
+
+static uint32_t sensor_mask(void)
+{
+    uint32_t mask = 0U;
+    size_t limit = sensor_count < 32 ? sensor_count : 32;
+    for (size_t i = 0; i < limit; ++i) {
+        mask |= (1U << i);
+    }
+    return mask;
+}
+
 void bus_init(void)
 {
     memset(bus_queue, 0, sizeof(bus_queue));
@@ -84,12 +104,13 @@ void bus_emit(const resonant_msg *msg)
 
     if (bus_count == RESONANT_BUS_CAPACITY) {
         size_t last = bus_count - 1;
-        if (bus_queue[last].energy >= msg->energy) {
+        if (bus_queue[last].msg.energy >= msg->energy) {
             return;
         }
-        bus_queue[last] = *msg;
-        while (last > 0 && bus_queue[last - 1].energy < bus_queue[last].energy) {
-            resonant_msg tmp = bus_queue[last - 1];
+        bus_queue[last].msg = *msg;
+        bus_queue[last].read_mask = 0U;
+        while (last > 0 && bus_queue[last - 1].msg.energy < bus_queue[last].msg.energy) {
+            bus_entry tmp = bus_queue[last - 1];
             bus_queue[last - 1] = bus_queue[last];
             bus_queue[last] = tmp;
             --last;
@@ -98,12 +119,13 @@ void bus_emit(const resonant_msg *msg)
     }
 
     size_t insert_index = 0;
-    while (insert_index < bus_count && bus_queue[insert_index].energy >= msg->energy) {
+    while (insert_index < bus_count && bus_queue[insert_index].msg.energy >= msg->energy) {
         ++insert_index;
     }
 
     shift_right_from(insert_index);
-    bus_queue[insert_index] = *msg;
+    bus_queue[insert_index].msg = *msg;
+    bus_queue[insert_index].read_mask = 0U;
     ++bus_count;
 }
 
@@ -115,21 +137,30 @@ bool bus_listen(int sensor_id, resonant_msg *out_msg)
 
     bus_register_sensor(sensor_id);
 
+    uint32_t listener_bit = sensor_bit(sensor_id);
+
     for (size_t i = 0; i < bus_count; ++i) {
-        if (bus_queue[i].target_id == sensor_id || bus_queue[i].target_id == RESONANT_BROADCAST_ID) {
-            resonant_msg message = bus_queue[i];
+        resonant_msg *message = &bus_queue[i].msg;
+        if (message->target_id == sensor_id) {
+            resonant_msg delivered = *message;
             shift_left_from(i);
             --bus_count;
-            *out_msg = message;
+            *out_msg = delivered;
+            return true;
+        }
 
-            if (message.target_id == RESONANT_BROADCAST_ID) {
-                for (size_t sensor_index = 0; sensor_index < sensor_count; ++sensor_index) {
-                    int registered_id = sensor_registry[sensor_index];
-                    if (registered_id == sensor_id) {
-                        continue;
-                    }
-                    queue_duplicate(&message, registered_id);
-                }
+        if (message->target_id == RESONANT_BROADCAST_ID && listener_bit != 0U) {
+            if ((bus_queue[i].read_mask & listener_bit) != 0U) {
+                continue;
+            }
+
+            bus_queue[i].read_mask |= listener_bit;
+            *out_msg = *message;
+
+            uint32_t all_bits = sensor_mask();
+            if (all_bits != 0U && (bus_queue[i].read_mask & all_bits) == all_bits) {
+                shift_left_from(i);
+                --bus_count;
             }
             return true;
         }
