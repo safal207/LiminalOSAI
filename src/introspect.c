@@ -7,6 +7,7 @@
 #include "introspect.h"
 #include "dream_coupler.h"
 #include "trs_filter.h"
+#include "trs_adapt.h"
 
 #include <inttypes.h>
 #include <limits.h>
@@ -28,6 +29,12 @@
 static const float TRS_ALPHA_DEFAULT = 0.3f;
 static const int TRS_WARMUP_DEFAULT = 5;
 static const uint64_t TRS_SYNC_INTERVAL = 5ULL;
+static const float TRS_ADAPT_ALPHA_MIN_DEFAULT = 0.10f;
+static const float TRS_ADAPT_ALPHA_MAX_DEFAULT = 0.60f;
+static const float TRS_ADAPT_TARGET_DELTA_DEFAULT = 0.015f;
+static const float TRS_ADAPT_KP_DEFAULT = 0.4f;
+static const float TRS_ADAPT_KI_DEFAULT = 0.05f;
+static const float TRS_ADAPT_KD_DEFAULT = 0.1f;
 
 static bool g_trs_enabled = false;
 static bool g_trs_initialized = false;
@@ -35,6 +42,16 @@ static float g_trs_alpha = TRS_ALPHA_DEFAULT;
 static int g_trs_warmup_target = TRS_WARMUP_DEFAULT;
 static TRS g_trs_state;
 static FILE *g_trs_sync_stream = NULL;
+static bool g_trs_adapt_enabled = false;
+static float g_trs_alpha_min = TRS_ADAPT_ALPHA_MIN_DEFAULT;
+static float g_trs_alpha_max = TRS_ADAPT_ALPHA_MAX_DEFAULT;
+static float g_trs_target_delta = TRS_ADAPT_TARGET_DELTA_DEFAULT;
+static float g_trs_kp = TRS_ADAPT_KP_DEFAULT;
+static float g_trs_ki = TRS_ADAPT_KI_DEFAULT;
+static float g_trs_kd = TRS_ADAPT_KD_DEFAULT;
+static TRSAdapt g_trs_adapt;
+static bool g_trs_adapt_initialized = false;
+static FILE *g_trs_adapt_stream = NULL;
 
 static double sanitize_value(double value)
 {
@@ -65,6 +82,34 @@ static int clamp_trs_warmup_value(int value)
     }
     if (value > 10) {
         return 10;
+    }
+    return value;
+}
+
+static float clamp_trs_adapt_alpha_value(float value, float fallback)
+{
+    if (!isfinite(value)) {
+        return fallback;
+    }
+    if (value < 0.01f) {
+        return 0.01f;
+    }
+    if (value > 0.95f) {
+        return 0.95f;
+    }
+    return value;
+}
+
+static float clamp_trs_target_delta_value(float value)
+{
+    if (!isfinite(value)) {
+        return TRS_ADAPT_TARGET_DELTA_DEFAULT;
+    }
+    if (value < 0.0f) {
+        return 0.0f;
+    }
+    if (value > 0.5f) {
+        return 0.5f;
     }
     return value;
 }
@@ -136,7 +181,12 @@ void introspect_state_init(State *state)
         fclose(g_trs_sync_stream);
         g_trs_sync_stream = NULL;
     }
+    if (g_trs_adapt_stream) {
+        fclose(g_trs_adapt_stream);
+        g_trs_adapt_stream = NULL;
+    }
     g_trs_initialized = false;
+    g_trs_adapt_initialized = false;
 }
 
 void introspect_enable(State *state, bool enabled)
@@ -162,20 +212,73 @@ void introspect_enable_harmony(State *state, bool enabled)
     }
 }
 
-void introspect_configure_trs(bool enabled, float alpha, int warmup)
+void introspect_configure_trs(bool enabled,
+                              float alpha,
+                              int warmup,
+                              bool adapt_enabled,
+                              float alpha_min,
+                              float alpha_max,
+                              float target_delta,
+                              float k_p,
+                              float k_i,
+                              float k_d,
+                              bool dry_run)
 {
+    float clamped_alpha = clamp_trs_alpha_value(alpha);
+    int clamped_warmup = clamp_trs_warmup_value(warmup);
+    float clamped_alpha_min = clamp_trs_adapt_alpha_value(alpha_min, TRS_ADAPT_ALPHA_MIN_DEFAULT);
+    float clamped_alpha_max = clamp_trs_adapt_alpha_value(alpha_max, TRS_ADAPT_ALPHA_MAX_DEFAULT);
+    if (clamped_alpha_min > clamped_alpha_max) {
+        float tmp = clamped_alpha_min;
+        clamped_alpha_min = clamped_alpha_max;
+        clamped_alpha_max = tmp;
+    }
+    float clamped_target = clamp_trs_target_delta_value(target_delta);
+    float kp_value = isfinite(k_p) ? k_p : TRS_ADAPT_KP_DEFAULT;
+    float ki_value = isfinite(k_i) ? k_i : TRS_ADAPT_KI_DEFAULT;
+    float kd_value = isfinite(k_d) ? k_d : TRS_ADAPT_KD_DEFAULT;
+    bool adapt_active = adapt_enabled && enabled;
+
+    if (dry_run) {
+        printf("trs config: enabled=%s alpha=%.3f warmup=%d\n",
+               enabled ? "yes" : "no",
+               clamped_alpha,
+               clamped_warmup);
+        printf("trs adapt: enabled=%s alpha-range=[%.3f, %.3f] target-delta=%.4f kp=%.3f ki=%.3f kd=%.3f\n",
+               adapt_enabled ? "yes" : "no",
+               clamped_alpha_min,
+               clamped_alpha_max,
+               clamped_target,
+               kp_value,
+               ki_value,
+               kd_value);
+        return;
+    }
+
     g_trs_enabled = enabled;
-    g_trs_alpha = clamp_trs_alpha_value(alpha);
-    g_trs_warmup_target = clamp_trs_warmup_value(warmup);
+    g_trs_alpha = clamped_alpha;
+    g_trs_warmup_target = clamped_warmup;
     g_trs_initialized = false;
     g_trs_state.alpha = g_trs_alpha;
     g_trs_state.sm_influence = 0.0f;
     g_trs_state.sm_harmony = 0.0f;
     g_trs_state.sm_consent = 0.0f;
     g_trs_state.warmup = g_trs_warmup_target;
+    g_trs_adapt_enabled = adapt_active;
+    g_trs_alpha_min = clamped_alpha_min;
+    g_trs_alpha_max = clamped_alpha_max;
+    g_trs_target_delta = clamped_target;
+    g_trs_kp = kp_value;
+    g_trs_ki = ki_value;
+    g_trs_kd = kd_value;
+    g_trs_adapt_initialized = false;
     if (!g_trs_enabled && g_trs_sync_stream) {
         fclose(g_trs_sync_stream);
         g_trs_sync_stream = NULL;
+    }
+    if (!g_trs_adapt_enabled && g_trs_adapt_stream) {
+        fclose(g_trs_adapt_stream);
+        g_trs_adapt_stream = NULL;
     }
 }
 
@@ -196,6 +299,10 @@ void introspect_finalize(State *state)
     state->dream_phase = DREAM_COUPLER_PHASE_REST;
     state->next_dream_phase = DREAM_COUPLER_PHASE_REST;
     state->has_dream_preview = false;
+    if (g_trs_adapt_stream) {
+        fclose(g_trs_adapt_stream);
+        g_trs_adapt_stream = NULL;
+    }
 }
 
 void introspect_set_dream_preview(State *state, DreamCouplerPhase phase, bool active)
@@ -270,12 +377,28 @@ void introspect_tick(State *state, Metrics *metrics)
     double sm_influence = influence_raw;
     double sm_harmony = harmony_raw;
     double trs_delta = 0.0;
+    double trs_alpha_value = sanitize_value(g_trs_state.alpha);
+    double trs_target_value = sanitize_value(g_trs_target_delta);
+    double trs_err_value = 0.0;
+    bool trs_adapt_active = g_trs_enabled && g_trs_adapt_enabled;
 
     if (g_trs_enabled) {
         if (!g_trs_initialized) {
             trs_init(&g_trs_state, g_trs_alpha);
             g_trs_state.warmup = g_trs_warmup_target;
             g_trs_initialized = true;
+            g_trs_adapt_initialized = false;
+        }
+        if (trs_adapt_active && !g_trs_adapt_initialized) {
+            trs_adapt_init(&g_trs_adapt,
+                           g_trs_alpha_min,
+                           g_trs_alpha_max,
+                           g_trs_target_delta,
+                           g_trs_kp,
+                           g_trs_ki,
+                           g_trs_kd,
+                           g_trs_state.alpha);
+            g_trs_adapt_initialized = true;
         }
         float out_influence = (float)sm_influence;
         float out_harmony = (float)sm_harmony;
@@ -293,6 +416,21 @@ void introspect_tick(State *state, Metrics *metrics)
         sm_harmony = clamp_unit_value(out_harmony);
         sm_consent = clamp_unit_value(out_consent);
         trs_delta = sanitize_value(out_delta);
+        if (trs_adapt_active && g_trs_adapt_initialized) {
+            float new_alpha = trs_adapt_update(&g_trs_adapt, (float)trs_delta);
+            if (!isfinite(new_alpha)) {
+                new_alpha = g_trs_alpha_min;
+            }
+            g_trs_state.alpha = new_alpha;
+            trs_alpha_value = sanitize_value(new_alpha);
+            trs_err_value = sanitize_value(g_trs_adapt.last_err);
+        } else {
+            trs_alpha_value = sanitize_value(g_trs_state.alpha);
+            trs_err_value = sanitize_value((float)(trs_delta - g_trs_target_delta));
+        }
+    } else {
+        trs_alpha_value = sanitize_value(g_trs_alpha);
+        trs_err_value = 0.0;
     }
 
     sm_consent = clamp_unit_value(sm_consent);
@@ -307,7 +445,8 @@ void introspect_tick(State *state, Metrics *metrics)
                 "{\"timestamp\":\"%s\",\"cycle\":%" PRIu64 ",\"amp\":%.4f,\"tempo\":%.4f,"
                 "\"consent\":%.4f,\"influence\":%.4f,\"bond_coh\":%.4f,\"error_margin\":%.4f,"
                 "\"harmony\":%.4f,\"dream\":\"%s\",\"inf_raw\":%.4f,\"inf_sm\":%.4f,"
-                "\"harm_raw\":%.4f,\"harm_sm\":%.4f,\"cons_raw\":%.4f,\"cons_sm\":%.4f,\"trs_delta\":%.4f}\n",
+                "\"harm_raw\":%.4f,\"harm_sm\":%.4f,\"cons_raw\":%.4f,\"cons_sm\":%.4f,"
+                "\"trs_delta\":%.4f,\"trs_alpha\":%.4f,\"trs_target\":%.4f,\"trs_err\":%.4f}\n",
                 timestamp,
                 state->cycle_index,
                 sanitize_value(avg_amp),
@@ -324,7 +463,10 @@ void introspect_tick(State *state, Metrics *metrics)
                 sm_harmony,
                 consent_raw,
                 sm_consent,
-                trs_delta) >= 0) {
+                trs_delta,
+                trs_alpha_value,
+                trs_target_value,
+                trs_err_value) >= 0) {
         fflush(state->stream);
     }
 
@@ -340,6 +482,26 @@ void introspect_tick(State *state, Metrics *metrics)
                         sm_harmony,
                         trs_delta) >= 0) {
                 fflush(g_trs_sync_stream);
+            }
+        }
+    }
+
+    if (trs_adapt_active && TRS_SYNC_INTERVAL > 0 && (state->cycle_index % TRS_SYNC_INTERVAL) == 0ULL) {
+        if (!g_trs_adapt_stream) {
+            ensure_logs_directory();
+            g_trs_adapt_stream = fopen("logs/trs_adapt_v1.log", "a");
+        }
+        if (g_trs_adapt_stream) {
+            if (fprintf(g_trs_adapt_stream,
+                        "{\"tick\":%" PRIu64 ",\"alpha\":%.4f,\"delta\":%.4f,\"err\":%.4f,\"kp\":%.3f,\"ki\":%.3f,\"kd\":%.3f}\n",
+                        state->cycle_index,
+                        trs_alpha_value,
+                        trs_delta,
+                        trs_err_value,
+                        g_trs_kp,
+                        g_trs_ki,
+                        g_trs_kd) >= 0) {
+                fflush(g_trs_adapt_stream);
             }
         }
     }

@@ -5,11 +5,11 @@ LDFLAGS := -lm
 TARGET  := build/pulse_kernel
 SUBSTRATE_TARGET := build/liminal_core
 
-CORE_SRCS   := core/pulse_kernel.c core/trs_filter.c
+CORE_SRCS   := core/pulse_kernel.c core/trs_filter.c core/trs_adapt.c
 AFFINITY_SRCS := affinity/core.c
 ANTICIPATION_SRCS := anticipation/v2.c
 INTROSPECT_SRCS := src/introspect.c src/harmony.c src/dream_coupler.c
-SUBSTRATE_SRCS := core/liminal_substrate.c core/trs_filter.c empathic/field.c memory/emotion_memory.c council/inner.c $(AFFINITY_SRCS) $(ANTICIPATION_SRCS)
+SUBSTRATE_SRCS := core/liminal_substrate.c core/trs_filter.c core/trs_adapt.c empathic/field.c memory/emotion_memory.c council/inner.c $(AFFINITY_SRCS) $(ANTICIPATION_SRCS)
 MEM_SRCS    := memory/soil.c memory/emotion_memory.c
 BUS_SRCS    := bus/resonant.c
 SYM_SRCS    := symbol/layer.c
