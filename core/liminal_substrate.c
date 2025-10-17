@@ -31,6 +31,7 @@
 #include "introspect.h"
 #include "harmony.h"
 #include "dream_coupler.h"
+#include "erb.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -39,6 +40,8 @@
 #ifndef EMOTION_TRACE_PATH_MAX
 #define EMOTION_TRACE_PATH_MAX 256
 #endif
+
+#define ERB_INDEX_PATH "logs/erb_index.jsonl"
 
 typedef struct {
     float breath_rate;
@@ -59,6 +62,14 @@ typedef struct {
     float phase;
     char intent[24];
 } lip_event;
+
+typedef enum {
+    ERB_REPLAY_NONE = 0,
+    ERB_REPLAY_LATEST,
+    ERB_REPLAY_INDEX,
+    ERB_REPLAY_TAG,
+    ERB_REPLAY_ALL
+} ErbReplayMode;
 
 typedef struct {
     bool run_substrate;
@@ -106,6 +117,14 @@ typedef struct {
     float trs_kp;
     float trs_ki;
     float trs_kd;
+    bool erb_enabled;
+    int erb_pre;
+    int erb_post;
+    float erb_spike;
+    ErbReplayMode erb_replay_mode;
+    uint32_t erb_replay_idx;
+    uint32_t erb_replay_tag_mask;
+    float erb_replay_speed;
 } substrate_config;
 
 static bool substrate_affinity_enabled = false;
@@ -115,6 +134,15 @@ static float substrate_explicit_consent = 0.2f;
 static bool substrate_ant2_enabled = false;
 static Ant2 substrate_ant2_state;
 static const float SUBSTRATE_BASE_RATE = 0.72f;
+typedef struct {
+    uint32_t id;
+    uint32_t tag_mask;
+    int len;
+    float delta_max;
+    float alpha_mean;
+} ErbIndexRecord;
+
+#define ERB_MAX_INDEX_RECORDS 512
 static const float MIRROR_GAIN_AMP_MIN_DEFAULT = 0.5f;
 static const float MIRROR_GAIN_AMP_MAX_DEFAULT = 1.2f;
 static const float MIRROR_GAIN_TEMPO_MIN_DEFAULT = 0.8f;
@@ -451,6 +479,14 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.trs_kp = 0.4f;
     cfg.trs_ki = 0.05f;
     cfg.trs_kd = 0.1f;
+    cfg.erb_enabled = false;
+    cfg.erb_pre = 24;
+    cfg.erb_post = 32;
+    cfg.erb_spike = 0.06f;
+    cfg.erb_replay_mode = ERB_REPLAY_NONE;
+    cfg.erb_replay_idx = 0U;
+    cfg.erb_replay_tag_mask = 0U;
+    cfg.erb_replay_speed = 1.0f;
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -481,6 +517,78 @@ static substrate_config parse_args(int argc, char **argv)
             if (value && *value) {
                 strncpy(cfg.lip_host, value, sizeof(cfg.lip_host) - 1U);
                 cfg.lip_host[sizeof(cfg.lip_host) - 1U] = '\0';
+            }
+        } else if (strcmp(arg, "--erb") == 0) {
+            cfg.erb_enabled = true;
+        } else if (strncmp(arg, "--erb-pre=", 10) == 0) {
+            const char *value = arg + 10;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value) {
+                    if (parsed < 0L) {
+                        parsed = 0L;
+                    } else if (parsed > (long)(ERB_MAX_LEN - 1)) {
+                        parsed = (long)(ERB_MAX_LEN - 1);
+                    }
+                    cfg.erb_pre = (int)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--erb-post=", 11) == 0) {
+            const char *value = arg + 11;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value) {
+                    if (parsed < 0L) {
+                        parsed = 0L;
+                    } else if (parsed > (long)(ERB_MAX_LEN - 1)) {
+                        parsed = (long)(ERB_MAX_LEN - 1);
+                    }
+                    cfg.erb_post = (int)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--erb-spike=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed) && parsed >= 0.0f) {
+                    cfg.erb_spike = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--erb-replay=", 13) == 0) {
+            const char *value = arg + 13;
+            if (value && *value) {
+                if (strcmp(value, "latest") == 0 || strcmp(value, "LATEST") == 0) {
+                    cfg.erb_replay_mode = ERB_REPLAY_LATEST;
+                } else if (strcmp(value, "ALL") == 0 || strcmp(value, "all") == 0) {
+                    cfg.erb_replay_mode = ERB_REPLAY_ALL;
+                } else if (strncmp(value, "idx:", 4) == 0) {
+                    const char *idx_value = value + 4;
+                    char *end = NULL;
+                    unsigned long parsed = strtoul(idx_value, &end, 10);
+                    if (end != idx_value) {
+                        cfg.erb_replay_mode = ERB_REPLAY_INDEX;
+                        cfg.erb_replay_idx = (uint32_t)parsed;
+                    }
+                } else if (strncmp(value, "tag:", 4) == 0) {
+                    const char *tag_spec = value + 4;
+                    uint32_t mask = erb_parse_tag_mask(tag_spec);
+                    if (mask != 0U) {
+                        cfg.erb_replay_mode = ERB_REPLAY_TAG;
+                        cfg.erb_replay_tag_mask = mask;
+                    }
+                }
+            }
+        } else if (strncmp(arg, "--erb-replay-speed=", 20) == 0) {
+            const char *value = arg + 20;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed) && parsed > 0.0f) {
+                    cfg.erb_replay_speed = parsed;
+                }
             }
         } else if (strncmp(arg, "--human-bridge", 14) == 0) {
             cfg.human_bridge = true;
@@ -759,6 +867,237 @@ static substrate_config parse_args(int argc, char **argv)
     }
 
     return cfg;
+}
+
+static size_t read_erb_index(ErbIndexRecord *records, size_t capacity)
+{
+    if (!records || capacity == 0) {
+        return 0;
+    }
+    FILE *fp = fopen(ERB_INDEX_PATH, "r");
+    if (!fp) {
+        return 0;
+    }
+    size_t count = 0;
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        unsigned int idx = 0U;
+        unsigned int tag_mask = 0U;
+        int len = 0;
+        float delta_max = 0.0f;
+        float alpha_mean = 0.0f;
+        char tag_text[128];
+        tag_text[0] = '\0';
+        int parsed = sscanf(line,
+                            "{\"idx\":%u,\"len\":%d,\"tag\":\"%127[^\"]\",\"tag_mask\":%u,\"delta_max\":%f,\"alpha_mean\":%f}",
+                            &idx,
+                            &len,
+                            tag_text,
+                            &tag_mask,
+                            &delta_max,
+                            &alpha_mean);
+        if (parsed >= 5) {
+            if (count < capacity) {
+                records[count].id = idx;
+                records[count].tag_mask = tag_mask;
+                records[count].len = len;
+                records[count].delta_max = delta_max;
+                records[count].alpha_mean = (parsed == 6) ? alpha_mean : 0.0f;
+                ++count;
+            }
+        }
+    }
+    fclose(fp);
+    return count;
+}
+
+static size_t collect_replay_ids(const substrate_config *cfg,
+                                 const ErbIndexRecord *records,
+                                 size_t record_count,
+                                 uint32_t *out_ids,
+                                 size_t capacity)
+{
+    if (!cfg || !records || !out_ids || capacity == 0) {
+        return 0;
+    }
+    size_t count = 0;
+    if (cfg->erb_replay_mode == ERB_REPLAY_LATEST) {
+        const ErbIndexRecord *latest = NULL;
+        for (size_t i = 0; i < record_count; ++i) {
+            if (!latest || records[i].id > latest->id) {
+                latest = &records[i];
+            }
+        }
+        if (latest && count < capacity) {
+            out_ids[count++] = latest->id;
+        }
+    } else if (cfg->erb_replay_mode == ERB_REPLAY_INDEX) {
+        for (size_t i = 0; i < record_count; ++i) {
+            if (records[i].id == cfg->erb_replay_idx) {
+                if (count < capacity) {
+                    out_ids[count++] = records[i].id;
+                }
+                break;
+            }
+        }
+    } else if (cfg->erb_replay_mode == ERB_REPLAY_TAG) {
+        for (size_t i = 0; i < record_count && count < capacity; ++i) {
+            if ((records[i].tag_mask & cfg->erb_replay_tag_mask) != 0U) {
+                out_ids[count++] = records[i].id;
+            }
+        }
+    } else if (cfg->erb_replay_mode == ERB_REPLAY_ALL) {
+        for (size_t i = 0; i < record_count && count < capacity; ++i) {
+            out_ids[count++] = records[i].id;
+        }
+    }
+    return count;
+}
+
+static void format_replay_mode_label(const substrate_config *cfg, char *buffer, size_t size)
+{
+    if (!buffer || size == 0) {
+        return;
+    }
+    buffer[0] = '\0';
+    if (!cfg) {
+        return;
+    }
+    switch (cfg->erb_replay_mode) {
+    case ERB_REPLAY_LATEST:
+        strncpy(buffer, "latest", size - 1);
+        buffer[size - 1] = '\0';
+        break;
+    case ERB_REPLAY_INDEX:
+        snprintf(buffer, size, "idx:%u", cfg->erb_replay_idx);
+        break;
+    case ERB_REPLAY_TAG: {
+        char tags[64];
+        erb_tag_to_string(cfg->erb_replay_tag_mask, tags, sizeof(tags));
+        if (tags[0] == '\0') {
+            strncpy(buffer, "tag:0", size - 1);
+            buffer[size - 1] = '\0';
+        } else {
+            strncpy(buffer, "tag:", size - 1);
+            buffer[size - 1] = '\0';
+            size_t current_len = strlen(buffer);
+            if (current_len < size - 1) {
+                strncat(buffer, tags, size - 1 - current_len);
+            }
+        }
+        break;
+    }
+    case ERB_REPLAY_ALL:
+        strncpy(buffer, "ALL", size - 1);
+        buffer[size - 1] = '\0';
+        break;
+    default:
+        strncpy(buffer, "NONE", size - 1);
+        buffer[size - 1] = '\0';
+        break;
+    }
+}
+
+static void erb_sleep_seconds(double seconds)
+{
+    if (seconds <= 0.0) {
+        return;
+    }
+#if defined(_WIN32)
+    DWORD millis = (DWORD)(seconds * 1000.0);
+    Sleep(millis);
+#else
+    struct timespec ts;
+    if (seconds < 0.0) {
+        seconds = 0.0;
+    }
+    ts.tv_sec = (time_t)seconds;
+    double fractional = seconds - (double)ts.tv_sec;
+    if (fractional < 0.0) {
+        fractional = 0.0;
+    }
+    ts.tv_nsec = (long)(fractional * 1000000000.0);
+    if (ts.tv_nsec < 0) {
+        ts.tv_nsec = 0;
+    }
+    nanosleep(&ts, NULL);
+#endif
+}
+
+static int run_erb_replay(const substrate_config *cfg)
+{
+    if (!cfg) {
+        return 1;
+    }
+    ErbIndexRecord records[ERB_MAX_INDEX_RECORDS];
+    size_t record_count = read_erb_index(records, ERB_MAX_INDEX_RECORDS);
+    if (record_count == 0) {
+        fprintf(stderr, "[erb] no episodes available for replay.\n");
+        return 1;
+    }
+    uint32_t ids[ERB_MAX_INDEX_RECORDS];
+    size_t id_count = collect_replay_ids(cfg, records, record_count, ids, ERB_MAX_INDEX_RECORDS);
+    if (id_count == 0) {
+        fprintf(stderr, "[erb] no matching episodes for replay selection.\n");
+        return 1;
+    }
+
+    char mode_label[64];
+    format_replay_mode_label(cfg, mode_label, sizeof(mode_label));
+    double base_interval = 0.1;
+    double speed = cfg->erb_replay_speed > 0.0f ? cfg->erb_replay_speed : 1.0;
+    double delay = base_interval / speed;
+    if (delay < 0.0) {
+        delay = 0.0;
+    }
+
+    for (size_t i = 0; i < id_count; ++i) {
+        uint32_t episode_id = ids[i];
+        Episode episode;
+        if (!erb_load_episode(episode_id, &episode)) {
+            fprintf(stderr, "[erb] unable to load episode %u.\n", episode_id);
+            continue;
+        }
+        printf("[erb] replaying episode %u (%d ticks) mode=%s\n",
+               episode_id,
+               episode.len,
+               mode_label[0] ? mode_label : "unknown");
+        for (int tick = 0; tick < episode.len; ++tick) {
+            TickSnapshot snap = episode.seq[tick];
+            Metrics metrics;
+            metrics.amp = snap.amp;
+            metrics.tempo = snap.tempo;
+            metrics.consent = snap.consent;
+            metrics.influence = snap.influence;
+            metrics.bond_coh = snap.harmony;
+            metrics.error_margin = fabsf(snap.amp - snap.tempo);
+            metrics.harmony = snap.harmony;
+            int dream_phase = (int)lroundf(snap.dream);
+            if (dream_phase < (int)DREAM_COUPLER_PHASE_REST) {
+                dream_phase = (int)DREAM_COUPLER_PHASE_REST;
+            } else if (dream_phase > (int)DREAM_COUPLER_PHASE_WAKE) {
+                dream_phase = (int)DREAM_COUPLER_PHASE_WAKE;
+            }
+            substrate_introspect_state.dream_phase = (DreamCouplerPhase)dream_phase;
+            introspect_tick(&substrate_introspect_state, &metrics);
+            if (substrate_introspect_state.enabled &&
+                (cfg->harmony_enabled || cfg->dream_enabled)) {
+                Metrics harmony_metrics = metrics;
+                harmony_sync(&substrate_introspect_state, &harmony_metrics);
+            }
+            float delta = introspect_get_last_trs_delta();
+            float alpha = introspect_get_last_trs_alpha();
+            float err = introspect_get_last_trs_error();
+            erb_log_replay_tick((uint32_t)tick,
+                                 episode_id,
+                                 delta,
+                                 alpha,
+                                 err,
+                                 mode_label);
+            erb_sleep_seconds(delay);
+        }
+    }
+    return 0;
 }
 
 static void lip_sleep(unsigned int interval_ms)
@@ -1301,6 +1640,12 @@ int main(int argc, char **argv)
                              cfg.trs_ki,
                              cfg.trs_kd,
                              cfg.dry_run);
+    bool erb_capture_enabled = cfg.erb_enabled && cfg.erb_replay_mode == ERB_REPLAY_NONE;
+    introspect_configure_erb(erb_capture_enabled,
+                             cfg.erb_pre,
+                             cfg.erb_post,
+                             cfg.erb_spike,
+                             cfg.dry_run);
 
     if (cfg.dry_run) {
         char sequence[128];
@@ -1314,6 +1659,15 @@ int main(int argc, char **argv)
                cfg.mirror_tempo_min,
                cfg.mirror_tempo_max);
         return 0;
+    }
+    if (cfg.erb_replay_mode != ERB_REPLAY_NONE) {
+        introspect_enable(&substrate_introspect_state, true);
+        introspect_enable_harmony(
+            &substrate_introspect_state,
+            cfg.harmony_enabled || cfg.dream_enabled);
+        int replay_result = run_erb_replay(&cfg);
+        introspect_finalize(&substrate_introspect_state);
+        return replay_result;
     }
     if (!cfg.run_substrate) {
         fprintf(stderr, "Liminal Substrate: use --substrate to start the universal core.\n");

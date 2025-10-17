@@ -52,6 +52,10 @@ void introspect_configure_trs(bool enabled,
                               float k_i,
                               float k_d,
                               bool dry_run);
+void introspect_configure_erb(bool enabled, int pre, int post, float spike_thr, bool dry_run);
 void introspect_set_dream_preview(State *state, DreamCouplerPhase phase, bool active);
+float introspect_get_last_trs_delta(void);
+float introspect_get_last_trs_alpha(void);
+float introspect_get_last_trs_error(void);
 
 #endif /* LIMINAL_INTROSPECT_H */
