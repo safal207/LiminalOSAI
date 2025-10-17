@@ -37,6 +37,7 @@
 #include "dream_coupler.h"
 #include "erb.h"
 #include "autotune.h"
+#include "astro_sync.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -49,6 +50,11 @@
 #define ERB_INDEX_PATH "logs/erb_index.jsonl"
 #define TUNE_REPORT_PATH "logs/tune_report.jsonl"
 #define TUNE_BEST_PATH "logs/tune_best.json"
+
+#define ASTRO_TRACE_PATH "logs/astro_trace.jsonl"
+#define ASTRO_MEMORY_PATH "soil/astro_memory.jsonl"
+#define ASTRO_MEMORY_CAPACITY 64
+#define ASTRO_STABLE_WINDOW 10
 
 typedef struct {
     float breath_rate;
@@ -122,6 +128,13 @@ typedef struct {
     bool introspect_enabled;
     bool harmony_enabled;
     bool dream_enabled;
+    bool astro_enabled;
+    bool astro_trace;
+    float astro_rate;
+    float astro_tone_init;
+    float astro_memory_init;
+    bool astro_tone_set;
+    bool astro_memory_set;
     bool trs_enabled;
     float trs_alpha;
     int trs_warmup;
@@ -168,6 +181,20 @@ static float substrate_explicit_consent = 0.2f;
 static bool substrate_ant2_enabled = false;
 static Ant2 substrate_ant2_state;
 static const float SUBSTRATE_BASE_RATE = 0.72f;
+static Astro substrate_astro;
+static bool substrate_astro_enabled = false;
+static bool substrate_astro_trace_enabled = false;
+static FILE *substrate_astro_trace_stream = NULL;
+static float substrate_astro_feedback = 1.0f;
+static AstroMemory substrate_astro_cache[ASTRO_MEMORY_CAPACITY];
+static size_t substrate_astro_count = 0;
+typedef struct {
+    int consecutive;
+    float tone_sum;
+    float memory_sum;
+    float stability_sum;
+} AstroStableWindow;
+static AstroStableWindow substrate_astro_window = {0, 0.0f, 0.0f, 0.0f};
 typedef struct {
     uint32_t id;
     uint32_t tag_mask;
@@ -226,6 +253,7 @@ static size_t build_exhale_sequence(const substrate_config *cfg, const char **st
     bool include_mirror = strict;
     bool include_introspect = strict || cfg->introspect_enabled;
     bool include_harmony = strict || include_introspect || cfg->harmony_enabled || cfg->dream_enabled;
+    bool include_astro = strict || cfg->astro_enabled;
     bool include_dream = cfg->dream_enabled;
 
     if (include_ant2 && count < capacity) {
@@ -248,6 +276,9 @@ static size_t build_exhale_sequence(const substrate_config *cfg, const char **st
     }
     if (include_harmony && count < capacity) {
         steps[count++] = "harmony";
+    }
+    if (include_astro && count < capacity) {
+        steps[count++] = "astro";
     }
     if (include_dream && count < capacity) {
         steps[count++] = "dream";
@@ -418,6 +449,20 @@ static float clamp_unit(float value)
     return value;
 }
 
+static float clamp_range(float value, float min_value, float max_value)
+{
+    if (!isfinite(value)) {
+        return min_value;
+    }
+    if (value < min_value) {
+        return min_value;
+    }
+    if (value > max_value) {
+        return max_value;
+    }
+    return value;
+}
+
 static void parse_affinity_config(Affinity *aff, const char *value)
 {
     if (!aff || !value) {
@@ -573,6 +618,129 @@ static void human_affinity_bridge(liminal_state *state, bool trace)
     }
 }
 
+static void substrate_astro_window_reset(void)
+{
+    substrate_astro_window.consecutive = 0;
+    substrate_astro_window.tone_sum = 0.0f;
+    substrate_astro_window.memory_sum = 0.0f;
+    substrate_astro_window.stability_sum = 0.0f;
+}
+
+static void substrate_astro_window_accumulate(float tone, float memory, float stability)
+{
+    substrate_astro_window.consecutive += 1;
+    substrate_astro_window.tone_sum += tone;
+    substrate_astro_window.memory_sum += memory;
+    substrate_astro_window.stability_sum += stability;
+}
+
+static void substrate_astro_trace_close(void)
+{
+    if (substrate_astro_trace_stream) {
+        fclose(substrate_astro_trace_stream);
+        substrate_astro_trace_stream = NULL;
+    }
+}
+
+static void substrate_astro_trace_log(float stability, float gain)
+{
+    if (!substrate_astro_trace_enabled) {
+        return;
+    }
+    if (!substrate_astro_trace_stream) {
+        substrate_astro_trace_stream = fopen(ASTRO_TRACE_PATH, "a");
+        if (!substrate_astro_trace_stream) {
+            substrate_astro_trace_enabled = false;
+            return;
+        }
+    }
+    fprintf(substrate_astro_trace_stream,
+            "{\"tone\":%.4f,\"memory\":%.4f,\"drift\":%.4f,\"ca_rate\":%.5f,\"ca_phase\":%.4f,"
+            "\"stability\":%.4f,\"agitation\":%.4f,\"astro_gain\":%.4f}\n",
+            substrate_astro.tone,
+            substrate_astro.memory,
+            substrate_astro.drift,
+            substrate_astro.ca_rate,
+            substrate_astro.ca_phase,
+            stability,
+            substrate_astro.last_agitation,
+            gain);
+    fflush(substrate_astro_trace_stream);
+}
+
+static void substrate_astro_trace_log_consolidate(float tone_avg,
+                                                  float memory_avg,
+                                                  float stability_avg)
+{
+    if (!substrate_astro_trace_enabled) {
+        return;
+    }
+    if (!substrate_astro_trace_stream) {
+        substrate_astro_trace_stream = fopen(ASTRO_TRACE_PATH, "a");
+        if (!substrate_astro_trace_stream) {
+            substrate_astro_trace_enabled = false;
+            return;
+        }
+    }
+    fprintf(substrate_astro_trace_stream,
+            "{\"consolidate\":true,\"tone_avg\":%.4f,\"mem_avg\":%.4f,\"ca_rate\":%.5f,"
+            "\"stability_avg\":%.4f,\"signature\":0,\"saved\":\"%s\"}\n",
+            tone_avg,
+            memory_avg,
+            substrate_astro.ca_rate,
+            stability_avg,
+            ASTRO_MEMORY_PATH);
+    fflush(substrate_astro_trace_stream);
+}
+
+static void substrate_astro_memory_load(void)
+{
+    substrate_astro_count = astro_memory_load(ASTRO_MEMORY_PATH, substrate_astro_cache, ASTRO_MEMORY_CAPACITY);
+    if (substrate_astro_count > ASTRO_MEMORY_CAPACITY) {
+        substrate_astro_count = ASTRO_MEMORY_CAPACITY;
+    }
+}
+
+static void substrate_astro_memory_store(float tone_avg, float memory_avg, float stability_avg)
+{
+    uint64_t now = (uint64_t)time(NULL);
+    AstroMemory snapshot = astro_memory_make(0U, tone_avg, memory_avg, substrate_astro.ca_rate, stability_avg, now);
+    if (astro_memory_append(ASTRO_MEMORY_PATH, &snapshot)) {
+        if (substrate_astro_count < ASTRO_MEMORY_CAPACITY) {
+            substrate_astro_cache[substrate_astro_count++] = snapshot;
+        } else if (substrate_astro_count > 0) {
+            substrate_astro_cache[substrate_astro_count - 1] = snapshot;
+        }
+        substrate_astro_trace_log_consolidate(tone_avg, memory_avg, stability_avg);
+    }
+}
+
+static void substrate_astro_apply_profile(bool tone_locked, bool memory_locked)
+{
+    if (substrate_astro_count == 0) {
+        return;
+    }
+    const AstroMemory *profile = NULL;
+    for (size_t i = 0; i < substrate_astro_count; ++i) {
+        if (substrate_astro_cache[i].signature == 0U) {
+            profile = &substrate_astro_cache[i];
+            break;
+        }
+    }
+    if (!profile) {
+        profile = &substrate_astro_cache[0];
+    }
+    if (profile) {
+        if (!tone_locked) {
+            astro_set_tone(&substrate_astro, profile->tone_avg);
+        }
+        if (!memory_locked) {
+            astro_set_memory(&substrate_astro, profile->memory_avg);
+        }
+        astro_set_ca_rate(&substrate_astro, profile->ca_rate);
+    }
+}
+
 static substrate_config parse_args(int argc, char **argv)
 {
     substrate_config cfg;
@@ -611,6 +779,13 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.introspect_enabled = false;
     cfg.harmony_enabled = false;
     cfg.dream_enabled = false;
+    cfg.astro_enabled = false;
+    cfg.astro_trace = false;
+    cfg.astro_rate = 0.010f;
+    cfg.astro_tone_init = 0.0f;
+    cfg.astro_memory_init = 0.0f;
+    cfg.astro_tone_set = false;
+    cfg.astro_memory_set = false;
     cfg.trs_enabled = false;
     cfg.trs_alpha = 0.3f;
     cfg.trs_warmup = 5;
@@ -984,6 +1159,40 @@ static substrate_config parse_args(int argc, char **argv)
             cfg.harmony_enabled = true;
         } else if (strcmp(arg, "--trs") == 0) {
             cfg.trs_enabled = true;
+        } else if (strcmp(arg, "--astro") == 0) {
+            cfg.astro_enabled = true;
+        } else if (strcmp(arg, "--astro-trace") == 0) {
+            cfg.astro_trace = true;
+            cfg.astro_enabled = true;
+        } else if (strncmp(arg, "--astro-rate=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.astro_rate = clamp_range(parsed, 0.005f, 0.020f);
+                }
+            }
+        } else if (strncmp(arg, "--astro-tone=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.astro_tone_init = clamp_unit(parsed);
+                    cfg.astro_tone_set = true;
+                }
+            }
+        } else if (strncmp(arg, "--astro-mem=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.astro_memory_init = clamp_unit(parsed);
+                    cfg.astro_memory_set = true;
+                }
+            }
         } else if (strncmp(arg, "--trs-alpha=", 12) == 0) {
             const char *value = arg + 12;
             if (*value) {
@@ -1155,6 +1364,18 @@ static substrate_config parse_args(int argc, char **argv)
 
     if ((cfg.harmony_enabled || cfg.dream_enabled) && !cfg.introspect_enabled) {
         cfg.introspect_enabled = true;
+    }
+
+    if (cfg.astro_trace) {
+        cfg.astro_enabled = true;
+    }
+    if (cfg.astro_enabled) {
+        if (!cfg.introspect_enabled) {
+            cfg.introspect_enabled = true;
+        }
+        if (!cfg.harmony_enabled) {
+            cfg.harmony_enabled = true;
+        }
     }
 
     return cfg;
@@ -1821,6 +2042,19 @@ static int run_erb_replay(const substrate_config *cfg)
                 (cfg->harmony_enabled || cfg->dream_enabled)) {
                 Metrics harmony_metrics = metrics;
                 harmony_sync(&substrate_introspect_state, &harmony_metrics);
+                if (substrate_astro_enabled) {
+                    float harmony_signal = clamp_unit(harmony_metrics.harmony);
+                    float trs_delta = fabsf(introspect_get_last_trs_delta());
+                    astro_update(&substrate_astro,
+                                 harmony_signal,
+                                 harmony_signal,
+                                 trs_delta,
+                                 metrics.consent,
+                                 metrics.influence);
+                    float astro_gain = astro_modulate_feedback(&substrate_astro);
+                    substrate_astro_feedback = clamp_range(astro_gain, 0.85f, 1.15f);
+                    substrate_astro_trace_log(substrate_astro.last_stability, astro_gain);
+                }
             }
             float delta = introspect_get_last_trs_delta();
             float alpha = introspect_get_last_trs_alpha();
@@ -2341,17 +2575,88 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
             if (cfg->harmony_enabled || cfg->dream_enabled) {
                 harmony_sync(&substrate_introspect_state, &harmony_metrics);
             }
+            float astro_factor = 1.0f;
+            if (substrate_astro_enabled) {
+                float harmony_signal = clamp_unit(harmony_metrics.harmony);
+                float group_coherence = clamp_unit(state->sync_quality);
+                float trs_delta = fabsf(introspect_get_last_trs_delta());
+                astro_update(&substrate_astro,
+                             harmony_signal,
+                             group_coherence,
+                             trs_delta,
+                             metrics.consent,
+                             metrics.influence);
+                float astro_gain = astro_modulate_feedback(&substrate_astro);
+                if (metrics.consent < 0.3f) {
+                    astro_gain = 1.0f;
+                }
+                astro_factor = clamp_range(astro_gain, 0.85f, 1.15f);
+                substrate_astro_feedback = astro_factor;
+                substrate_astro_trace_log(substrate_astro.last_stability, astro_gain);
+                bool stable_window = substrate_astro.memory > 0.7f && substrate_astro.last_stability > 0.8f;
+                if (stable_window) {
+                    substrate_astro_window_accumulate(substrate_astro.tone,
+                                                      substrate_astro.memory,
+                                                      substrate_astro.last_stability);
+                    if (substrate_astro_window.consecutive >= ASTRO_STABLE_WINDOW) {
+                        float samples = (float)substrate_astro_window.consecutive;
+                        float tone_avg = substrate_astro_window.tone_sum / samples;
+                        float memory_avg = substrate_astro_window.memory_sum / samples;
+                        float stability_avg = substrate_astro_window.stability_sum / samples;
+                        substrate_astro_memory_store(tone_avg, memory_avg, stability_avg);
+                        substrate_astro_window_reset();
+                    }
+                } else if (substrate_astro_window.consecutive > 0) {
+                    substrate_astro_window_reset();
+                }
+                harmony_metrics.amp = clamp_unit(harmony_metrics.amp * astro_factor);
+                harmony_metrics.tempo = clamp_range(harmony_metrics.tempo * astro_factor, 0.2f, 2.0f);
+            } else {
+                substrate_astro_feedback = 1.0f;
+                if (substrate_astro_window.consecutive > 0) {
+                    substrate_astro_window_reset();
+                }
+            }
+            if (substrate_astro_enabled && cfg->dream_enabled) {
+                Metrics preview_metrics = metrics;
+                preview_metrics.amp = clamp_unit(state->resonance * astro_factor);
+                float harmony_signal = state->sync_quality + (1.0f - clamp_unit(state->breath_rate / 2.4f)) * 0.4f;
+                preview_metrics.harmony = clamp_unit(harmony_signal);
+                float tempo_signal = sanitize_positive(state->breath_rate, 0.0f) * 1.6f;
+                if (!isfinite(tempo_signal)) {
+                    tempo_signal = sanitize_positive(state->breath_rate, 0.0f);
+                }
+                tempo_signal *= astro_factor;
+                preview_metrics.tempo = tempo_signal;
+                DreamCouplerPhase preview_phase = dream_coupler_evaluate(&preview_metrics);
+                introspect_set_dream_preview(&substrate_introspect_state, preview_phase, true);
+            }
             if (cfg->dream_enabled) {
                 Metrics coupling_metrics = harmony_metrics;
-                coupling_metrics.amp = clamp_unit(state->resonance);
+                coupling_metrics.amp = clamp_unit(state->resonance * astro_factor);
                 float harmony_signal = state->sync_quality + (1.0f - tempo_gain) * 0.4f;
                 coupling_metrics.harmony = clamp_unit(harmony_signal);
                 float tempo_signal = sanitize_positive(state->breath_rate, 0.0f) * 1.6f;
                 if (!isfinite(tempo_signal)) {
                     tempo_signal = sanitize_positive(state->breath_rate, 0.0f);
                 }
+                tempo_signal *= astro_factor;
                 coupling_metrics.tempo = tempo_signal;
                 dream_couple(&substrate_introspect_state, &coupling_metrics);
+            }
+            if (substrate_astro_enabled) {
+                float rate_adjust = 1.0f / substrate_astro_feedback;
+                if (rate_adjust < 0.87f) {
+                    rate_adjust = 0.87f;
+                } else if (rate_adjust > 1.15f) {
+                    rate_adjust = 1.15f;
+                }
+                state->breath_rate *= rate_adjust;
+                if (state->breath_rate < 0.20f) {
+                    state->breath_rate = 0.20f;
+                } else if (state->breath_rate > 2.4f) {
+                    state->breath_rate = 2.4f;
+                }
             }
         }
     }
@@ -2383,6 +2688,27 @@ int main(int argc, char **argv)
                              cfg.trs_ki,
                              cfg.trs_kd,
                              cfg.dry_run);
+    substrate_astro_trace_close();
+    substrate_astro_window_reset();
+    substrate_astro_memory_load();
+    substrate_astro_enabled = cfg.astro_enabled;
+    substrate_astro_trace_enabled = cfg.astro_trace;
+    substrate_astro_feedback = 1.0f;
+    if (substrate_astro_enabled) {
+        astro_init(&substrate_astro);
+        astro_set_ca_rate(&substrate_astro, cfg.astro_rate);
+        if (cfg.astro_tone_set) {
+            astro_set_tone(&substrate_astro, cfg.astro_tone_init);
+        }
+        if (cfg.astro_memory_set) {
+            astro_set_memory(&substrate_astro, cfg.astro_memory_init);
+        }
+        if (!cfg.astro_tone_set || !cfg.astro_memory_set) {
+            substrate_astro_apply_profile(cfg.astro_tone_set, cfg.astro_memory_set);
+        }
+    } else {
+        substrate_astro_trace_enabled = false;
+    }
     if (cfg.tune_apply && g_tune_profile_loaded) {
         apply_tune_config(&g_tune_profile);
     }
@@ -2487,6 +2813,8 @@ int main(int argc, char **argv)
     introspect_finalize(&substrate_introspect_state);
 
     emotion_memory_finalize();
+
+    substrate_astro_trace_close();
 
     return 0;
 }
