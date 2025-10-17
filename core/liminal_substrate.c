@@ -11,10 +11,13 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <limits.h>
+#include <float.h>
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <direct.h>
 #else
 #include <unistd.h>
 #include <sys/types.h>
@@ -22,6 +25,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <sys/stat.h>
 #endif
 #include "empathic.h"
 #include "emotion_memory.h"
@@ -32,6 +36,7 @@
 #include "harmony.h"
 #include "dream_coupler.h"
 #include "erb.h"
+#include "autotune.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -42,6 +47,8 @@
 #endif
 
 #define ERB_INDEX_PATH "logs/erb_index.jsonl"
+#define TUNE_REPORT_PATH "logs/tune_report.jsonl"
+#define TUNE_BEST_PATH "logs/tune_best.json"
 
 typedef struct {
     float breath_rate;
@@ -70,6 +77,14 @@ typedef enum {
     ERB_REPLAY_TAG,
     ERB_REPLAY_ALL
 } ErbReplayMode;
+
+typedef enum {
+    TUNE_SOURCE_NONE = 0,
+    TUNE_SOURCE_LATEST,
+    TUNE_SOURCE_INDEX,
+    TUNE_SOURCE_TAG,
+    TUNE_SOURCE_ALL
+} TuneSourceMode;
 
 typedef struct {
     bool run_substrate;
@@ -125,6 +140,25 @@ typedef struct {
     uint32_t erb_replay_idx;
     uint32_t erb_replay_tag_mask;
     float erb_replay_speed;
+    bool tune_enabled;
+    bool tune_apply;
+    bool tune_report;
+    int tune_trials;
+    int tune_refine;
+    int tune_max_runs;
+    float tune_alpha_min;
+    float tune_alpha_max;
+    int tune_warm_min;
+    int tune_warm_max;
+    float tune_align_min;
+    float tune_align_max;
+    char tune_save_path[256];
+    char tune_load_path[256];
+    int tune_seed;
+    int tune_select_n;
+    TuneSourceMode tune_source_mode;
+    uint32_t tune_source_idx;
+    uint32_t tune_source_mask;
 } substrate_config;
 
 static bool substrate_affinity_enabled = false;
@@ -148,6 +182,11 @@ static const float MIRROR_GAIN_AMP_MAX_DEFAULT = 1.2f;
 static const float MIRROR_GAIN_TEMPO_MIN_DEFAULT = 0.8f;
 static const float MIRROR_GAIN_TEMPO_MAX_DEFAULT = 1.2f;
 static State substrate_introspect_state;
+static bool g_tune_profile_loaded = false;
+static TuneConfig g_tune_profile;
+static TuneResult g_tune_last_result;
+static TuneResult g_tune_ranked_cache[8];
+static size_t g_tune_ranked_count = 0;
 
 static float sanitize_positive(float value, float fallback)
 {
@@ -215,6 +254,109 @@ static size_t build_exhale_sequence(const substrate_config *cfg, const char **st
     }
 
     return count;
+}
+
+static bool parse_float_range(const char *spec, float *out_min, float *out_max)
+{
+    if (!spec || !out_min || !out_max) {
+        return false;
+    }
+    char *end = NULL;
+    float min_value = strtof(spec, &end);
+    if (end == spec || *end != ':') {
+        return false;
+    }
+    const char *max_part = end + 1;
+    float max_value = strtof(max_part, &end);
+    if (end == max_part) {
+        return false;
+    }
+    if (!isfinite(min_value) || !isfinite(max_value)) {
+        return false;
+    }
+    *out_min = min_value;
+    *out_max = max_value;
+    return true;
+}
+
+static bool parse_int_range(const char *spec, int *out_min, int *out_max)
+{
+    if (!spec || !out_min || !out_max) {
+        return false;
+    }
+    char *end = NULL;
+    long min_value = strtol(spec, &end, 10);
+    if (end == spec || *end != ':') {
+        return false;
+    }
+    const char *max_part = end + 1;
+    long max_value = strtol(max_part, &end, 10);
+    if (end == max_part) {
+        return false;
+    }
+    *out_min = (int)min_value;
+    *out_max = (int)max_value;
+    return true;
+}
+
+static bool extract_profile_float(const char *json, const char *field, float *out)
+{
+    if (!json || !field || !out) {
+        return false;
+    }
+    char pattern[32];
+    int written = snprintf(pattern, sizeof(pattern), "\"%s\"", field);
+    if (written <= 0 || written >= (int)sizeof(pattern)) {
+        return false;
+    }
+    const char *pos = strstr(json, pattern);
+    if (!pos) {
+        return false;
+    }
+    pos += (size_t)written;
+    while (*pos == ' ' || *pos == '\t' || *pos == ':' ) {
+        ++pos;
+    }
+    if (*pos == '\0') {
+        return false;
+    }
+    char *end = NULL;
+    float value = strtof(pos, &end);
+    if (end == pos) {
+        return false;
+    }
+    *out = value;
+    return true;
+}
+
+static bool extract_profile_int(const char *json, const char *field, int *out)
+{
+    if (!json || !field || !out) {
+        return false;
+    }
+    char pattern[32];
+    int written = snprintf(pattern, sizeof(pattern), "\"%s\"", field);
+    if (written <= 0 || written >= (int)sizeof(pattern)) {
+        return false;
+    }
+    const char *pos = strstr(json, pattern);
+    if (!pos) {
+        return false;
+    }
+    pos += (size_t)written;
+    while (*pos == ' ' || *pos == '\t' || *pos == ':' ) {
+        ++pos;
+    }
+    if (*pos == '\0') {
+        return false;
+    }
+    char *end = NULL;
+    long value = strtol(pos, &end, 10);
+    if (end == pos) {
+        return false;
+    }
+    *out = (int)value;
+    return true;
 }
 
 static void format_exhale_sequence(const substrate_config *cfg, char *buffer, size_t size)
@@ -487,6 +629,25 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.erb_replay_idx = 0U;
     cfg.erb_replay_tag_mask = 0U;
     cfg.erb_replay_speed = 1.0f;
+    cfg.tune_enabled = false;
+    cfg.tune_apply = false;
+    cfg.tune_report = false;
+    cfg.tune_trials = 60;
+    cfg.tune_refine = 10;
+    cfg.tune_max_runs = 200;
+    cfg.tune_alpha_min = 0.1f;
+    cfg.tune_alpha_max = 0.6f;
+    cfg.tune_warm_min = 0;
+    cfg.tune_warm_max = 6;
+    cfg.tune_align_min = 0.4f;
+    cfg.tune_align_max = 0.8f;
+    cfg.tune_save_path[0] = '\0';
+    cfg.tune_load_path[0] = '\0';
+    cfg.tune_seed = 42;
+    cfg.tune_select_n = 0;
+    cfg.tune_source_mode = TUNE_SOURCE_LATEST;
+    cfg.tune_source_idx = 0U;
+    cfg.tune_source_mask = 0U;
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -588,6 +749,136 @@ static substrate_config parse_args(int argc, char **argv)
                 float parsed = strtof(value, &end);
                 if (end != value && isfinite(parsed) && parsed > 0.0f) {
                     cfg.erb_replay_speed = parsed;
+                }
+            }
+        } else if (strcmp(arg, "--tune") == 0) {
+            cfg.tune_enabled = true;
+        } else if (strncmp(arg, "--tune-source=", 14) == 0) {
+            const char *value = arg + 14;
+            if (value && *value) {
+                cfg.tune_enabled = true;
+                if (strcmp(value, "latest") == 0 || strcmp(value, "LATEST") == 0) {
+                    cfg.tune_source_mode = TUNE_SOURCE_LATEST;
+                } else if (strcmp(value, "ALL") == 0 || strcmp(value, "all") == 0) {
+                    cfg.tune_source_mode = TUNE_SOURCE_ALL;
+                } else if (strncmp(value, "idx:", 4) == 0) {
+                    const char *idx_value = value + 4;
+                    char *end = NULL;
+                    unsigned long parsed = strtoul(idx_value, &end, 10);
+                    if (end != idx_value) {
+                        cfg.tune_source_mode = TUNE_SOURCE_INDEX;
+                        cfg.tune_source_idx = (uint32_t)parsed;
+                    }
+                } else if (strncmp(value, "tag:", 4) == 0) {
+                    const char *tag_spec = value + 4;
+                    uint32_t mask = erb_parse_tag_mask(tag_spec);
+                    if (mask != 0U) {
+                        cfg.tune_source_mode = TUNE_SOURCE_TAG;
+                        cfg.tune_source_mask = mask;
+                    }
+                }
+            }
+        } else if (strncmp(arg, "--tune-trials=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed > 0L) {
+                    if (parsed > INT_MAX) {
+                        parsed = INT_MAX;
+                    }
+                    cfg.tune_trials = (int)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--tune-refine=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed >= 0L) {
+                    if (parsed > INT_MAX) {
+                        parsed = INT_MAX;
+                    }
+                    cfg.tune_refine = (int)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--tune-max-runs=", 16) == 0) {
+            const char *value = arg + 16;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed > 0L) {
+                    if (parsed > INT_MAX) {
+                        parsed = INT_MAX;
+                    }
+                    cfg.tune_max_runs = (int)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--tune-alpha=", 13) == 0) {
+            const char *value = arg + 13;
+            float min_v = 0.0f;
+            float max_v = 0.0f;
+            if (parse_float_range(value, &min_v, &max_v)) {
+                cfg.tune_alpha_min = min_v;
+                cfg.tune_alpha_max = max_v;
+            }
+        } else if (strncmp(arg, "--tune-warm=", 12) == 0) {
+            const char *value = arg + 12;
+            int min_v = 0;
+            int max_v = 0;
+            if (parse_int_range(value, &min_v, &max_v)) {
+                if (min_v < 0) {
+                    min_v = 0;
+                }
+                if (max_v > 10) {
+                    max_v = 10;
+                }
+                cfg.tune_warm_min = min_v;
+                cfg.tune_warm_max = max_v;
+            }
+        } else if (strncmp(arg, "--tune-align=", 13) == 0) {
+            const char *value = arg + 13;
+            float min_v = 0.0f;
+            float max_v = 0.0f;
+            if (parse_float_range(value, &min_v, &max_v)) {
+                cfg.tune_align_min = min_v;
+                cfg.tune_align_max = max_v;
+            }
+        } else if (strncmp(arg, "--tune-save=", 12) == 0) {
+            const char *value = arg + 12;
+            if (value && *value) {
+                strncpy(cfg.tune_save_path, value, sizeof(cfg.tune_save_path) - 1U);
+                cfg.tune_save_path[sizeof(cfg.tune_save_path) - 1U] = '\0';
+            }
+        } else if (strncmp(arg, "--tune-load=", 12) == 0) {
+            const char *value = arg + 12;
+            if (value && *value) {
+                strncpy(cfg.tune_load_path, value, sizeof(cfg.tune_load_path) - 1U);
+                cfg.tune_load_path[sizeof(cfg.tune_load_path) - 1U] = '\0';
+            }
+        } else if (strcmp(arg, "--tune-apply") == 0) {
+            cfg.tune_apply = true;
+        } else if (strcmp(arg, "--tune-report") == 0) {
+            cfg.tune_report = true;
+        } else if (strncmp(arg, "--tune-seed=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value) {
+                    cfg.tune_seed = (int)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--tune-count=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed >= 0L) {
+                    if (parsed > INT_MAX) {
+                        parsed = INT_MAX;
+                    }
+                    cfg.tune_select_n = (int)parsed;
                 }
             }
         } else if (strncmp(arg, "--human-bridge", 14) == 0) {
@@ -952,6 +1243,452 @@ static size_t collect_replay_ids(const substrate_config *cfg,
         }
     }
     return count;
+}
+
+static size_t collect_tune_ids(const substrate_config *cfg,
+                               const ErbIndexRecord *records,
+                               size_t record_count,
+                               uint32_t *out_ids,
+                               size_t capacity)
+{
+    if (!cfg || !records || !out_ids || capacity == 0) {
+        return 0;
+    }
+    size_t count = 0;
+    TuneSourceMode mode = cfg->tune_source_mode;
+    if (mode == TUNE_SOURCE_NONE) {
+        mode = TUNE_SOURCE_LATEST;
+    }
+    if (mode == TUNE_SOURCE_LATEST) {
+        const ErbIndexRecord *latest = NULL;
+        for (size_t i = 0; i < record_count; ++i) {
+            if (!latest || records[i].id > latest->id) {
+                latest = &records[i];
+            }
+        }
+        if (latest && count < capacity) {
+            out_ids[count++] = latest->id;
+        }
+    } else if (mode == TUNE_SOURCE_INDEX) {
+        for (size_t i = 0; i < record_count; ++i) {
+            if (records[i].id == cfg->tune_source_idx) {
+                if (count < capacity) {
+                    out_ids[count++] = records[i].id;
+                }
+                break;
+            }
+        }
+    } else if (mode == TUNE_SOURCE_TAG) {
+        for (size_t i = 0; i < record_count && count < capacity; ++i) {
+            if ((records[i].tag_mask & cfg->tune_source_mask) != 0U) {
+                out_ids[count++] = records[i].id;
+            }
+        }
+    } else if (mode == TUNE_SOURCE_ALL) {
+        for (size_t i = 0; i < record_count && count < capacity; ++i) {
+            out_ids[count++] = records[i].id;
+        }
+    }
+    if (count == 0) {
+        const ErbIndexRecord *latest = NULL;
+        for (size_t i = 0; i < record_count; ++i) {
+            if (!latest || records[i].id > latest->id) {
+                latest = &records[i];
+            }
+        }
+        if (latest && capacity > 0) {
+            out_ids[0] = latest->id;
+            count = 1;
+        }
+    }
+    return count;
+}
+
+static size_t load_tune_episodes(const substrate_config *cfg,
+                                 Episode *episodes,
+                                 uint32_t *ids,
+                                 size_t capacity)
+{
+    if (!cfg || !episodes || capacity == 0) {
+        return 0;
+    }
+    ErbIndexRecord records[ERB_MAX_INDEX_RECORDS];
+    size_t record_count = read_erb_index(records, ERB_MAX_INDEX_RECORDS);
+    if (record_count == 0) {
+        return 0;
+    }
+    uint32_t selected[ERB_MAX_INDEX_RECORDS];
+    size_t selected_count = collect_tune_ids(cfg, records, record_count, selected, ERB_MAX_INDEX_RECORDS);
+    if (selected_count == 0) {
+        return 0;
+    }
+    if (cfg->tune_select_n > 0 && (size_t)cfg->tune_select_n < selected_count) {
+        selected_count = (size_t)cfg->tune_select_n;
+    }
+    if (selected_count > capacity) {
+        selected_count = capacity;
+    }
+    size_t loaded = 0;
+    for (size_t i = 0; i < selected_count; ++i) {
+        uint32_t id = selected[i];
+        Episode episode;
+        if (erb_load_episode(id, &episode)) {
+            episodes[loaded] = episode;
+            if (ids) {
+                ids[loaded] = id;
+            }
+            loaded += 1;
+        } else {
+            fprintf(stderr, "[tune] unable to load episode %u.\n", id);
+        }
+    }
+    return loaded;
+}
+
+static void ensure_logs_directory_path(void)
+{
+#if defined(_WIN32)
+    _mkdir("logs");
+#else
+    struct stat st;
+    if (stat("logs", &st) != 0) {
+        mkdir("logs", 0777);
+    }
+#endif
+}
+
+static void log_tune_candidate(const TuneResult *result, int rank)
+{
+    if (!result || !isfinite(result->loss)) {
+        return;
+    }
+    ensure_logs_directory_path();
+    FILE *fp = fopen(TUNE_REPORT_PATH, "a");
+    if (!fp) {
+        return;
+    }
+    if (fprintf(fp,
+                "{\"mode\":\"erb\",\"rank\":%d,\"loss\":%.6f,\"delta_mean\":%.6f,\"harm_mean\":%.6f,"
+                "\"consent_mean\":%.6f,\"misalign_rate\":%.6f,\"cfg\":{\"trs_alpha\":%.4f,\"trs_warmup\":%d,\"allow_align\":%.4f}}\n",
+                rank,
+                result->loss,
+                result->delta_mean,
+                result->harm_mean,
+                result->consent_mean,
+                result->misalign_rate,
+                result->cfg.trs_alpha,
+                result->cfg.trs_warmup,
+                result->cfg.allow_align) >= 0) {
+        fflush(fp);
+    }
+    fclose(fp);
+}
+
+static void log_tune_best(const TuneConfig *cfg, const TuneResult *result)
+{
+    if (!cfg) {
+        return;
+    }
+    ensure_logs_directory_path();
+    FILE *fp = fopen(TUNE_BEST_PATH, "w");
+    if (!fp) {
+        return;
+    }
+    if (result && isfinite(result->loss)) {
+        fprintf(fp,
+                "{\"trs_alpha\":%.6f,\"trs_warmup\":%d,\"allow_align\":%.6f,"
+                "\"loss\":%.6f,\"delta_mean\":%.6f,\"harm_mean\":%.6f,\"consent_mean\":%.6f,\"misalign_rate\":%.6f}\n",
+                cfg->trs_alpha,
+                cfg->trs_warmup,
+                cfg->allow_align,
+                result->loss,
+                result->delta_mean,
+                result->harm_mean,
+                result->consent_mean,
+                result->misalign_rate);
+    } else {
+        fprintf(fp,
+                "{\"trs_alpha\":%.6f,\"trs_warmup\":%d,\"allow_align\":%.6f}\n",
+                cfg->trs_alpha,
+                cfg->trs_warmup,
+                cfg->allow_align);
+    }
+    fclose(fp);
+}
+
+static bool save_tune_profile(const char *path, const TuneConfig *cfg, const TuneResult *result)
+{
+    if (!path || !*path || !cfg) {
+        return false;
+    }
+    FILE *fp = fopen(path, "w");
+    if (!fp) {
+        fprintf(stderr, "[tune] unable to write profile %s.\n", path);
+        return false;
+    }
+    if (result && isfinite(result->loss)) {
+        fprintf(fp,
+                "{\"trs_alpha\":%.6f,\"trs_warmup\":%d,\"allow_align\":%.6f,\"loss\":%.6f}\n",
+                cfg->trs_alpha,
+                cfg->trs_warmup,
+                cfg->allow_align,
+                result->loss);
+    } else {
+        fprintf(fp,
+                "{\"trs_alpha\":%.6f,\"trs_warmup\":%d,\"allow_align\":%.6f}\n",
+                cfg->trs_alpha,
+                cfg->trs_warmup,
+                cfg->allow_align);
+    }
+    fclose(fp);
+    return true;
+}
+
+static bool load_tune_profile(const char *path, TuneConfig *cfg)
+{
+    if (!path || !*path || !cfg) {
+        return false;
+    }
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        fprintf(stderr, "[tune] unable to open profile %s.\n", path);
+        return false;
+    }
+    char buffer[512];
+    size_t read_bytes = fread(buffer, 1, sizeof(buffer) - 1, fp);
+    fclose(fp);
+    buffer[read_bytes] = '\0';
+    float alpha = 0.0f;
+    float align = 0.0f;
+    int warm = 0;
+    if (!extract_profile_float(buffer, "trs_alpha", &alpha)) {
+        return false;
+    }
+    if (!extract_profile_int(buffer, "trs_warmup", &warm)) {
+        float warm_f = 0.0f;
+        if (extract_profile_float(buffer, "trs_warmup", &warm_f)) {
+            warm = (int)lroundf(warm_f);
+        } else {
+            return false;
+        }
+    }
+    if (!extract_profile_float(buffer, "allow_align", &align)) {
+        return false;
+    }
+    cfg->trs_alpha = alpha;
+    cfg->trs_warmup = warm;
+    cfg->allow_align = align;
+    return true;
+}
+
+static void print_tune_summary(const TuneResult *results, size_t count)
+{
+    if (!results || count == 0) {
+        printf("[tune] no tuning results available.\n");
+        return;
+    }
+    size_t limit = count < 3 ? count : 3;
+    printf("[tune] top %zu configs:\n", limit);
+    for (size_t i = 0; i < limit; ++i) {
+        const TuneResult *res = &results[i];
+        printf("  #%zu loss=%.6f delta=%.6f harm=%.6f consent=%.6f misalign=%.6f alpha=%.4f warm=%d align=%.4f\n",
+               i + 1,
+               res->loss,
+               res->delta_mean,
+               res->harm_mean,
+               res->consent_mean,
+               res->misalign_rate,
+               res->cfg.trs_alpha,
+               res->cfg.trs_warmup,
+               res->cfg.allow_align);
+    }
+}
+
+static bool execute_tune_search(const substrate_config *cfg)
+{
+    Episode episodes[ERB_MAX_EPISODES];
+    uint32_t ids[ERB_MAX_EPISODES];
+    size_t episode_count = load_tune_episodes(cfg, episodes, ids, ERB_MAX_EPISODES);
+    if (episode_count == 0) {
+        fprintf(stderr, "[tune] no episodes available for tuning.\n");
+        return false;
+    }
+
+    ERB dataset;
+    memset(&dataset, 0, sizeof(dataset));
+    dataset.count = (int)episode_count;
+    if (episode_count < ERB_MAX_EPISODES) {
+        dataset.head = (int)episode_count;
+    } else {
+        dataset.head = (int)(episode_count % ERB_MAX_EPISODES);
+    }
+    for (size_t i = 0; i < episode_count && i < ERB_MAX_EPISODES; ++i) {
+        dataset.buf[i] = episodes[i];
+        dataset.ids[i] = ids[i];
+    }
+
+    TuneSpace space;
+    tune_default_space(&space);
+    float alpha_min = fminf(cfg->tune_alpha_min, cfg->tune_alpha_max);
+    float alpha_max = fmaxf(cfg->tune_alpha_min, cfg->tune_alpha_max);
+    if (!isfinite(alpha_min) || !isfinite(alpha_max)) {
+        alpha_min = 0.1f;
+        alpha_max = 0.6f;
+    }
+    if (alpha_min < 0.01f) {
+        alpha_min = 0.01f;
+    }
+    if (alpha_max > 0.95f) {
+        alpha_max = 0.95f;
+    }
+    space.trs_alpha_min = alpha_min;
+    space.trs_alpha_max = alpha_max;
+
+    int warm_min = cfg->tune_warm_min <= cfg->tune_warm_max ? cfg->tune_warm_min : cfg->tune_warm_max;
+    int warm_max = cfg->tune_warm_min <= cfg->tune_warm_max ? cfg->tune_warm_max : cfg->tune_warm_min;
+    if (warm_min < 0) {
+        warm_min = 0;
+    }
+    if (warm_max > 10) {
+        warm_max = 10;
+    }
+    space.trs_warmup_min = warm_min;
+    space.trs_warmup_max = warm_max;
+
+    float align_min = fminf(cfg->tune_align_min, cfg->tune_align_max);
+    float align_max = fmaxf(cfg->tune_align_min, cfg->tune_align_max);
+    if (!isfinite(align_min) || !isfinite(align_max)) {
+        align_min = 0.4f;
+        align_max = 0.8f;
+    }
+    if (align_min < 0.0f) {
+        align_min = 0.0f;
+    }
+    if (align_max > 1.0f) {
+        align_max = 1.0f;
+    }
+    space.allow_align_min = align_min;
+    space.allow_align_max = align_max;
+
+    int trials = cfg->tune_trials > 0 ? cfg->tune_trials : 1;
+    if (trials > cfg->tune_max_runs) {
+        trials = cfg->tune_max_runs;
+    }
+    int refine = cfg->tune_refine >= 0 ? cfg->tune_refine : 0;
+    if (refine > cfg->tune_max_runs - trials) {
+        refine = cfg->tune_max_runs - trials;
+    }
+    if (refine < 0) {
+        refine = 0;
+    }
+    space.trials = trials;
+    space.local_refine = refine;
+
+    TuneResult best = autotune_on_erb(&dataset, cfg->tune_select_n, &space, cfg->tune_seed);
+    g_tune_ranked_count = autotune_get_ranked_results(g_tune_ranked_cache,
+                                                      sizeof(g_tune_ranked_cache) / sizeof(g_tune_ranked_cache[0]));
+    if (!isfinite(best.loss) || best.loss >= FLT_MAX) {
+        fprintf(stderr, "[tune] tuning search did not converge.\n");
+        return false;
+    }
+
+    g_tune_last_result = best;
+    g_tune_profile = best.cfg;
+    g_tune_profile_loaded = true;
+
+    size_t log_count = g_tune_ranked_count < 3 ? g_tune_ranked_count : 3;
+    for (size_t i = 0; i < log_count; ++i) {
+        log_tune_candidate(&g_tune_ranked_cache[i], (int)i);
+    }
+    log_tune_best(&g_tune_profile, &best);
+
+    return true;
+}
+
+static bool handle_tune_options(substrate_config *cfg, bool *exit_after)
+{
+    if (!cfg) {
+        return false;
+    }
+    g_tune_profile_loaded = false;
+    g_tune_ranked_count = 0;
+    g_tune_last_result.loss = FLT_MAX;
+
+    bool have_profile = false;
+    bool should_exit = false;
+
+    if (cfg->tune_load_path[0]) {
+        TuneConfig loaded;
+        if (load_tune_profile(cfg->tune_load_path, &loaded)) {
+            g_tune_profile = loaded;
+            g_tune_profile_loaded = true;
+            have_profile = true;
+            printf("[tune] loaded profile %s (alpha=%.4f warm=%d align=%.4f).\n",
+                   cfg->tune_load_path,
+                   loaded.trs_alpha,
+                   loaded.trs_warmup,
+                   loaded.allow_align);
+        } else {
+            fprintf(stderr, "[tune] failed to load profile from %s.\n", cfg->tune_load_path);
+        }
+    }
+
+    if (cfg->tune_enabled) {
+        if (execute_tune_search(cfg)) {
+            have_profile = true;
+            printf("[tune] best loss=%.6f alpha=%.4f warm=%d align=%.4f (delta=%.6f harm=%.6f misalign=%.6f).\n",
+                   g_tune_last_result.loss,
+                   g_tune_profile.trs_alpha,
+                   g_tune_profile.trs_warmup,
+                   g_tune_profile.allow_align,
+                   g_tune_last_result.delta_mean,
+                   g_tune_last_result.harm_mean,
+                   g_tune_last_result.misalign_rate);
+        } else {
+            fprintf(stderr, "[tune] autotune search failed.\n");
+        }
+    }
+
+    if (cfg->tune_report) {
+        if (g_tune_ranked_count > 0) {
+            print_tune_summary(g_tune_ranked_cache, g_tune_ranked_count);
+        } else if (g_tune_profile_loaded) {
+            printf("[tune] profile alpha=%.4f warm=%d align=%.4f.\n",
+                   g_tune_profile.trs_alpha,
+                   g_tune_profile.trs_warmup,
+                   g_tune_profile.allow_align);
+        } else {
+            printf("[tune] no tuning data to report.\n");
+        }
+    }
+
+    if (cfg->tune_save_path[0]) {
+        if (have_profile) {
+            if (!save_tune_profile(cfg->tune_save_path,
+                                   &g_tune_profile,
+                                   (g_tune_ranked_count > 0) ? &g_tune_last_result : NULL)) {
+                fprintf(stderr, "[tune] failed to save profile to %s.\n", cfg->tune_save_path);
+            } else {
+                printf("[tune] saved profile to %s.\n", cfg->tune_save_path);
+            }
+        } else {
+            fprintf(stderr, "[tune] no profile available to save (%s).\n", cfg->tune_save_path);
+        }
+    }
+
+    if (cfg->tune_apply && have_profile) {
+        cfg->trs_enabled = true;
+        cfg->trs_alpha = g_tune_profile.trs_alpha;
+        cfg->trs_warmup = g_tune_profile.trs_warmup;
+        cfg->allow_align_consent = g_tune_profile.allow_align;
+    }
+
+    if (exit_after) {
+        should_exit = (cfg->tune_enabled || cfg->tune_load_path[0]) && !cfg->run_substrate;
+        *exit_after = should_exit;
+    }
+
+    return have_profile;
 }
 
 static void format_replay_mode_label(const substrate_config *cfg, char *buffer, size_t size)
@@ -1624,6 +2361,12 @@ int main(int argc, char **argv)
 {
     substrate_config cfg = parse_args(argc, argv);
 
+    bool exit_after_tune = false;
+    bool tune_available = handle_tune_options(&cfg, &exit_after_tune);
+    if (exit_after_tune) {
+        return tune_available ? 0 : 1;
+    }
+
     introspect_state_init(&substrate_introspect_state);
     introspect_enable(&substrate_introspect_state, cfg.introspect_enabled);
     introspect_enable_harmony(
@@ -1640,6 +2383,9 @@ int main(int argc, char **argv)
                              cfg.trs_ki,
                              cfg.trs_kd,
                              cfg.dry_run);
+    if (cfg.tune_apply && g_tune_profile_loaded) {
+        apply_tune_config(&g_tune_profile);
+    }
     bool erb_capture_enabled = cfg.erb_enabled && cfg.erb_replay_mode == ERB_REPLAY_NONE;
     introspect_configure_erb(erb_capture_enabled,
                              cfg.erb_pre,
