@@ -35,6 +35,8 @@
 #include "introspect.h"
 #include "harmony.h"
 #include "dream_coupler.h"
+#include "dream_replay.h"
+#include "trs_filter.h"
 #include "erb.h"
 #include "autotune.h"
 #include "astro_sync.h"
@@ -55,6 +57,7 @@
 #define ASTRO_MEMORY_PATH "soil/astro_memory.jsonl"
 #define ASTRO_MEMORY_CAPACITY 64
 #define ASTRO_STABLE_WINDOW 10
+#define DREAM_REPLAY_LOG_PATH "logs/dream_replay.jsonl"
 
 typedef struct {
     float breath_rate;
@@ -128,6 +131,7 @@ typedef struct {
     bool introspect_enabled;
     bool harmony_enabled;
     bool dream_enabled;
+    bool dream_replay_enabled;
     bool astro_enabled;
     bool astro_trace;
     float astro_rate;
@@ -135,6 +139,10 @@ typedef struct {
     float astro_memory_init;
     bool astro_tone_set;
     bool astro_memory_set;
+    int dream_replay_cycles;
+    float dream_replay_rate;
+    float dream_replay_decay;
+    bool dream_replay_trace;
     bool trs_enabled;
     float trs_alpha;
     int trs_warmup;
@@ -188,6 +196,11 @@ static FILE *substrate_astro_trace_stream = NULL;
 static float substrate_astro_feedback = 1.0f;
 static AstroMemory substrate_astro_cache[ASTRO_MEMORY_CAPACITY];
 static size_t substrate_astro_count = 0;
+static bool substrate_dream_replay_enabled = false;
+static bool substrate_dream_replay_trace = false;
+static DreamReplay substrate_dream_replay;
+static FILE *substrate_dream_replay_stream = NULL;
+static float substrate_dream_feedback = 1.0f;
 typedef struct {
     int consecutive;
     float tone_sum;
@@ -693,6 +706,39 @@ static void substrate_astro_trace_log_consolidate(float tone_avg,
     fflush(substrate_astro_trace_stream);
 }
 
+static void substrate_dream_replay_trace_close(void)
+{
+    if (substrate_dream_replay_stream) {
+        fclose(substrate_dream_replay_stream);
+        substrate_dream_replay_stream = NULL;
+    }
+}
+
+static void substrate_dream_replay_trace_log(uint32_t cycle, const DreamReplay *replay)
+{
+    if (!substrate_dream_replay_trace || !replay) {
+        return;
+    }
+    if (!substrate_dream_replay_stream) {
+        substrate_dream_replay_stream = fopen(DREAM_REPLAY_LOG_PATH, "a");
+        if (!substrate_dream_replay_stream) {
+            substrate_dream_replay_trace = false;
+            return;
+        }
+    }
+    float rem_wave = 0.5f + 0.5f * sinf(2.0f * (float)M_PI * replay->rem);
+    float feedback = dream_feedback(replay);
+    fprintf(substrate_dream_replay_stream,
+            "{\"cycle\":%u,\"rem_phase\":%.4f,\"rem_wave\":%.4f,\"blend\":%.4f,\"memory_after\":%.4f,\"gain\":%.4f}\n",
+            cycle,
+            replay->rem,
+            rem_wave,
+            replay->blend_factor,
+            replay->memory_projection,
+            feedback);
+    fflush(substrate_dream_replay_stream);
+}
+
 static void substrate_astro_memory_load(void)
 {
     substrate_astro_count = astro_memory_load(ASTRO_MEMORY_PATH, substrate_astro_cache, ASTRO_MEMORY_CAPACITY);
@@ -779,6 +825,7 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.introspect_enabled = false;
     cfg.harmony_enabled = false;
     cfg.dream_enabled = false;
+    cfg.dream_replay_enabled = false;
     cfg.astro_enabled = false;
     cfg.astro_trace = false;
     cfg.astro_rate = 0.010f;
@@ -786,6 +833,10 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.astro_memory_init = 0.0f;
     cfg.astro_tone_set = false;
     cfg.astro_memory_set = false;
+    cfg.dream_replay_cycles = 16;
+    cfg.dream_replay_rate = 0.2f;
+    cfg.dream_replay_decay = 0.01f;
+    cfg.dream_replay_trace = false;
     cfg.trs_enabled = false;
     cfg.trs_alpha = 0.3f;
     cfg.trs_warmup = 5;
@@ -1292,6 +1343,49 @@ static substrate_config parse_args(int argc, char **argv)
             }
         } else if (strcmp(arg, "--dream") == 0) {
             cfg.dream_enabled = true;
+        } else if (strcmp(arg, "--dream-replay") == 0) {
+            cfg.dream_replay_enabled = true;
+        } else if (strncmp(arg, "--dream-cycles=", 15) == 0) {
+            const char *value = arg + 15;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed > 0) {
+                    if (parsed > 256) {
+                        parsed = 256;
+                    }
+                    cfg.dream_replay_cycles = (int)parsed;
+                    cfg.dream_replay_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--dream-rate=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.dream_replay_rate = clamp_range(parsed, 0.05f, 0.8f);
+                    cfg.dream_replay_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--dream-decay=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 0.1f) {
+                        parsed = 0.1f;
+                    }
+                    cfg.dream_replay_decay = parsed;
+                    cfg.dream_replay_enabled = true;
+                }
+            }
+        } else if (strcmp(arg, "--dream-trace") == 0) {
+            cfg.dream_replay_trace = true;
+            cfg.dream_replay_enabled = true;
         } else if (strcmp(arg, "--strict-order") == 0) {
             cfg.strict_order = true;
         } else if (strcmp(arg, "--dry-run") == 0) {
@@ -1362,7 +1456,7 @@ static substrate_config parse_args(int argc, char **argv)
                      MIRROR_GAIN_TEMPO_MIN_DEFAULT,
                      MIRROR_GAIN_TEMPO_MAX_DEFAULT);
 
-    if ((cfg.harmony_enabled || cfg.dream_enabled) && !cfg.introspect_enabled) {
+    if ((cfg.harmony_enabled || cfg.dream_enabled || cfg.dream_replay_enabled) && !cfg.introspect_enabled) {
         cfg.introspect_enabled = true;
     }
 
@@ -1376,6 +1470,9 @@ static substrate_config parse_args(int argc, char **argv)
         if (!cfg.harmony_enabled) {
             cfg.harmony_enabled = true;
         }
+    }
+    if (cfg.dream_replay_enabled && !cfg.harmony_enabled) {
+        cfg.harmony_enabled = true;
     }
 
     return cfg;
@@ -2572,7 +2669,7 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
             }
             introspect_tick(&substrate_introspect_state, &metrics);
             Metrics harmony_metrics = metrics;
-            if (cfg->harmony_enabled || cfg->dream_enabled) {
+            if (cfg->harmony_enabled || cfg->dream_enabled || cfg->dream_replay_enabled) {
                 harmony_sync(&substrate_introspect_state, &harmony_metrics);
             }
             float astro_factor = 1.0f;
@@ -2616,6 +2713,47 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                 if (substrate_astro_window.consecutive > 0) {
                     substrate_astro_window_reset();
                 }
+            }
+            if (substrate_dream_replay_enabled) {
+                Harmony dream_harmony = {
+                    .baseline = clamp_unit(harmony_metrics.harmony),
+                    .amplitude = clamp_range(harmony_metrics.amp, 0.0f, 2.0f),
+                    .coherence = clamp_unit(state->sync_quality)
+                };
+                TRS dream_trs_snapshot = {
+                    .alpha = introspect_get_last_trs_alpha(),
+                    .sm_influence = metrics.influence,
+                    .sm_harmony = harmony_metrics.harmony,
+                    .sm_consent = metrics.consent,
+                    .warmup = 0
+                };
+                Astro fallback_astro;
+                const Astro *astro_ref = &substrate_astro;
+                if (!substrate_astro_enabled) {
+                    memset(&fallback_astro, 0, sizeof(fallback_astro));
+                    fallback_astro.tone = clamp_unit(state->resonance);
+                    fallback_astro.memory = clamp_unit(state->memory_trace * 0.5f + 0.5f);
+                    fallback_astro.last_stability = clamp_unit(state->sync_quality);
+                    fallback_astro.last_wave = clamp_unit(fmodf(state->phase_offset, 1.0f));
+                    fallback_astro.last_gain = substrate_dream_feedback;
+                    astro_ref = &fallback_astro;
+                }
+                dream_tick(&substrate_dream_replay, astro_ref, &dream_harmony, &dream_trs_snapshot);
+                float dream_gain = dream_feedback(&substrate_dream_replay);
+                substrate_dream_feedback = dream_gain;
+                if (substrate_astro_enabled) {
+                    float projected = clamp_unit(substrate_dream_replay.memory_projection * dream_gain);
+                    float mixed = clamp_unit(0.6f * substrate_astro.memory + 0.4f * projected);
+                    substrate_astro.memory = mixed;
+                    astro_factor = clamp_range(astro_factor * dream_gain, 0.82f, 1.18f);
+                    substrate_astro_feedback = astro_factor;
+                    harmony_metrics.amp = clamp_unit(harmony_metrics.amp * dream_gain);
+                    harmony_metrics.tempo = clamp_range(harmony_metrics.tempo * dream_gain, 0.2f, 2.0f);
+                } else {
+                    float mem_hint = clamp_unit(substrate_dream_replay.memory_projection * dream_gain);
+                    state->memory_trace = clamp_unit(state->memory_trace * 0.9f + mem_hint * 0.1f);
+                }
+                substrate_dream_replay_trace_log(state->cycles, &substrate_dream_replay);
             }
             if (substrate_astro_enabled && cfg->dream_enabled) {
                 Metrics preview_metrics = metrics;
@@ -2676,7 +2814,7 @@ int main(int argc, char **argv)
     introspect_enable(&substrate_introspect_state, cfg.introspect_enabled);
     introspect_enable_harmony(
         &substrate_introspect_state,
-        cfg.harmony_enabled || cfg.dream_enabled);
+        cfg.harmony_enabled || cfg.dream_enabled || cfg.dream_replay_enabled);
     introspect_configure_trs(cfg.trs_enabled,
                              cfg.trs_alpha,
                              cfg.trs_warmup,
@@ -2691,9 +2829,38 @@ int main(int argc, char **argv)
     substrate_astro_trace_close();
     substrate_astro_window_reset();
     substrate_astro_memory_load();
+    substrate_dream_replay_trace_close();
     substrate_astro_enabled = cfg.astro_enabled;
     substrate_astro_trace_enabled = cfg.astro_trace;
     substrate_astro_feedback = 1.0f;
+    substrate_dream_replay_enabled = cfg.dream_replay_enabled;
+    substrate_dream_replay_trace = cfg.dream_replay_trace;
+    substrate_dream_feedback = 1.0f;
+    if (substrate_dream_replay_enabled) {
+        dream_init(&substrate_dream_replay);
+        if (cfg.dream_replay_cycles < 1) {
+            substrate_dream_replay.cycles = 1;
+        } else if (cfg.dream_replay_cycles > 256) {
+            substrate_dream_replay.cycles = 256;
+        } else {
+            substrate_dream_replay.cycles = cfg.dream_replay_cycles;
+        }
+        substrate_dream_replay.replay_rate = clamp_range(cfg.dream_replay_rate, 0.05f, 0.8f);
+        float decay = cfg.dream_replay_decay;
+        if (!isfinite(decay) || decay < 0.0f) {
+            decay = 0.0f;
+        } else if (decay > 0.2f) {
+            decay = 0.2f;
+        }
+        substrate_dream_replay.decay = decay;
+        if (cfg.astro_memory_set) {
+            substrate_dream_replay.memory_projection = clamp_unit(cfg.astro_memory_init);
+        } else {
+            substrate_dream_replay.memory_projection = 0.6f;
+        }
+    } else {
+        substrate_dream_replay_trace = false;
+    }
     if (substrate_astro_enabled) {
         astro_init(&substrate_astro);
         astro_set_ca_rate(&substrate_astro, cfg.astro_rate);
@@ -2736,7 +2903,7 @@ int main(int argc, char **argv)
         introspect_enable(&substrate_introspect_state, true);
         introspect_enable_harmony(
             &substrate_introspect_state,
-            cfg.harmony_enabled || cfg.dream_enabled);
+            cfg.harmony_enabled || cfg.dream_enabled || cfg.dream_replay_enabled);
         int replay_result = run_erb_replay(&cfg);
         introspect_finalize(&substrate_introspect_state);
         return replay_result;
@@ -2815,6 +2982,7 @@ int main(int argc, char **argv)
     emotion_memory_finalize();
 
     substrate_astro_trace_close();
+    substrate_dream_replay_trace_close();
 
     return 0;
 }
