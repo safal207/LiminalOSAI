@@ -24,6 +24,7 @@ typedef struct {
     int cycles;
     bool consolidate_mode;
     float memory_projection;
+    float memory_after;
     float last_gain;
 } DreamReplay;
 

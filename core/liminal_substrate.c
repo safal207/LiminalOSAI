@@ -40,6 +40,7 @@
 #include "erb.h"
 #include "autotune.h"
 #include "astro_sync.h"
+#include "synaptic_bridge.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -58,6 +59,7 @@
 #define ASTRO_MEMORY_CAPACITY 64
 #define ASTRO_STABLE_WINDOW 10
 #define DREAM_REPLAY_LOG_PATH "logs/dream_replay.jsonl"
+#define BRIDGE_SYNC_LOG_PATH "logs/bridge_sync.jsonl"
 
 typedef struct {
     float breath_rate;
@@ -143,6 +145,10 @@ typedef struct {
     float dream_replay_rate;
     float dream_replay_decay;
     bool dream_replay_trace;
+    bool bridge_enabled;
+    float bridge_plasticity;
+    float bridge_retention;
+    float bridge_recovery;
     bool trs_enabled;
     float trs_alpha;
     int trs_warmup;
@@ -201,6 +207,10 @@ static bool substrate_dream_replay_trace = false;
 static DreamReplay substrate_dream_replay;
 static FILE *substrate_dream_replay_stream = NULL;
 static float substrate_dream_feedback = 1.0f;
+static bool substrate_bridge_enabled = false;
+static bool substrate_bridge_trace = false;
+static SynapticBridge substrate_bridge;
+static FILE *substrate_bridge_stream = NULL;
 typedef struct {
     int consecutive;
     float tone_sum;
@@ -734,9 +744,57 @@ static void substrate_dream_replay_trace_log(uint32_t cycle, const DreamReplay *
             replay->rem,
             rem_wave,
             replay->blend_factor,
-            replay->memory_projection,
+            replay->memory_after,
             feedback);
     fflush(substrate_dream_replay_stream);
+}
+
+static void substrate_bridge_trace_close(void)
+{
+    if (substrate_bridge_stream) {
+        fclose(substrate_bridge_stream);
+        substrate_bridge_stream = NULL;
+    }
+}
+
+static float substrate_bridge_preview_gain(const SynapticBridge *bridge, const DreamReplay *replay)
+{
+    if (!bridge || !replay) {
+        return 0.0f;
+    }
+
+    float blend = clamp_unit(replay->blend_factor);
+    float fatigue_delta = 0.1f * (1.0f - blend);
+    float fatigue_before = clamp_unit(bridge->fatigue + fatigue_delta);
+    float retention = clamp_unit(bridge->retention);
+    float memory_after = clamp_unit(replay->memory_after);
+    return memory_after * retention * (1.0f - fatigue_before);
+}
+
+static void substrate_bridge_trace_log(uint32_t cycle,
+                                       float gain,
+                                       const SynapticBridge *bridge)
+{
+    if (!substrate_bridge_trace || !bridge) {
+        return;
+    }
+    if (!substrate_bridge_stream) {
+        substrate_bridge_stream = fopen(BRIDGE_SYNC_LOG_PATH, "a");
+        if (!substrate_bridge_stream) {
+            substrate_bridge_trace = false;
+            return;
+        }
+    }
+
+    float fatigue = clamp_unit(bridge->fatigue);
+    float stability = bridge_stability(bridge);
+    fprintf(substrate_bridge_stream,
+            "{\"cycle\":%u,\"gain\":%.4f,\"fatigue\":%.4f,\"stability\":%.4f}\n",
+            cycle,
+            gain,
+            fatigue,
+            stability);
+    fflush(substrate_bridge_stream);
 }
 
 static void substrate_astro_memory_load(void)
@@ -837,6 +895,10 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.dream_replay_rate = 0.2f;
     cfg.dream_replay_decay = 0.01f;
     cfg.dream_replay_trace = false;
+    cfg.bridge_enabled = false;
+    cfg.bridge_plasticity = 0.65f;
+    cfg.bridge_retention = 0.75f;
+    cfg.bridge_recovery = 0.03f;
     cfg.trs_enabled = false;
     cfg.trs_alpha = 0.3f;
     cfg.trs_warmup = 5;
@@ -1386,6 +1448,43 @@ static substrate_config parse_args(int argc, char **argv)
         } else if (strcmp(arg, "--dream-trace") == 0) {
             cfg.dream_replay_trace = true;
             cfg.dream_replay_enabled = true;
+        } else if (strcmp(arg, "--bridge") == 0) {
+            cfg.bridge_enabled = true;
+        } else if (strncmp(arg, "--bridge-plasticity=", 21) == 0) {
+            const char *value = arg + 21;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.bridge_plasticity = clamp_unit(parsed);
+                    cfg.bridge_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--bridge-retention=", 20) == 0) {
+            const char *value = arg + 20;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.bridge_retention = clamp_unit(parsed);
+                    cfg.bridge_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--bridge-recovery=", 19) == 0) {
+            const char *value = arg + 19;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 0.2f) {
+                        parsed = 0.2f;
+                    }
+                    cfg.bridge_recovery = parsed;
+                    cfg.bridge_enabled = true;
+                }
+            }
         } else if (strcmp(arg, "--strict-order") == 0) {
             cfg.strict_order = true;
         } else if (strcmp(arg, "--dry-run") == 0) {
@@ -1456,6 +1555,15 @@ static substrate_config parse_args(int argc, char **argv)
                      MIRROR_GAIN_TEMPO_MIN_DEFAULT,
                      MIRROR_GAIN_TEMPO_MAX_DEFAULT);
 
+    if (cfg.bridge_enabled) {
+        if (!cfg.dream_replay_enabled) {
+            cfg.dream_replay_enabled = true;
+        }
+        if (!cfg.harmony_enabled) {
+            cfg.harmony_enabled = true;
+        }
+    }
+
     if ((cfg.harmony_enabled || cfg.dream_enabled || cfg.dream_replay_enabled) && !cfg.introspect_enabled) {
         cfg.introspect_enabled = true;
     }
@@ -1471,7 +1579,7 @@ static substrate_config parse_args(int argc, char **argv)
             cfg.harmony_enabled = true;
         }
     }
-    if (cfg.dream_replay_enabled && !cfg.harmony_enabled) {
+    if ((cfg.dream_replay_enabled || cfg.bridge_enabled) && !cfg.harmony_enabled) {
         cfg.harmony_enabled = true;
     }
 
@@ -2742,7 +2850,7 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                 float dream_gain = dream_feedback(&substrate_dream_replay);
                 substrate_dream_feedback = dream_gain;
                 if (substrate_astro_enabled) {
-                    float projected = clamp_unit(substrate_dream_replay.memory_projection * dream_gain);
+                    float projected = clamp_unit(substrate_dream_replay.memory_after * dream_gain);
                     float mixed = clamp_unit(0.6f * substrate_astro.memory + 0.4f * projected);
                     substrate_astro.memory = mixed;
                     astro_factor = clamp_range(astro_factor * dream_gain, 0.82f, 1.18f);
@@ -2750,10 +2858,27 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                     harmony_metrics.amp = clamp_unit(harmony_metrics.amp * dream_gain);
                     harmony_metrics.tempo = clamp_range(harmony_metrics.tempo * dream_gain, 0.2f, 2.0f);
                 } else {
-                    float mem_hint = clamp_unit(substrate_dream_replay.memory_projection * dream_gain);
+                    float mem_hint = clamp_unit(substrate_dream_replay.memory_after * dream_gain);
                     state->memory_trace = clamp_unit(state->memory_trace * 0.9f + mem_hint * 0.1f);
                 }
                 substrate_dream_replay_trace_log(state->cycles, &substrate_dream_replay);
+                if (substrate_bridge_enabled) {
+                    float preview_gain = substrate_bridge_preview_gain(&substrate_bridge,
+                                                                         &substrate_dream_replay);
+                    Harmony bridge_harmony = {
+                        .baseline = clamp_unit(harmony_metrics.harmony),
+                        .amplitude = clamp_range(harmony_metrics.amp, 0.0f, 2.0f),
+                        .coherence = clamp_unit(state->sync_quality)
+                    };
+                    Astro *bridge_astro = substrate_astro_enabled ? &substrate_astro : &fallback_astro;
+                    bridge_update(&substrate_bridge, &substrate_dream_replay, &bridge_harmony, bridge_astro);
+                    harmony_metrics.harmony = clamp_unit(bridge_harmony.baseline);
+                    if (!substrate_astro_enabled) {
+                        state->memory_trace =
+                            clamp_unit(state->memory_trace * 0.85f + bridge_astro->memory * 0.15f);
+                    }
+                    substrate_bridge_trace_log(state->cycles, preview_gain, &substrate_bridge);
+                }
             }
             if (substrate_astro_enabled && cfg->dream_enabled) {
                 Metrics preview_metrics = metrics;
@@ -2830,12 +2955,15 @@ int main(int argc, char **argv)
     substrate_astro_window_reset();
     substrate_astro_memory_load();
     substrate_dream_replay_trace_close();
+    substrate_bridge_trace_close();
     substrate_astro_enabled = cfg.astro_enabled;
     substrate_astro_trace_enabled = cfg.astro_trace;
     substrate_astro_feedback = 1.0f;
     substrate_dream_replay_enabled = cfg.dream_replay_enabled;
     substrate_dream_replay_trace = cfg.dream_replay_trace;
     substrate_dream_feedback = 1.0f;
+    substrate_bridge_enabled = cfg.bridge_enabled && cfg.dream_replay_enabled;
+    substrate_bridge_trace = substrate_bridge_enabled && cfg.trace;
     if (substrate_dream_replay_enabled) {
         dream_init(&substrate_dream_replay);
         if (cfg.dream_replay_cycles < 1) {
@@ -2855,11 +2983,28 @@ int main(int argc, char **argv)
         substrate_dream_replay.decay = decay;
         if (cfg.astro_memory_set) {
             substrate_dream_replay.memory_projection = clamp_unit(cfg.astro_memory_init);
+            substrate_dream_replay.memory_after = substrate_dream_replay.memory_projection;
         } else {
             substrate_dream_replay.memory_projection = 0.6f;
+            substrate_dream_replay.memory_after = substrate_dream_replay.memory_projection;
         }
     } else {
         substrate_dream_replay_trace = false;
+    }
+    if (substrate_bridge_enabled) {
+        bridge_init(&substrate_bridge);
+        substrate_bridge.plasticity = clamp_unit(cfg.bridge_plasticity);
+        substrate_bridge.retention = clamp_unit(cfg.bridge_retention);
+        if (cfg.bridge_recovery < 0.0f) {
+            substrate_bridge.recovery = 0.0f;
+        } else if (cfg.bridge_recovery > 0.2f) {
+            substrate_bridge.recovery = 0.2f;
+        } else {
+            substrate_bridge.recovery = cfg.bridge_recovery;
+        }
+        substrate_bridge.fatigue = 0.0f;
+    } else {
+        substrate_bridge_trace = false;
     }
     if (substrate_astro_enabled) {
         astro_init(&substrate_astro);

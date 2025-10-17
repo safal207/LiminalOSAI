@@ -51,6 +51,7 @@ void dream_init(DreamReplay *d)
     d->cycles = 16;
     d->consolidate_mode = false;
     d->memory_projection = 0.6f;
+    d->memory_after = 0.6f;
     d->last_gain = 1.0f;
 }
 
@@ -143,6 +144,7 @@ void dream_tick(DreamReplay *d,
     d->rem = phase;
     float projected = clamp_unit(memory_projection);
     d->memory_projection = 0.7f * d->memory_projection + 0.3f * projected;
+    d->memory_after = d->memory_projection;
     float averaged_gain = gain_sum / (float)micro_cycles;
     averaged_gain = clamp_range(averaged_gain, 0.8f, 1.1f);
     d->last_gain = 0.7f * d->last_gain + 0.3f * averaged_gain;
