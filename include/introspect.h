@@ -57,5 +57,6 @@ void introspect_set_dream_preview(State *state, DreamCouplerPhase phase, bool ac
 float introspect_get_last_trs_delta(void);
 float introspect_get_last_trs_alpha(void);
 float introspect_get_last_trs_error(void);
+bool introspect_apply_trs_tune(float alpha, int warmup);
 
 #endif /* LIMINAL_INTROSPECT_H */

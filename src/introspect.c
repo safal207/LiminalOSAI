@@ -649,3 +649,17 @@ float introspect_get_last_trs_error(void)
 {
     return (float)g_last_trs_err;
 }
+
+bool introspect_apply_trs_tune(float alpha, int warmup)
+{
+    float clamped_alpha = clamp_trs_alpha_value(alpha);
+    int clamped_warmup = clamp_trs_warmup_value(warmup);
+    g_trs_alpha = clamped_alpha;
+    g_trs_warmup_target = clamped_warmup;
+    if (g_trs_enabled) {
+        g_trs_state.alpha = clamped_alpha;
+        g_trs_state.warmup = clamped_warmup;
+        return true;
+    }
+    return false;
+}
