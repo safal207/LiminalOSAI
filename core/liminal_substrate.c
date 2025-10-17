@@ -40,6 +40,7 @@
 #include "erb.h"
 #include "autotune.h"
 #include "astro_sync.h"
+#include "neural_resonance.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -58,6 +59,7 @@
 #define ASTRO_MEMORY_CAPACITY 64
 #define ASTRO_STABLE_WINDOW 10
 #define DREAM_REPLAY_LOG_PATH "logs/dream_replay.jsonl"
+#define RESONANCE_LOG_PATH "logs/resonance_field.jsonl"
 
 typedef struct {
     float breath_rate;
@@ -143,6 +145,11 @@ typedef struct {
     float dream_replay_rate;
     float dream_replay_decay;
     bool dream_replay_trace;
+    bool resonance_enabled;
+    float resonance_init_coherence;
+    float resonance_init_phase;
+    bool resonance_coherence_set;
+    bool resonance_phase_set;
     bool trs_enabled;
     float trs_alpha;
     int trs_warmup;
@@ -201,6 +208,9 @@ static bool substrate_dream_replay_trace = false;
 static DreamReplay substrate_dream_replay;
 static FILE *substrate_dream_replay_stream = NULL;
 static float substrate_dream_feedback = 1.0f;
+static bool substrate_resonance_enabled = false;
+static NeuralResonance substrate_resonance;
+static FILE *substrate_resonance_stream = NULL;
 typedef struct {
     int consecutive;
     float tone_sum;
@@ -739,6 +749,67 @@ static void substrate_dream_replay_trace_log(uint32_t cycle, const DreamReplay *
     fflush(substrate_dream_replay_stream);
 }
 
+static void substrate_resonance_log_close(void)
+{
+    if (substrate_resonance_stream) {
+        fclose(substrate_resonance_stream);
+        substrate_resonance_stream = NULL;
+    }
+}
+
+static void substrate_resonance_log(uint32_t cycle, const NeuralResonance *res, float stability)
+{
+    if (!substrate_resonance_enabled || !res) {
+        return;
+    }
+    if (!substrate_resonance_stream) {
+        substrate_resonance_stream = fopen(RESONANCE_LOG_PATH, "a");
+        if (!substrate_resonance_stream) {
+            return;
+        }
+    }
+    fprintf(substrate_resonance_stream,
+            "{\"cycle\":%u,\"freq\":%.3f,\"coherence\":%.3f,\"phase\":%.3f,\"stability\":%.3f}\n",
+            cycle,
+            res->freq_hz,
+            res->coherence,
+            res->phase_shift,
+            stability);
+    fflush(substrate_resonance_stream);
+}
+
+static SynapticBridge substrate_synaptic_bridge_snapshot(const liminal_state *state,
+                                                         const substrate_config *cfg,
+                                                         const EmpathicResponse *response)
+{
+    SynapticBridge bridge;
+    bridge.alignment = state ? clamp_unit(state->sync_quality) : 0.0f;
+    bridge.stability = state ? clamp_unit(state->vitality) : 0.0f;
+    bridge.resonance_flow = state ? clamp_unit(state->resonance) : 0.0f;
+    float phase = state ? fmodf(state->phase_offset, 1.0f) : 0.0f;
+    if (phase > 0.5f) {
+        phase -= 1.0f;
+    } else if (phase < -0.5f) {
+        phase += 1.0f;
+    }
+
+    if (response) {
+        float target = clamp_unit(response->target_coherence);
+        bridge.alignment = clamp_unit(0.5f * bridge.alignment + 0.5f * target);
+        bridge.stability = clamp_unit(0.5f * bridge.stability + 0.5f * target);
+        bridge.resonance_flow = clamp_unit(0.5f * bridge.resonance_flow + 0.5f * clamp_unit(response->resonance));
+        phase += (response->coherence_bias - 0.5f) * 0.1f;
+    }
+
+    if (cfg && cfg->human_bridge && state) {
+        float phase_alignment = clamp_unit(fabsf(state->phase_offset - 0.5f) * 2.0f);
+        bridge.alignment = clamp_unit(0.6f * bridge.alignment + 0.4f * (1.0f - phase_alignment));
+    }
+
+    bridge.phase_offset = clamp_range(phase, -0.5f, 0.5f);
+    return bridge;
+}
+
 static void substrate_astro_memory_load(void)
 {
     substrate_astro_count = astro_memory_load(ASTRO_MEMORY_PATH, substrate_astro_cache, ASTRO_MEMORY_CAPACITY);
@@ -837,6 +908,11 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.dream_replay_rate = 0.2f;
     cfg.dream_replay_decay = 0.01f;
     cfg.dream_replay_trace = false;
+    cfg.resonance_enabled = false;
+    cfg.resonance_init_coherence = 0.78f;
+    cfg.resonance_init_phase = 0.0f;
+    cfg.resonance_coherence_set = false;
+    cfg.resonance_phase_set = false;
     cfg.trs_enabled = false;
     cfg.trs_alpha = 0.3f;
     cfg.trs_warmup = 5;
@@ -1386,6 +1462,40 @@ static substrate_config parse_args(int argc, char **argv)
         } else if (strcmp(arg, "--dream-trace") == 0) {
             cfg.dream_replay_trace = true;
             cfg.dream_replay_enabled = true;
+        } else if (strcmp(arg, "--resonance") == 0) {
+            cfg.resonance_enabled = true;
+        } else if (strncmp(arg, "--resonance-coherence=", 22) == 0) {
+            const char *value = arg + 22;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    cfg.resonance_init_coherence = parsed;
+                    cfg.resonance_coherence_set = true;
+                    cfg.resonance_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--resonance-phase=", 19) == 0) {
+            const char *value = arg + 19;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < -0.5f) {
+                        parsed = -0.5f;
+                    } else if (parsed > 0.5f) {
+                        parsed = 0.5f;
+                    }
+                    cfg.resonance_init_phase = parsed;
+                    cfg.resonance_phase_set = true;
+                    cfg.resonance_enabled = true;
+                }
+            }
         } else if (strcmp(arg, "--strict-order") == 0) {
             cfg.strict_order = true;
         } else if (strcmp(arg, "--dry-run") == 0) {
@@ -2714,9 +2824,25 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                     substrate_astro_window_reset();
                 }
             }
+            Astro fallback_astro;
+            const Astro *astro_snapshot = NULL;
+            if (substrate_astro_enabled) {
+                astro_snapshot = &substrate_astro;
+            } else {
+                memset(&fallback_astro, 0, sizeof(fallback_astro));
+                fallback_astro.tone = clamp_unit(state->resonance);
+                fallback_astro.memory = clamp_unit(state->memory_trace * 0.5f + 0.5f);
+                fallback_astro.last_stability = clamp_unit(state->sync_quality);
+                fallback_astro.last_wave = clamp_unit(fmodf(state->phase_offset, 1.0f));
+                fallback_astro.last_gain = substrate_dream_feedback;
+                fallback_astro.tempo = clamp_range(state->breath_rate, 0.0f, 2.0f);
+                fallback_astro.ca_rate = SUBSTRATE_BASE_RATE;
+                astro_snapshot = &fallback_astro;
+            }
             if (substrate_dream_replay_enabled) {
                 Harmony dream_harmony = {
                     .baseline = clamp_unit(harmony_metrics.harmony),
+                    .agreement = clamp_unit(0.5f * (metrics.consent + metrics.influence)),
                     .amplitude = clamp_range(harmony_metrics.amp, 0.0f, 2.0f),
                     .coherence = clamp_unit(state->sync_quality)
                 };
@@ -2727,18 +2853,7 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                     .sm_consent = metrics.consent,
                     .warmup = 0
                 };
-                Astro fallback_astro;
-                const Astro *astro_ref = &substrate_astro;
-                if (!substrate_astro_enabled) {
-                    memset(&fallback_astro, 0, sizeof(fallback_astro));
-                    fallback_astro.tone = clamp_unit(state->resonance);
-                    fallback_astro.memory = clamp_unit(state->memory_trace * 0.5f + 0.5f);
-                    fallback_astro.last_stability = clamp_unit(state->sync_quality);
-                    fallback_astro.last_wave = clamp_unit(fmodf(state->phase_offset, 1.0f));
-                    fallback_astro.last_gain = substrate_dream_feedback;
-                    astro_ref = &fallback_astro;
-                }
-                dream_tick(&substrate_dream_replay, astro_ref, &dream_harmony, &dream_trs_snapshot);
+                dream_tick(&substrate_dream_replay, astro_snapshot, &dream_harmony, &dream_trs_snapshot);
                 float dream_gain = dream_feedback(&substrate_dream_replay);
                 substrate_dream_feedback = dream_gain;
                 if (substrate_astro_enabled) {
@@ -2781,6 +2896,39 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                 tempo_signal *= astro_factor;
                 coupling_metrics.tempo = tempo_signal;
                 dream_couple(&substrate_introspect_state, &coupling_metrics);
+            }
+            if (substrate_resonance_enabled) {
+                const Astro *astro_for_resonance = astro_snapshot ? astro_snapshot : &fallback_astro;
+                const DreamReplay *dream_ref = substrate_dream_replay_enabled ? &substrate_dream_replay : NULL;
+                Harmony resonance_harmony = {
+                    .baseline = clamp_unit(harmony_metrics.harmony),
+                    .agreement = clamp_unit(0.5f * (metrics.consent + metrics.influence)),
+                    .amplitude = clamp_range(harmony_metrics.amp, 0.0f, 2.0f),
+                    .coherence = clamp_unit(state->sync_quality)
+                };
+                const EmpathicResponse *bridge_response = cfg->empathic_enabled ? &response : NULL;
+                SynapticBridge bridge_state = substrate_synaptic_bridge_snapshot(state, cfg, bridge_response);
+                resonance_update(&substrate_resonance, &resonance_harmony, astro_for_resonance, dream_ref, &bridge_state);
+                float resonance_stab = resonance_stability(&substrate_resonance);
+                if (substrate_resonance.coherence > 0.85f) {
+                    float phase_feedback = clamp_range(substrate_resonance.phase_shift, -0.25f, 0.25f);
+                    state->phase_offset = fmodf(state->phase_offset + phase_feedback, 1.0f);
+                    if (state->phase_offset < 0.0f) {
+                        state->phase_offset += 1.0f;
+                    }
+                    state->sync_quality = clamp_unit(state->sync_quality * 0.8f + substrate_resonance.coherence * 0.2f);
+                }
+                state->resonance = clamp_unit(state->resonance * 0.7f + clamp_unit(substrate_resonance.amplitude) * 0.3f);
+                state->vitality = clamp_unit(state->vitality * 0.9f + resonance_stab * 0.1f);
+                if (cfg->trace) {
+                    printf("[resonance-layer] freq=%.3fHz coherence=%.3f amp=%.3f phase=%.3f stability=%.3f\n",
+                           substrate_resonance.freq_hz,
+                           substrate_resonance.coherence,
+                           substrate_resonance.amplitude,
+                           substrate_resonance.phase_shift,
+                           resonance_stab);
+                }
+                substrate_resonance_log(state->cycles, &substrate_resonance, resonance_stab);
             }
             if (substrate_astro_enabled) {
                 float rate_adjust = 1.0f / substrate_astro_feedback;
@@ -2860,6 +3008,18 @@ int main(int argc, char **argv)
         }
     } else {
         substrate_dream_replay_trace = false;
+    }
+    substrate_resonance_enabled = cfg.resonance_enabled;
+    substrate_resonance_stream = NULL;
+    resonance_init(&substrate_resonance);
+    if (substrate_resonance_enabled) {
+        if (cfg.resonance_coherence_set) {
+            substrate_resonance.coherence = clamp_unit(cfg.resonance_init_coherence);
+            substrate_resonance.amplitude = clamp_unit(substrate_resonance.coherence * 1.2f);
+        }
+        if (cfg.resonance_phase_set) {
+            substrate_resonance.phase_shift = clamp_range(cfg.resonance_init_phase, -0.25f, 0.25f);
+        }
     }
     if (substrate_astro_enabled) {
         astro_init(&substrate_astro);
@@ -2983,6 +3143,7 @@ int main(int argc, char **argv)
 
     substrate_astro_trace_close();
     substrate_dream_replay_trace_close();
+    substrate_resonance_log_close();
 
     return 0;
 }
