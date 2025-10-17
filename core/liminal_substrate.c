@@ -211,6 +211,7 @@ static float substrate_dream_feedback = 1.0f;
 static bool substrate_resonance_enabled = false;
 static NeuralResonance substrate_resonance;
 static FILE *substrate_resonance_stream = NULL;
+static void ensure_logs_directory_path(void);
 typedef struct {
     int consecutive;
     float tone_sum;
@@ -730,6 +731,7 @@ static void substrate_dream_replay_trace_log(uint32_t cycle, const DreamReplay *
         return;
     }
     if (!substrate_dream_replay_stream) {
+        ensure_logs_directory_path();
         substrate_dream_replay_stream = fopen(DREAM_REPLAY_LOG_PATH, "a");
         if (!substrate_dream_replay_stream) {
             substrate_dream_replay_trace = false;
@@ -763,6 +765,7 @@ static void substrate_resonance_log(uint32_t cycle, const NeuralResonance *res, 
         return;
     }
     if (!substrate_resonance_stream) {
+        ensure_logs_directory_path();
         substrate_resonance_stream = fopen(RESONANCE_LOG_PATH, "a");
         if (!substrate_resonance_stream) {
             return;
