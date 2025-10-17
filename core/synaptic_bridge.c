@@ -43,7 +43,8 @@ void bridge_update(SynapticBridge *b,
     float blend = clamp_unit(d->blend_factor);
     float fatigue_before = clamp_unit(b->fatigue + 0.1f * (1.0f - blend));
     float memory_after = clamp_unit(d->memory_after);
-    float gain = memory_after * retention * (1.0f - fatigue_before);
+    float dream_gain = dream_feedback(d);
+    float gain = memory_after * dream_gain * retention * (1.0f - fatigue_before);
 
     if (h) {
         float baseline = h->baseline;
