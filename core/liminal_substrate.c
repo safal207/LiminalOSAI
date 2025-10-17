@@ -768,7 +768,8 @@ static float substrate_bridge_preview_gain(const SynapticBridge *bridge, const D
     float fatigue_before = clamp_unit(bridge->fatigue + fatigue_delta);
     float retention = clamp_unit(bridge->retention);
     float memory_after = clamp_unit(replay->memory_after);
-    return memory_after * retention * (1.0f - fatigue_before);
+    float dream_gain = dream_feedback(replay);
+    return memory_after * dream_gain * retention * (1.0f - fatigue_before);
 }
 
 static void substrate_bridge_trace_log(uint32_t cycle,
