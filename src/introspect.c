@@ -8,6 +8,7 @@
 #include "dream_coupler.h"
 #include "trs_filter.h"
 #include "trs_adapt.h"
+#include "erb.h"
 
 #include <inttypes.h>
 #include <limits.h>
@@ -52,6 +53,16 @@ static float g_trs_kd = TRS_ADAPT_KD_DEFAULT;
 static TRSAdapt g_trs_adapt;
 static bool g_trs_adapt_initialized = false;
 static FILE *g_trs_adapt_stream = NULL;
+static double g_last_trs_delta = 0.0;
+static double g_last_trs_alpha = 0.0;
+static double g_last_trs_err = 0.0;
+
+static bool g_erb_enabled = false;
+static bool g_erb_initialized = false;
+static ERB g_erb;
+static int g_erb_pre_value = 0;
+static int g_erb_post_value = 0;
+static float g_erb_spike_value = 0.0f;
 
 static double sanitize_value(double value)
 {
@@ -160,6 +171,48 @@ static void format_timestamp(char *buffer, size_t size)
     }
 }
 
+static void sanitize_erb_windows(int *pre, int *post)
+{
+    if (!pre || !post) {
+        return;
+    }
+    if (*pre < 0) {
+        *pre = 0;
+    }
+    if (*post < 0) {
+        *post = 0;
+    }
+    if (*pre > ERB_MAX_LEN - 1) {
+        *pre = ERB_MAX_LEN - 1;
+    }
+    if (*post > ERB_MAX_LEN - 1) {
+        *post = ERB_MAX_LEN - 1;
+    }
+    int total = *pre + *post + 1;
+    if (total > ERB_MAX_LEN) {
+        int overflow = total - ERB_MAX_LEN;
+        if (*post >= overflow) {
+            *post -= overflow;
+        } else {
+            overflow -= *post;
+            *post = 0;
+            if (*pre >= overflow) {
+                *pre -= overflow;
+            } else {
+                *pre = 0;
+            }
+        }
+    }
+}
+
+static float sanitize_spike_threshold(float value)
+{
+    if (!isfinite(value) || value < 0.0f) {
+        return 0.0f;
+    }
+    return value;
+}
+
 void introspect_state_init(State *state)
 {
     if (!state) {
@@ -187,6 +240,15 @@ void introspect_state_init(State *state)
     }
     g_trs_initialized = false;
     g_trs_adapt_initialized = false;
+    g_last_trs_delta = 0.0;
+    g_last_trs_alpha = 0.0;
+    g_last_trs_err = 0.0;
+    if (g_erb_enabled) {
+        erb_init(&g_erb, g_erb_pre_value, g_erb_post_value, g_erb_spike_value);
+        g_erb_initialized = true;
+    } else {
+        g_erb_initialized = false;
+    }
 }
 
 void introspect_enable(State *state, bool enabled)
@@ -279,6 +341,34 @@ void introspect_configure_trs(bool enabled,
     if (!g_trs_adapt_enabled && g_trs_adapt_stream) {
         fclose(g_trs_adapt_stream);
         g_trs_adapt_stream = NULL;
+    }
+}
+
+void introspect_configure_erb(bool enabled, int pre, int post, float spike_thr, bool dry_run)
+{
+    int sanitized_pre = pre;
+    int sanitized_post = post;
+    sanitize_erb_windows(&sanitized_pre, &sanitized_post);
+    float sanitized_spike = sanitize_spike_threshold(spike_thr);
+
+    if (dry_run) {
+        printf("erb config: enabled=%s pre=%d post=%d spike=%.3f\n",
+               enabled ? "yes" : "no",
+               sanitized_pre,
+               sanitized_post,
+               sanitized_spike);
+        return;
+    }
+
+    g_erb_enabled = enabled;
+    g_erb_pre_value = sanitized_pre;
+    g_erb_post_value = sanitized_post;
+    g_erb_spike_value = sanitized_spike;
+    if (enabled) {
+        erb_init(&g_erb, g_erb_pre_value, g_erb_post_value, g_erb_spike_value);
+        g_erb_initialized = true;
+    } else {
+        g_erb_initialized = false;
     }
 }
 
@@ -441,6 +531,9 @@ void introspect_tick(State *state, Metrics *metrics)
     metrics->consent = (float)sm_consent;
     metrics->harmony = (float)sm_harmony;
 
+    double avg_amp_value = sanitize_value(avg_amp);
+    double avg_tempo_value = sanitize_value(avg_tempo);
+
     if (fprintf(state->stream,
                 "{\"timestamp\":\"%s\",\"cycle\":%" PRIu64 ",\"amp\":%.4f,\"tempo\":%.4f,"
                 "\"consent\":%.4f,\"influence\":%.4f,\"bond_coh\":%.4f,\"error_margin\":%.4f,"
@@ -449,8 +542,8 @@ void introspect_tick(State *state, Metrics *metrics)
                 "\"trs_delta\":%.4f,\"trs_alpha\":%.4f,\"trs_target\":%.4f,\"trs_err\":%.4f}\n",
                 timestamp,
                 state->cycle_index,
-                sanitize_value(avg_amp),
-                sanitize_value(avg_tempo),
+                avg_amp_value,
+                avg_tempo_value,
                 sm_consent,
                 sm_influence,
                 bond_coh,
@@ -509,7 +602,50 @@ void introspect_tick(State *state, Metrics *metrics)
     state->harmony_line_open = false;
     state->last_harmony = sm_harmony;
 
+    g_last_trs_delta = trs_delta;
+    g_last_trs_alpha = trs_alpha_value;
+    g_last_trs_err = trs_err_value;
+
+    if (g_erb_enabled && g_erb_initialized) {
+        TickSnapshot snapshot;
+        snapshot.amp = (float)avg_amp_value;
+        snapshot.tempo = (float)avg_tempo_value;
+        snapshot.consent = (float)sm_consent;
+        snapshot.influence = (float)sm_influence;
+        snapshot.harmony = (float)sm_harmony;
+        snapshot.dream = (float)state->dream_phase;
+        snapshot.trs_delta = (float)trs_delta;
+        snapshot.trs_alpha = (float)trs_alpha_value;
+        erb_tick_ring_push(snapshot);
+        uint32_t tag = 0U;
+        if ((float)trs_delta >= g_erb.spike_thr) {
+            tag |= ERB_TAG_SPIKE;
+        }
+        if (fabsf((float)(sm_consent - sm_influence)) < 0.05f) {
+            tag |= ERB_TAG_ALIGN;
+        }
+        if ((float)sm_harmony < 0.2f) {
+            tag |= ERB_TAG_LOW_HARM;
+        }
+        erb_maybe_capture(&g_erb, tag);
+    }
+
     state->amp_sum = 0.0;
     state->tempo_sum = 0.0;
     state->sample_count = 0U;
+}
+
+float introspect_get_last_trs_delta(void)
+{
+    return (float)g_last_trs_delta;
+}
+
+float introspect_get_last_trs_alpha(void)
+{
+    return (float)g_last_trs_alpha;
+}
+
+float introspect_get_last_trs_error(void)
+{
+    return (float)g_last_trs_err;
 }
