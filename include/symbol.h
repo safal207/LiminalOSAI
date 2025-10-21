@@ -23,6 +23,7 @@ void symbol_register(const char *key, float resonance);
 Symbol *symbol_find(const char *key);
 void symbol_decay(void);
 void symbol_create_link(const char *from_key, const char *to_key, float weight);
+void symbol_nudge_from_kiss(void);
 
 #ifdef __cplusplus
 }

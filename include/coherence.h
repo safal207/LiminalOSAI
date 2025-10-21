@@ -25,5 +25,6 @@ void coherence_register_delay(double seconds);
 double coherence_last_delay(void);
 float coherence_adjustment(void);
 void coherence_set_pid_scale(float scale);
+void coherence_apply_kiss_boost(float delta);
 
 #endif /* LIMINAL_COHERENCE_H */

@@ -533,13 +533,14 @@ void introspect_tick(State *state, Metrics *metrics)
 
     double avg_amp_value = sanitize_value(avg_amp);
     double avg_tempo_value = sanitize_value(avg_tempo);
+    int kiss_flag = metrics->kiss ? 1 : 0;
 
     if (fprintf(state->stream,
                 "{\"timestamp\":\"%s\",\"cycle\":%" PRIu64 ",\"amp\":%.4f,\"tempo\":%.4f,"
                 "\"consent\":%.4f,\"influence\":%.4f,\"bond_coh\":%.4f,\"error_margin\":%.4f,"
                 "\"harmony\":%.4f,\"dream\":\"%s\",\"inf_raw\":%.4f,\"inf_sm\":%.4f,"
                 "\"harm_raw\":%.4f,\"harm_sm\":%.4f,\"cons_raw\":%.4f,\"cons_sm\":%.4f,"
-                "\"trs_delta\":%.4f,\"trs_alpha\":%.4f,\"trs_target\":%.4f,\"trs_err\":%.4f}\n",
+                "\"kiss\":%d,\"trs_delta\":%.4f,\"trs_alpha\":%.4f,\"trs_target\":%.4f,\"trs_err\":%.4f}\n",
                 timestamp,
                 state->cycle_index,
                 avg_amp_value,
@@ -556,6 +557,7 @@ void introspect_tick(State *state, Metrics *metrics)
                 sm_harmony,
                 consent_raw,
                 sm_consent,
+                kiss_flag,
                 trs_delta,
                 trs_alpha_value,
                 trs_target_value,

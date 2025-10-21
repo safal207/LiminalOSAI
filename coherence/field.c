@@ -21,6 +21,7 @@ static bool climate_logging = false;
 static unsigned long pulse_counter = 0UL;
 static float last_adjust = 0.0f;
 static float pid_scale_factor = 1.0f;
+static float kiss_boost = 0.0f;
 
 static const float ENERGY_MAX = 12.0f;
 static const float EMA_ALPHA = 0.2f;
@@ -102,6 +103,7 @@ void coherence_init(void)
     climate_logging = false;
     pulse_counter = 0UL;
     last_adjust = 0.0f;
+    kiss_boost = 0.0f;
 }
 
 void coherence_set_target(float target)
@@ -161,6 +163,17 @@ void coherence_set_pid_scale(float scale)
     pid_scale_factor = scale;
 }
 
+void coherence_apply_kiss_boost(float delta)
+{
+    if (!isfinite(delta) || delta <= 0.0f) {
+        return;
+    }
+    kiss_boost += delta;
+    if (kiss_boost > 0.5f) {
+        kiss_boost = 0.5f;
+    }
+}
+
 const CoherenceField *coherence_update(float energy_avg,
                                        float resonance_avg,
                                        float stability_avg,
@@ -207,7 +220,19 @@ const CoherenceField *coherence_update(float energy_avg,
 
     const float kP = 0.15f;
     const float kI = 0.05f;
-    last_adjust = (kP * err + kI * integral_term) * pid_scale_factor;
+    float boost_multiplier = 1.0f;
+    if (kiss_boost > 0.0f) {
+        boost_multiplier += kiss_boost;
+    }
+
+    last_adjust = (kP * err + kI * integral_term) * pid_scale_factor * boost_multiplier;
+
+    if (kiss_boost > 0.0f) {
+        kiss_boost *= 0.85f;
+        if (kiss_boost < 0.0001f) {
+            kiss_boost = 0.0f;
+        }
+    }
 
     double scale = 1.0 - (double)last_adjust;
     if (!isfinite(scale)) {
