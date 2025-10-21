@@ -730,6 +730,7 @@ static void substrate_dream_replay_trace_log(uint32_t cycle, const DreamReplay *
         return;
     }
     if (!substrate_dream_replay_stream) {
+        ensure_logs_directory_path();
         substrate_dream_replay_stream = fopen(DREAM_REPLAY_LOG_PATH, "a");
         if (!substrate_dream_replay_stream) {
             substrate_dream_replay_trace = false;
@@ -2822,9 +2823,25 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                     substrate_astro_window_reset();
                 }
             }
+            Astro fallback_astro;
+            const Astro *astro_snapshot = NULL;
+            if (substrate_astro_enabled) {
+                astro_snapshot = &substrate_astro;
+            } else {
+                memset(&fallback_astro, 0, sizeof(fallback_astro));
+                fallback_astro.tone = clamp_unit(state->resonance);
+                fallback_astro.memory = clamp_unit(state->memory_trace * 0.5f + 0.5f);
+                fallback_astro.last_stability = clamp_unit(state->sync_quality);
+                fallback_astro.last_wave = clamp_unit(fmodf(state->phase_offset, 1.0f));
+                fallback_astro.last_gain = substrate_dream_feedback;
+                fallback_astro.tempo = clamp_range(state->breath_rate, 0.0f, 2.0f);
+                fallback_astro.ca_rate = SUBSTRATE_BASE_RATE;
+                astro_snapshot = &fallback_astro;
+            }
             if (substrate_dream_replay_enabled) {
                 Harmony dream_harmony = {
                     .baseline = clamp_unit(harmony_metrics.harmony),
+                    .agreement = clamp_unit(0.5f * (metrics.consent + metrics.influence)),
                     .amplitude = clamp_range(harmony_metrics.amp, 0.0f, 2.0f),
                     .coherence = clamp_unit(state->sync_quality)
                 };
@@ -2835,18 +2852,7 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                     .sm_consent = metrics.consent,
                     .warmup = 0
                 };
-                Astro fallback_astro;
-                const Astro *astro_ref = &substrate_astro;
-                if (!substrate_astro_enabled) {
-                    memset(&fallback_astro, 0, sizeof(fallback_astro));
-                    fallback_astro.tone = clamp_unit(state->resonance);
-                    fallback_astro.memory = clamp_unit(state->memory_trace * 0.5f + 0.5f);
-                    fallback_astro.last_stability = clamp_unit(state->sync_quality);
-                    fallback_astro.last_wave = clamp_unit(fmodf(state->phase_offset, 1.0f));
-                    fallback_astro.last_gain = substrate_dream_feedback;
-                    astro_ref = &fallback_astro;
-                }
-                dream_tick(&substrate_dream_replay, astro_ref, &dream_harmony, &dream_trs_snapshot);
+                dream_tick(&substrate_dream_replay, astro_snapshot, &dream_harmony, &dream_trs_snapshot);
                 float dream_gain = dream_feedback(&substrate_dream_replay);
                 substrate_dream_feedback = dream_gain;
                 if (substrate_astro_enabled) {
@@ -2906,6 +2912,39 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                 tempo_signal *= astro_factor;
                 coupling_metrics.tempo = tempo_signal;
                 dream_couple(&substrate_introspect_state, &coupling_metrics);
+            }
+            if (substrate_resonance_enabled) {
+                const Astro *astro_for_resonance = astro_snapshot ? astro_snapshot : &fallback_astro;
+                const DreamReplay *dream_ref = substrate_dream_replay_enabled ? &substrate_dream_replay : NULL;
+                Harmony resonance_harmony = {
+                    .baseline = clamp_unit(harmony_metrics.harmony),
+                    .agreement = clamp_unit(0.5f * (metrics.consent + metrics.influence)),
+                    .amplitude = clamp_range(harmony_metrics.amp, 0.0f, 2.0f),
+                    .coherence = clamp_unit(state->sync_quality)
+                };
+                const EmpathicResponse *bridge_response = cfg->empathic_enabled ? &response : NULL;
+                SynapticBridge bridge_state = substrate_synaptic_bridge_snapshot(state, cfg, bridge_response);
+                resonance_update(&substrate_resonance, &resonance_harmony, astro_for_resonance, dream_ref, &bridge_state);
+                float resonance_stab = resonance_stability(&substrate_resonance);
+                if (substrate_resonance.coherence > 0.85f) {
+                    float phase_feedback = clamp_range(substrate_resonance.phase_shift, -0.25f, 0.25f);
+                    state->phase_offset = fmodf(state->phase_offset + phase_feedback, 1.0f);
+                    if (state->phase_offset < 0.0f) {
+                        state->phase_offset += 1.0f;
+                    }
+                    state->sync_quality = clamp_unit(state->sync_quality * 0.8f + substrate_resonance.coherence * 0.2f);
+                }
+                state->resonance = clamp_unit(state->resonance * 0.7f + clamp_unit(substrate_resonance.amplitude) * 0.3f);
+                state->vitality = clamp_unit(state->vitality * 0.9f + resonance_stab * 0.1f);
+                if (cfg->trace) {
+                    printf("[resonance-layer] freq=%.3fHz coherence=%.3f amp=%.3f phase=%.3f stability=%.3f\n",
+                           substrate_resonance.freq_hz,
+                           substrate_resonance.coherence,
+                           substrate_resonance.amplitude,
+                           substrate_resonance.phase_shift,
+                           resonance_stab);
+                }
+                substrate_resonance_log(state->cycles, &substrate_resonance, resonance_stab);
             }
             if (substrate_astro_enabled) {
                 float rate_adjust = 1.0f / substrate_astro_feedback;
@@ -3128,6 +3167,7 @@ int main(int argc, char **argv)
 
     substrate_astro_trace_close();
     substrate_dream_replay_trace_close();
+    substrate_resonance_log_close();
 
     return 0;
 }
