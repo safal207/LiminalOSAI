@@ -2197,8 +2197,9 @@ int main(int argc, char **argv)
     kernel_options opts = parse_options(argc, argv);
 
     introspect_state_init(&introspect_state);
+    bool introspect_harmony = opts.harmony_enabled || opts.dream_enabled;
     introspect_enable(&introspect_state, opts.introspect_enabled);
-    introspect_enable_harmony(&introspect_state, opts.harmony_enabled);
+    introspect_enable_harmony(&introspect_state, introspect_harmony);
 
     if (opts.dry_run) {
         char sequence[128];
