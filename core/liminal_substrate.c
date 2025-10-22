@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <math.h>
 #include <time.h>
 #include <limits.h>
@@ -41,6 +42,8 @@
 #include "autotune.h"
 #include "astro_sync.h"
 #include "synaptic_bridge.h"
+#include "resonant.h"
+#include "kiss.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -159,6 +162,13 @@ typedef struct {
     float trs_kp;
     float trs_ki;
     float trs_kd;
+    bool kiss_enabled;
+    float kiss_trust_threshold;
+    float kiss_presence_threshold;
+    float kiss_harmony_threshold;
+    int kiss_warmup_cycles;
+    int kiss_refractory_cycles;
+    float kiss_alpha;
     bool erb_enabled;
     int erb_pre;
     int erb_post;
@@ -198,6 +208,7 @@ static const float SUBSTRATE_BASE_RATE = 0.72f;
 static Astro substrate_astro;
 static bool substrate_astro_enabled = false;
 static bool substrate_astro_trace_enabled = false;
+static bool substrate_kiss_enabled = false;
 static FILE *substrate_astro_trace_stream = NULL;
 static float substrate_astro_feedback = 1.0f;
 static AstroMemory substrate_astro_cache[ASTRO_MEMORY_CAPACITY];
@@ -351,6 +362,50 @@ static bool parse_int_range(const char *spec, int *out_min, int *out_max)
     *out_min = (int)min_value;
     *out_max = (int)max_value;
     return true;
+}
+
+static void parse_kiss_thresholds(substrate_config *cfg, const char *value)
+{
+    if (!cfg || !value) {
+        return;
+    }
+
+    char buffer[128];
+    strncpy(buffer, value, sizeof(buffer) - 1U);
+    buffer[sizeof(buffer) - 1U] = '\0';
+
+    char *token = strtok(buffer, ",");
+    while (token) {
+        while (*token && isspace((unsigned char)*token)) {
+            ++token;
+        }
+        char *colon = strchr(token, ':');
+        if (colon && colon[1] != '\0') {
+            *colon = '\0';
+            const char *name = token;
+            const char *val_text = colon + 1;
+            while (*val_text && isspace((unsigned char)*val_text)) {
+                ++val_text;
+            }
+            char *end = NULL;
+            float parsed = strtof(val_text, &end);
+            if (end != val_text && isfinite(parsed)) {
+                if (parsed < 0.0f) {
+                    parsed = 0.0f;
+                } else if (parsed > 1.0f) {
+                    parsed = 1.0f;
+                }
+                if (strcmp(name, "trust") == 0 || strcmp(name, "tr") == 0) {
+                    cfg->kiss_trust_threshold = parsed;
+                } else if (strcmp(name, "pres") == 0 || strcmp(name, "presence") == 0) {
+                    cfg->kiss_presence_threshold = parsed;
+                } else if (strcmp(name, "harm") == 0 || strcmp(name, "harmony") == 0) {
+                    cfg->kiss_harmony_threshold = parsed;
+                }
+            }
+        }
+        token = strtok(NULL, ",");
+    }
 }
 
 static bool extract_profile_float(const char *json, const char *field, float *out)
@@ -910,6 +965,13 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.trs_kp = 0.4f;
     cfg.trs_ki = 0.05f;
     cfg.trs_kd = 0.1f;
+    cfg.kiss_enabled = false;
+    cfg.kiss_trust_threshold = 0.80f;
+    cfg.kiss_presence_threshold = 0.70f;
+    cfg.kiss_harmony_threshold = 0.85f;
+    cfg.kiss_warmup_cycles = 10;
+    cfg.kiss_refractory_cycles = 5;
+    cfg.kiss_alpha = 0.25f;
     cfg.erb_enabled = false;
     cfg.erb_pre = 24;
     cfg.erb_post = 32;
@@ -1305,6 +1367,49 @@ static substrate_config parse_args(int argc, char **argv)
                 if (end != value && isfinite(parsed)) {
                     cfg.astro_memory_init = clamp_unit(parsed);
                     cfg.astro_memory_set = true;
+                }
+            }
+        } else if (strcmp(arg, "--kiss") == 0) {
+            cfg.kiss_enabled = true;
+        } else if (strncmp(arg, "--kiss-thr=", 11) == 0) {
+            const char *value = arg + 11;
+            if (value && *value) {
+                parse_kiss_thresholds(&cfg, value);
+            }
+        } else if (strncmp(arg, "--kiss-warmup=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed >= 0L) {
+                    if (parsed > 255L) {
+                        parsed = 255L;
+                    }
+                    cfg.kiss_warmup_cycles = (int)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--kiss-refrac=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed >= 0L) {
+                    if (parsed > 255L) {
+                        parsed = 255L;
+                    }
+                    cfg.kiss_refractory_cycles = (int)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--kiss-alpha=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed) && parsed > 0.0f) {
+                    if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    cfg.kiss_alpha = parsed;
                 }
             }
         } else if (strncmp(arg, "--trs-alpha=", 12) == 0) {
@@ -2236,6 +2341,7 @@ static int run_erb_replay(const substrate_config *cfg)
             metrics.bond_coh = snap.harmony;
             metrics.error_margin = fabsf(snap.amp - snap.tempo);
             metrics.harmony = snap.harmony;
+            metrics.kiss = 0;
             int dream_phase = (int)lroundf(snap.dream);
             if (dream_phase < (int)DREAM_COUPLER_PHASE_REST) {
                 dream_phase = (int)DREAM_COUPLER_PHASE_REST;
@@ -2750,6 +2856,7 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
             float bond_coh = substrate_affinity_enabled ? clamp_unit(substrate_bond_gate.bond_coh) : 0.0f;
             float amp = clamp_unit(state->resonance);
             float tempo_gain = clamp_unit(state->breath_rate / 2.4f);
+            int kiss_flag = 0;
             Metrics metrics = {
                 .amp = amp,
                 .tempo = tempo_gain,
@@ -2757,8 +2864,40 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                 .influence = influence,
                 .bond_coh = bond_coh,
                 .error_margin = fabsf(amp - tempo_gain),
-                .harmony = clamp_unit(state->sync_quality)
+                .harmony = clamp_unit(state->sync_quality),
+                .kiss = 0
             };
+            Metrics harmony_metrics = metrics;
+            if (cfg->harmony_enabled || cfg->dream_enabled || cfg->dream_replay_enabled) {
+                harmony_sync(&substrate_introspect_state, &harmony_metrics);
+            }
+
+            float trust_metric = clamp_unit(metrics.consent);
+            float presence_metric = clamp_unit(metrics.influence);
+            float awareness_scale = clamp_unit(state->sync_quality);
+            float harmony_metric = clamp_unit(harmony_metrics.harmony);
+            if (substrate_kiss_enabled) {
+                bool kiss_fired = kiss_update(trust_metric, presence_metric, harmony_metric, awareness_scale);
+                if (kiss_fired) {
+                    kiss_flag = 1;
+                    float blended = (trust_metric + presence_metric + harmony_metric) / 3.0f;
+                    float energy_level = clamp_unit(blended);
+                    uint32_t energy = (uint32_t)(energy_level * 120.0f);
+                    if (energy == 0U) {
+                        energy = 1U;
+                    }
+                    struct {
+                        float trust;
+                        float presence;
+                        float harmony;
+                        float awareness;
+                    } payload = { trust_metric, presence_metric, harmony_metric, awareness_scale };
+                    resonant_msg kiss_msg =
+                        resonant_msg_make(RES_KISS_SOURCE_ID, RESONANT_BROADCAST_ID, energy, &payload, sizeof(payload));
+                    bus_emit(&kiss_msg);
+                }
+            }
+            metrics.kiss = kiss_flag;
             if (cfg->dream_enabled) {
                 Metrics preview_metrics = metrics;
                 preview_metrics.amp = clamp_unit(state->resonance);
@@ -2777,10 +2916,6 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                                              false);
             }
             introspect_tick(&substrate_introspect_state, &metrics);
-            Metrics harmony_metrics = metrics;
-            if (cfg->harmony_enabled || cfg->dream_enabled || cfg->dream_replay_enabled) {
-                harmony_sync(&substrate_introspect_state, &harmony_metrics);
-            }
             float astro_factor = 1.0f;
             if (substrate_astro_enabled) {
                 float harmony_signal = clamp_unit(harmony_metrics.harmony);
@@ -3144,6 +3279,23 @@ int main(int argc, char **argv)
 
     if (cfg.lip_test) {
         run_lip_resonance_test(&state, &cfg);
+    }
+
+    substrate_kiss_enabled = cfg.kiss_enabled;
+    if (substrate_kiss_enabled) {
+        kiss_init();
+        kiss_set_thresholds(cfg.kiss_trust_threshold,
+                            cfg.kiss_presence_threshold,
+                            cfg.kiss_harmony_threshold);
+        if (cfg.kiss_warmup_cycles < 0) {
+            cfg.kiss_warmup_cycles = 0;
+        }
+        if (cfg.kiss_refractory_cycles < 0) {
+            cfg.kiss_refractory_cycles = 0;
+        }
+        kiss_set_warmup((uint8_t)cfg.kiss_warmup_cycles);
+        kiss_set_refractory((uint8_t)cfg.kiss_refractory_cycles);
+        kiss_set_alpha(cfg.kiss_alpha);
     }
 
     substrate_loop(&state, &cfg);

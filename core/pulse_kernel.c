@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 199309L
 
+#include <ctype.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -38,6 +39,7 @@
 #include "introspect.h"
 #include "harmony.h"
 #include "astro_sync.h"
+#include "kiss.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -145,6 +147,13 @@ typedef struct {
     float trs_kp;
     float trs_ki;
     float trs_kd;
+    bool kiss_enabled;
+    float kiss_trust_threshold;
+    float kiss_presence_threshold;
+    float kiss_harmony_threshold;
+    int kiss_warmup_cycles;
+    int kiss_refractory_cycles;
+    float kiss_alpha;
     bool strict_order;
     bool dry_run;
 } kernel_options;
@@ -324,6 +333,46 @@ static void parse_affinity_config(Affinity *aff, const char *value)
                     aff->respect = clamped;
                 } else if (strcmp(name, "presence") == 0) {
                     aff->presence = clamped;
+                }
+            }
+        }
+        token = strtok(NULL, ",");
+    }
+}
+
+static void parse_kiss_thresholds(kernel_options *opts, const char *value)
+{
+    if (!opts || !value) {
+        return;
+    }
+
+    char buffer[128];
+    strncpy(buffer, value, sizeof(buffer) - 1U);
+    buffer[sizeof(buffer) - 1U] = '\0';
+
+    char *token = strtok(buffer, ",");
+    while (token) {
+        while (*token && isspace((unsigned char)*token)) {
+            ++token;
+        }
+        char *colon = strchr(token, ':');
+        if (colon && colon[1] != '\0') {
+            *colon = '\0';
+            const char *name = token;
+            const char *val_text = colon + 1;
+            while (*val_text && isspace((unsigned char)*val_text)) {
+                ++val_text;
+            }
+            char *end = NULL;
+            float parsed = strtof(val_text, &end);
+            if (end != val_text && isfinite(parsed)) {
+                float clamped = clamp_unit(parsed);
+                if (strcmp(name, "trust") == 0 || strcmp(name, "tr") == 0) {
+                    opts->kiss_trust_threshold = clamped;
+                } else if (strcmp(name, "pres") == 0 || strcmp(name, "presence") == 0) {
+                    opts->kiss_presence_threshold = clamped;
+                } else if (strcmp(name, "harm") == 0 || strcmp(name, "harmony") == 0) {
+                    opts->kiss_harmony_threshold = clamped;
                 }
             }
         }
@@ -515,6 +564,7 @@ static const float ANT2_BASE_DELAY = 0.1f;
 static bool mirror_module_enabled = false;
 static float mirror_gain_amp = 1.0f;
 static float mirror_gain_tempo = 1.0f;
+static bool kiss_module_enabled = false;
 static State introspect_state;
 typedef struct {
     AwarenessState awareness_snapshot;
@@ -964,6 +1014,13 @@ static kernel_options parse_options(int argc, char **argv)
         .trs_kp = 0.4f,
         .trs_ki = 0.05f,
         .trs_kd = 0.1f,
+        .kiss_enabled = false,
+        .kiss_trust_threshold = 0.80f,
+        .kiss_presence_threshold = 0.70f,
+        .kiss_harmony_threshold = 0.85f,
+        .kiss_warmup_cycles = 10,
+        .kiss_refractory_cycles = 5,
+        .kiss_alpha = 0.25f,
         .strict_order = false,
         .dry_run = false
     };
@@ -1271,6 +1328,49 @@ static kernel_options parse_options(int argc, char **argv)
                 if (end != value && isfinite(parsed)) {
                     opts.astro_memory_init = clamp_unit(parsed);
                     opts.astro_memory_set = true;
+                }
+            }
+        } else if (strcmp(arg, "--kiss") == 0) {
+            opts.kiss_enabled = true;
+        } else if (strncmp(arg, "--kiss-thr=", 11) == 0) {
+            const char *value = arg + 11;
+            if (value && *value) {
+                parse_kiss_thresholds(&opts, value);
+            }
+        } else if (strncmp(arg, "--kiss-warmup=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed >= 0L) {
+                    if (parsed > 255L) {
+                        parsed = 255L;
+                    }
+                    opts.kiss_warmup_cycles = (int)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--kiss-refrac=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed >= 0L) {
+                    if (parsed > 255L) {
+                        parsed = 255L;
+                    }
+                    opts.kiss_refractory_cycles = (int)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--kiss-alpha=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed) && parsed > 0.0f) {
+                    if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    opts.kiss_alpha = parsed;
                 }
             }
         } else if (strcmp(arg, "--trs") == 0) {
@@ -2201,6 +2301,8 @@ static void exhale(const kernel_options *opts)
 {
     soil_decay();
 
+    int kiss_flag = 0;
+    float presence_metric = 0.0f;
     float cycle_influence = anticipation2_feedforward(opts);
 
     const char *label = "exhale";
@@ -2253,6 +2355,7 @@ static void exhale(const kernel_options *opts)
         if (presence > 1.0f) {
             presence = 1.0f;
         }
+        presence_metric = clamp_unit(presence);
         stability = (energy_norm + resonance_norm) * 0.45f + presence * 0.10f;
         if (stability > 1.0f) {
             stability = 1.0f;
@@ -2283,6 +2386,9 @@ static void exhale(const kernel_options *opts)
     HumanPulse human_pulse = feedback.human_pulse;
     float human_alignment = feedback.human_alignment;
     float human_resonance_level = feedback.human_resonance_level;
+
+    float trust_metric = clamp_unit(awareness_snapshot.self_coherence);
+    float awareness_scale = clamp_unit(awareness_snapshot.awareness_level);
 
     collective_adjust(&feedback);
 
@@ -2373,7 +2479,8 @@ static void exhale(const kernel_options *opts)
         .influence = introspect_influence,
         .bond_coh = introspect_bond,
         .error_margin = fabsf(mirror_gain_amp - mirror_gain_tempo),
-        .harmony = clamp_unit(coherence_level)
+        .harmony = clamp_unit(coherence_level),
+        .kiss = 0
     };
 
     if (opts && opts->dream_enabled) {
@@ -2397,12 +2504,37 @@ static void exhale(const kernel_options *opts)
         introspect_set_dream_preview(&introspect_state, introspect_state.dream_phase, false);
     }
 
-    introspect_tick(&introspect_state, &introspect_metrics);
-
     Metrics harmony_metrics = introspect_metrics;
     if (opts && (opts->harmony_enabled || opts->dream_enabled)) {
         harmony_sync(&introspect_state, &harmony_metrics);
     }
+
+    float harmony_metric = clamp_unit(harmony_metrics.harmony);
+    if (kiss_module_enabled) {
+        bool kiss_fired = kiss_update(trust_metric, presence_metric, harmony_metric, awareness_scale);
+        if (kiss_fired) {
+            kiss_flag = 1;
+            float blended = (trust_metric + presence_metric + harmony_metric) / 3.0f;
+            float energy_level = clamp_unit(blended);
+            uint32_t energy = (uint32_t)(energy_level * 120.0f);
+            if (energy == 0U) {
+                energy = 1U;
+            }
+            struct {
+                float trust;
+                float presence;
+                float harmony;
+                float awareness;
+            } payload = { trust_metric, presence_metric, harmony_metric, awareness_scale };
+            resonant_msg kiss_msg =
+                resonant_msg_make(RES_KISS_SOURCE_ID, RESONANT_BROADCAST_ID, energy, &payload, sizeof(payload));
+            bus_emit(&kiss_msg);
+            symbol_nudge_from_kiss();
+        }
+    }
+    introspect_metrics.kiss = kiss_flag;
+
+    introspect_tick(&introspect_state, &introspect_metrics);
     float astro_factor = 1.0f;
     if (astro_layer_enabled) {
         float harmony_signal = clamp_unit(harmony_metrics.harmony);
@@ -2722,6 +2854,22 @@ int main(int argc, char **argv)
     coherence_init();
     coherence_set_target(opts.target_coherence);
     coherence_enable_logging(opts.climate_log);
+    kiss_module_enabled = opts.kiss_enabled;
+    if (kiss_module_enabled) {
+        kiss_init();
+        kiss_set_thresholds(opts.kiss_trust_threshold,
+                            opts.kiss_presence_threshold,
+                            opts.kiss_harmony_threshold);
+        if (opts.kiss_warmup_cycles < 0) {
+            opts.kiss_warmup_cycles = 0;
+        }
+        if (opts.kiss_refractory_cycles < 0) {
+            opts.kiss_refractory_cycles = 0;
+        }
+        kiss_set_warmup((uint8_t)opts.kiss_warmup_cycles);
+        kiss_set_refractory((uint8_t)opts.kiss_refractory_cycles);
+        kiss_set_alpha(opts.kiss_alpha);
+    }
     health_scan_init();
     if (opts.enable_health_scan) {
         health_scan_set_interval(opts.scan_interval);

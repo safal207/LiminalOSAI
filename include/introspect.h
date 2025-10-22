@@ -34,6 +34,7 @@ typedef struct introspect_metrics {
     float bond_coh;
     float error_margin;
     float harmony;
+    int kiss;
 } Metrics;
 
 void introspect_state_init(State *state);
