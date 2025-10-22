@@ -19,6 +19,7 @@ typedef struct {
     float k_decay;
     float ca_phase;
     float ca_rate;
+    float tempo;
     float last_stability;
     float last_agitation;
     float last_wave;

@@ -12,6 +12,7 @@ extern "C" {
 
 typedef struct {
     float baseline;
+    float agreement;
     float amplitude;
     float coherence;
 } Harmony;

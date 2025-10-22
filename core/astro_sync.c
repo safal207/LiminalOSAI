@@ -49,6 +49,7 @@ void astro_init(Astro *a)
     a->k_decay = 0.015f;
     a->ca_phase = 0.0f;
     a->ca_rate = 0.010f;
+    a->tempo = 0.0f;
     a->last_stability = 0.0f;
     a->last_agitation = 0.0f;
     a->last_wave = 0.0f;
@@ -135,6 +136,14 @@ void astro_update(Astro *a,
     a->last_agitation = agitation;
     a->last_wave = ca_wave;
     a->last_gain = gain;
+
+    float tempo_hint = 0.6f * stability + 0.4f * (0.5f + 0.5f * ca_wave);
+    float tempo_scale = a->ca_rate * 96.0f;
+    if (!isfinite(tempo_scale)) {
+        tempo_scale = 0.0f;
+    }
+    tempo_hint = clampf(tempo_hint + 0.2f * tempo_scale, 0.0f, 2.0f);
+    a->tempo = tempo_hint;
 }
 
 float astro_modulate_feedback(const Astro *a)
