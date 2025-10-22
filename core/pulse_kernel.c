@@ -936,6 +936,9 @@ static kernel_options parse_options(int argc, char **argv)
             opts.sync_trace = true;
         } else if (strcmp(arg, "--dream") == 0) {
             opts.dream_enabled = true;
+        } else if (strcmp(arg, "--dreamsync") == 0) {
+            opts.dream_enabled = true;
+            opts.enable_sync = true;
         } else if (strcmp(arg, "--dream-log") == 0) {
             opts.dream_log = true;
         } else if (strcmp(arg, "--balancer") == 0) {
