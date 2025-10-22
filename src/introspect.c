@@ -5,6 +5,7 @@
 #endif
 
 #include "introspect.h"
+#include "dream_coupler.h"
 
 #include <inttypes.h>
 #include <limits.h>
@@ -27,6 +28,20 @@ static double sanitize_value(double value)
 {
     if (!isfinite(value)) {
         return 0.0;
+    }
+    return value;
+}
+
+static double clamp_unit_value(double value)
+{
+    if (!isfinite(value)) {
+        return 0.0;
+    }
+    if (value < 0.0) {
+        return 0.0;
+    }
+    if (value > 1.0) {
+        return 1.0;
     }
     return value;
 }
@@ -69,11 +84,15 @@ void introspect_state_init(State *state)
         return;
     }
     state->enabled = false;
+    state->harmony_enabled = false;
+    state->harmony_line_open = false;
     state->cycle_index = 0;
     state->amp_sum = 0.0;
     state->tempo_sum = 0.0;
     state->sample_count = 0;
     state->stream = NULL;
+    state->last_harmony = 0.0;
+    state->dream_phase = DREAM_COUPLER_PHASE_REST;
 }
 
 void introspect_enable(State *state, bool enabled)
@@ -82,6 +101,21 @@ void introspect_enable(State *state, bool enabled)
         return;
     }
     state->enabled = enabled;
+    if (!enabled) {
+        state->harmony_line_open = false;
+    }
+}
+
+void introspect_enable_harmony(State *state, bool enabled)
+{
+    if (!state) {
+        return;
+    }
+    state->harmony_enabled = enabled;
+    if (!enabled) {
+        state->harmony_line_open = false;
+        state->last_harmony = 0.0;
+    }
 }
 
 void introspect_finalize(State *state)
@@ -96,6 +130,9 @@ void introspect_finalize(State *state)
     state->amp_sum = 0.0;
     state->tempo_sum = 0.0;
     state->sample_count = 0;
+    state->harmony_line_open = false;
+    state->last_harmony = 0.0;
+    state->dream_phase = DREAM_COUPLER_PHASE_REST;
 }
 
 void introspect_tick(State *state, const Metrics *metrics)
@@ -130,17 +167,36 @@ void introspect_tick(State *state, const Metrics *metrics)
     char timestamp[32];
     format_timestamp(timestamp, sizeof(timestamp));
 
-    fprintf(state->stream,
-            "%s cycle=%" PRIu64 " avg_amp=%.4f avg_tempo=%.4f consent=%.4f influence=%.4f bond_coh=%.4f err=%.4f\n",
-            timestamp,
-            state->cycle_index,
-            avg_amp,
-            avg_tempo,
-            sanitize_value(metrics->consent),
-            sanitize_value(metrics->influence),
-            sanitize_value(metrics->bond_coh),
-            sanitize_value(metrics->error_margin));
-    fflush(state->stream);
+    const char *dream_label = dream_coupler_phase_name(state->dream_phase);
+    if (!dream_label) {
+        dream_label = "REST";
+    }
+
+    double consent = sanitize_value(metrics->consent);
+    double influence = sanitize_value(metrics->influence);
+    double bond_coh = sanitize_value(metrics->bond_coh);
+    double err = sanitize_value(metrics->error_margin);
+    double harmony = clamp_unit_value(metrics->harmony);
+
+    if (fprintf(state->stream,
+                "{\"timestamp\":\"%s\",\"cycle\":%" PRIu64 ",\"amp\":%.4f,\"tempo\":%.4f,"
+                "\"consent\":%.4f,\"influence\":%.4f,\"bond_coh\":%.4f,\"error_margin\":%.4f,"
+                "\"harmony\":%.4f,\"dream\":\"%s\"}\n",
+                timestamp,
+                state->cycle_index,
+                sanitize_value(avg_amp),
+                sanitize_value(avg_tempo),
+                consent,
+                influence,
+                bond_coh,
+                err,
+                harmony,
+                dream_label) >= 0) {
+        fflush(state->stream);
+    }
+
+    state->harmony_line_open = false;
+    state->last_harmony = harmony;
 
     state->amp_sum = 0.0;
     state->tempo_sum = 0.0;
