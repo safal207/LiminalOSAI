@@ -107,7 +107,7 @@ static const float MIRROR_GAIN_AMP_MIN_DEFAULT = 0.5f;
 static const float MIRROR_GAIN_AMP_MAX_DEFAULT = 1.2f;
 static const float MIRROR_GAIN_TEMPO_MIN_DEFAULT = 0.8f;
 static const float MIRROR_GAIN_TEMPO_MAX_DEFAULT = 1.2f;
-static State substrate_introspect_state;
+static introspect_state substrate_introspect_state;
 
 static float sanitize_positive(float value, float fallback)
 {
@@ -145,6 +145,8 @@ static size_t build_exhale_sequence(const substrate_config *cfg, const char **st
     bool include_collective = strict;
     bool include_affinity = strict || cfg->affinity_enabled;
     bool include_mirror = strict;
+    bool include_introspect = strict || (cfg->introspect_enabled || cfg->harmony_enabled);
+    bool include_harmony = strict || cfg->harmony_enabled;
 
     if (include_ant2 && count < capacity) {
         steps[count++] = "ant2";
@@ -160,6 +162,12 @@ static size_t build_exhale_sequence(const substrate_config *cfg, const char **st
     }
     if (include_mirror && count < capacity) {
         steps[count++] = "mirror";
+    }
+    if (include_introspect && count < capacity) {
+        steps[count++] = "introspect";
+    }
+    if (include_harmony && count < capacity) {
+        steps[count++] = "harmony";
     }
 
     return count;
@@ -1095,17 +1103,16 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
             emit_analysis_trace(state, cfg, cfg->empathic_enabled ? &response : NULL);
             float consent = substrate_affinity_enabled ? clamp_unit(substrate_bond_gate.consent) : 1.0f;
             float influence = substrate_affinity_enabled ? clamp_unit(substrate_bond_gate.influence) : 1.0f;
-            float bond_coh = substrate_affinity_enabled ? clamp_unit(substrate_bond_gate.bond_coh) : 0.0f;
             float amp = clamp_unit(state->resonance);
             float tempo_gain = clamp_unit(state->breath_rate / 2.4f);
-            Metrics metrics = {
+            float dream_signal = NAN;
+            introspect_metrics metrics = {
                 .amp = amp,
                 .tempo = tempo_gain,
                 .consent = consent,
                 .influence = influence,
-                .bond_coh = bond_coh,
-                .error_margin = fabsf(amp - tempo_gain),
-                .harmony = 0.0f
+                .harmony = 0.0f,
+                .dream = dream_signal
             };
             introspect_tick(&substrate_introspect_state, &metrics);
             if (cfg->harmony_enabled) {
@@ -1119,16 +1126,11 @@ int main(int argc, char **argv)
 {
     substrate_config cfg = parse_args(argc, argv);
 
-    introspect_state_init(&substrate_introspect_state);
-    introspect_enable(&substrate_introspect_state, cfg.introspect_enabled);
-    introspect_enable_harmony(&substrate_introspect_state, cfg.harmony_enabled);
-
     if (cfg.dry_run) {
         char sequence[128];
         format_exhale_sequence(&cfg, sequence, sizeof(sequence));
         puts("liminal_core dry run");
-        printf("strict-order: %s\n", cfg.strict_order ? "enabled" : "disabled");
-        printf("exhale sequence: %s\n", sequence[0] ? sequence : "(none)");
+        printf("pipeline: %s\n", sequence[0] ? sequence : "(none)");
         printf("mirror clamps: amp=[%.2f, %.2f] tempo=[%.2f, %.2f]\n",
                cfg.mirror_amp_min,
                cfg.mirror_amp_max,
@@ -1136,6 +1138,10 @@ int main(int argc, char **argv)
                cfg.mirror_tempo_max);
         return 0;
     }
+
+    introspect_state_init(&substrate_introspect_state);
+    introspect_enable(&substrate_introspect_state, cfg.introspect_enabled);
+    introspect_enable_harmony(&substrate_introspect_state, cfg.harmony_enabled);
     if (!cfg.run_substrate) {
         fprintf(stderr, "Liminal Substrate: use --substrate to start the universal core.\n");
         return 1;

@@ -15,22 +15,28 @@ typedef struct introspect_state {
     uint32_t sample_count;
     FILE *stream;
     double last_harmony;
-} State;
+    double pending_amp;
+    double pending_tempo;
+    double pending_consent;
+    double pending_influence;
+    double pending_dream;
+    bool pending_has_dream;
+} introspect_state;
 
 typedef struct introspect_metrics {
     float amp;
     float tempo;
     float consent;
     float influence;
-    float bond_coh;
-    float error_margin;
     float harmony;
-} Metrics;
+    float dream;
+} introspect_metrics;
 
-void introspect_state_init(State *state);
-void introspect_enable(State *state, bool enabled);
-void introspect_enable_harmony(State *state, bool enabled);
-void introspect_finalize(State *state);
-void introspect_tick(State *state, const Metrics *metrics);
+void introspect_state_init(introspect_state *state);
+void introspect_enable(introspect_state *state, bool enabled);
+void introspect_enable_harmony(introspect_state *state, bool enabled);
+void introspect_finalize(introspect_state *state);
+void introspect_tick(introspect_state *state, const introspect_metrics *metrics);
+void introspect_commit(introspect_state *state, double harmony);
 
 #endif /* LIMINAL_INTROSPECT_H */

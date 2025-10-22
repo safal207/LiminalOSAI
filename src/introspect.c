@@ -10,7 +10,6 @@
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
-#include <time.h>
 
 #if defined(_WIN32)
 #include <direct.h>
@@ -20,7 +19,7 @@
 #endif
 
 #ifndef INTROSPECT_LOG_PATH
-#define INTROSPECT_LOG_PATH "logs/introspect_v1.log"
+#define INTROSPECT_LOG_PATH "logs/introspect.jsonl"
 #endif
 
 static double sanitize_value(double value)
@@ -44,26 +43,61 @@ static void ensure_logs_directory(void)
 #endif
 }
 
-static void format_timestamp(char *buffer, size_t size)
+static double clamp_unit(double value)
 {
-    if (!buffer || size == 0) {
-        return;
+    if (value < 0.0) {
+        return 0.0;
     }
-    time_t now = time(NULL);
-    struct tm tm_now;
-#if defined(_WIN32)
-    gmtime_s(&tm_now, &now);
-#else
-    gmtime_r(&now, &tm_now);
-#endif
-    if (strftime(buffer, size, "%Y-%m-%dT%H:%M:%SZ", &tm_now) == 0) {
-        if (size > 0) {
-            buffer[0] = '\0';
-        }
+    if (value > 1.0) {
+        return 1.0;
     }
+    return value;
 }
 
-void introspect_state_init(State *state)
+static void introspect_commit_locked(introspect_state *state, double harmony)
+{
+    if (!state || !state->stream) {
+        return;
+    }
+
+    double amp = sanitize_value(state->pending_amp);
+    double tempo = sanitize_value(state->pending_tempo);
+    double consent = clamp_unit(state->pending_consent);
+    double influence = clamp_unit(state->pending_influence);
+    double harmony_clamped = clamp_unit(harmony);
+
+    int written = 0;
+    if (state->pending_has_dream) {
+        double dream = clamp_unit(state->pending_dream);
+        written = fprintf(state->stream,
+                          "{\"amp\":%.4f,\"tempo\":%.4f,\"consent\":%.4f,\"influence\":%.4f,\"harmony\":%.4f,\"dream\":%.4f}\n",
+                          amp,
+                          tempo,
+                          consent,
+                          influence,
+                          harmony_clamped,
+                          dream);
+    } else {
+        written = fprintf(state->stream,
+                          "{\"amp\":%.4f,\"tempo\":%.4f,\"consent\":%.4f,\"influence\":%.4f,\"harmony\":%.4f}\n",
+                          amp,
+                          tempo,
+                          consent,
+                          influence,
+                          harmony_clamped);
+    }
+
+    if (written >= 0) {
+        fflush(state->stream);
+    } else {
+        state->enabled = false;
+    }
+
+    state->pending_has_dream = false;
+    state->harmony_line_open = false;
+}
+
+void introspect_state_init(introspect_state *state)
 {
     if (!state) {
         return;
@@ -77,9 +111,15 @@ void introspect_state_init(State *state)
     state->sample_count = 0;
     state->stream = NULL;
     state->last_harmony = 0.0;
+    state->pending_amp = 0.0;
+    state->pending_tempo = 0.0;
+    state->pending_consent = 0.0;
+    state->pending_influence = 0.0;
+    state->pending_dream = 0.0;
+    state->pending_has_dream = false;
 }
 
-void introspect_enable(State *state, bool enabled)
+void introspect_enable(introspect_state *state, bool enabled)
 {
     if (!state) {
         return;
@@ -87,10 +127,12 @@ void introspect_enable(State *state, bool enabled)
     state->enabled = enabled;
     if (!enabled) {
         state->harmony_line_open = false;
+        state->pending_has_dream = false;
+        state->pending_dream = 0.0;
     }
 }
 
-void introspect_enable_harmony(State *state, bool enabled)
+void introspect_enable_harmony(introspect_state *state, bool enabled)
 {
     if (!state) {
         return;
@@ -99,10 +141,11 @@ void introspect_enable_harmony(State *state, bool enabled)
     if (!enabled) {
         state->harmony_line_open = false;
         state->last_harmony = 0.0;
+        state->pending_has_dream = false;
     }
 }
 
-void introspect_finalize(State *state)
+void introspect_finalize(introspect_state *state)
 {
     if (!state) {
         return;
@@ -116,9 +159,11 @@ void introspect_finalize(State *state)
     state->sample_count = 0;
     state->harmony_line_open = false;
     state->last_harmony = 0.0;
+    state->pending_has_dream = false;
+    state->pending_dream = 0.0;
 }
 
-void introspect_tick(State *state, const Metrics *metrics)
+void introspect_tick(introspect_state *state, const introspect_metrics *metrics)
 {
     if (!state || !metrics || !state->enabled) {
         return;
@@ -146,48 +191,54 @@ void introspect_tick(State *state, const Metrics *metrics)
     ++state->cycle_index;
     double avg_amp = state->amp_sum / (double)state->sample_count;
     double avg_tempo = state->tempo_sum / (double)state->sample_count;
+    double consent = clamp_unit(sanitize_value(metrics->consent));
+    double influence = clamp_unit(sanitize_value(metrics->influence));
+    double harmony = clamp_unit(sanitize_value(metrics->harmony));
 
-    char timestamp[32];
-    format_timestamp(timestamp, sizeof(timestamp));
-
-    double consent = sanitize_value(metrics->consent);
-    double influence = sanitize_value(metrics->influence);
-    double bond_coh = sanitize_value(metrics->bond_coh);
-    double err = sanitize_value(metrics->error_margin);
-
-    if (state->harmony_enabled) {
-        if (fprintf(state->stream,
-                    "%s cycle=%" PRIu64 " avg_amp=%.4f avg_tempo=%.4f consent=%.4f influence=%.4f bond_coh=%.4f err=%.4f ",
-                    timestamp,
-                    state->cycle_index,
-                    avg_amp,
-                    avg_tempo,
-                    consent,
-                    influence,
-                    bond_coh,
-                    err) < 0) {
-            state->harmony_line_open = false;
-        } else {
-            state->harmony_line_open = true;
-        }
-    } else {
-        if (fprintf(state->stream,
-                    "%s cycle=%" PRIu64 " avg_amp=%.4f avg_tempo=%.4f consent=%.4f influence=%.4f bond_coh=%.4f err=%.4f\n",
-                    timestamp,
-                    state->cycle_index,
-                    avg_amp,
-                    avg_tempo,
-                    consent,
-                    influence,
-                    bond_coh,
-                    err) >= 0) {
-            fflush(state->stream);
-        }
-        state->harmony_line_open = false;
-        state->last_harmony = 0.0;
+    double dream_value = metrics->dream;
+    bool has_dream = isfinite(dream_value);
+    double dream = 0.0;
+    if (has_dream) {
+        dream = clamp_unit(dream_value);
     }
+
+    state->pending_amp = avg_amp;
+    state->pending_tempo = avg_tempo;
+    state->pending_consent = consent;
+    state->pending_influence = influence;
+    state->pending_has_dream = has_dream;
+    state->pending_dream = dream;
 
     state->amp_sum = 0.0;
     state->tempo_sum = 0.0;
     state->sample_count = 0U;
+
+    if (!state->harmony_enabled) {
+        introspect_commit_locked(state, harmony);
+        state->last_harmony = harmony;
+        return;
+    }
+
+    state->last_harmony = harmony;
+    state->harmony_line_open = true;
+}
+
+void introspect_commit(introspect_state *state, double harmony)
+{
+    if (!state || !state->enabled) {
+        return;
+    }
+
+    if (!state->harmony_line_open) {
+        return;
+    }
+
+    double sanitized_harmony = clamp_unit(sanitize_value(harmony));
+    state->last_harmony = sanitized_harmony;
+
+    if (!state->stream) {
+        return;
+    }
+
+    introspect_commit_locked(state, sanitized_harmony);
 }

@@ -1,5 +1,7 @@
 #include "harmony.h"
 
+#include "introspect.h"
+
 #include <math.h>
 
 static double sanitize_metric(double value)
@@ -10,7 +12,7 @@ static double sanitize_metric(double value)
     return value;
 }
 
-void harmony_sync(State *state, Metrics *metrics)
+void harmony_sync(struct introspect_state *state, struct introspect_metrics *metrics)
 {
     if (!state || !metrics) {
         return;
@@ -45,10 +47,5 @@ void harmony_sync(State *state, Metrics *metrics)
     }
 
     metrics->harmony = (float)harmony;
-    state->last_harmony = harmony;
-
-    if (fprintf(state->stream, "harmony=%.4f\n", harmony) >= 0) {
-        fflush(state->stream);
-    }
-    state->harmony_line_open = false;
+    introspect_commit(state, harmony);
 }
