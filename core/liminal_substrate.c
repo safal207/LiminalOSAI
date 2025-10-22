@@ -1151,7 +1151,7 @@ int main(int argc, char **argv)
 
     introspect_state_init(&substrate_introspect_state);
     introspect_enable(&substrate_introspect_state, cfg.introspect_enabled);
-    introspect_enable_harmony(&substrate_introspect_state, cfg.harmony_enabled);
+    introspect_enable_harmony(&substrate_introspect_state, cfg.harmony_enabled || cfg.dream_enabled);
 
     if (cfg.dry_run) {
         char sequence[128];
