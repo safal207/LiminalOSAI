@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_SYMBOL_H
-#define LIMINAL_INCLUDE_SYMBOL_H
+#ifndef LIMINAL_SYMBOL_H
+#define LIMINAL_SYMBOL_H
 
 #include <stddef.h>
 
@@ -16,14 +16,17 @@ typedef struct {
 void symbol_layer_init(void);
 size_t symbol_layer_pulse(void);
 size_t symbol_layer_active(const Symbol **out_symbols, size_t max_count);
+void symbol_set_affinity_scale(float scale);
+void symbol_scale_active(float gain);
 
 void symbol_register(const char *key, float resonance);
 Symbol *symbol_find(const char *key);
 void symbol_decay(void);
 void symbol_create_link(const char *from_key, const char *to_key, float weight);
+void symbol_nudge_from_kiss(void);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_SYMBOL_H */
+#endif /* LIMINAL_SYMBOL_H */

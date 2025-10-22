@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_EMPATHIC_H
-#define LIMINAL_INCLUDE_EMPATHIC_H
+#ifndef LIMINAL_EMPATHIC_H
+#define LIMINAL_EMPATHIC_H
 
 #include <stdbool.h>
 
@@ -18,6 +18,7 @@ typedef struct {
     float tension;
     float harmony;
     float empathy;
+    float anticipation;
 } EmotionField;
 
 typedef struct {
@@ -26,9 +27,9 @@ typedef struct {
     float target_coherence;
     float delay_scale;
     float coherence_bias;
-    float anticipation;
-    bool calm_predicted;
-    bool anxiety_predicted;
+    float anticipation_level;
+    float micro_pattern_signal;
+    float prediction_trend;
 } EmpathicResponse;
 
 void empathic_init(EmpathicSource source, bool trace, float gain);
@@ -48,4 +49,4 @@ float empathic_anticipation(void);
 bool empathic_calm_prediction(void);
 bool empathic_anxiety_prediction(void);
 
-#endif /* LIMINAL_INCLUDE_EMPATHIC_H */
+#endif /* LIMINAL_EMPATHIC_H */

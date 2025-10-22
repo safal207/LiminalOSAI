@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 199309L
 
+#include <ctype.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -9,6 +10,10 @@
 #include <time.h>
 #include <unistd.h>
 #include <math.h>
+#include <limits.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
 
 #include "soil.h"
 #include "resonant.h"
@@ -17,12 +22,24 @@
 #include "awareness.h"
 #include "council.h"
 #include "coherence.h"
+#include "collective.h"
+#include "collective_memory.h"
+#include "affinity.h"
 #include "health_scan.h"
 #include "weave.h"
 #include "dream.h"
+#include "dream_balance.h"
+#include "dream_coupler.h"
 #include "metabolic.h"
 #include "symbiosis.h"
 #include "empathic.h"
+#include "emotion_memory.h"
+#include "anticipation_v2.h"
+#include "mirror.h"
+#include "introspect.h"
+#include "harmony.h"
+#include "astro_sync.h"
+#include "kiss.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -31,6 +48,21 @@
 #define SENSOR_INHALE   1
 #define SENSOR_REFLECT  2
 #define SENSOR_EXHALE   3
+
+#ifndef EMOTION_TRACE_PATH_MAX
+#define EMOTION_TRACE_PATH_MAX 256
+#endif
+
+#define ASTRO_TRACE_PATH "logs/astro_trace.jsonl"
+#define ASTRO_MEMORY_PATH "soil/astro_memory.jsonl"
+#define ASTRO_MEMORY_CAPACITY 64
+#define ASTRO_STABLE_WINDOW 10
+
+typedef enum {
+    ENSEMBLE_STRATEGY_AVG = 0,
+    ENSEMBLE_STRATEGY_MEDIAN,
+    ENSEMBLE_STRATEGY_LEADER
+} ensemble_strategy;
 
 typedef struct {
     bool show_trace;
@@ -48,6 +80,7 @@ typedef struct {
     bool sync_trace;
     bool dream_enabled;
     bool dream_log;
+    bool balancer_enabled;
     bool metabolic_enabled;
     bool metabolic_trace;
     bool human_bridge_enabled;
@@ -56,14 +89,27 @@ typedef struct {
     float human_resonance_gain;
     bool empathic_enabled;
     bool empathic_trace;
+    bool anticipation_trace;
+    bool anticipation2_enabled;
+    bool ant2_trace;
+    float ant2_gain;
     EmpathicSource emotional_source;
     float empathy_gain;
-    bool recognition_field_enabled;
-    bool anticipation_trace;
-    int trend_window;
+    bool emotional_memory_enabled;
+    bool memory_trace;
+    float recognition_threshold;
+    char emotion_trace_path[EMOTION_TRACE_PATH_MAX];
     uint64_t limit;
     uint32_t scan_interval;
     float target_coherence;
+    bool collective_enabled;
+    bool collective_trace;
+    bool collective_memory_enabled;
+    bool collective_memory_trace;
+    int cm_snapshot_interval;
+    char cm_path[CM_PATH_MAX];
+    float group_target;
+    ensemble_strategy ensemble_mode;
     float council_threshold;
     int phase_count;
     float phase_shift_deg[WEAVE_MODULE_COUNT];
@@ -71,7 +117,157 @@ typedef struct {
     float dream_threshold;
     float vitality_rest_threshold;
     float vitality_creative_threshold;
+    bool affinity_enabled;
+    bool bond_trace_enabled;
+    Affinity affinity_config;
+    float allow_align_consent;
+    bool mirror_enabled;
+    bool mirror_trace;
+    float mirror_softness;
+    float mirror_amp_min;
+    float mirror_amp_max;
+    float mirror_tempo_min;
+    float mirror_tempo_max;
+    bool introspect_enabled;
+    bool harmony_enabled;
+    bool astro_enabled;
+    bool astro_trace;
+    float astro_rate;
+    float astro_tone_init;
+    float astro_memory_init;
+    bool astro_tone_set;
+    bool astro_memory_set;
+    bool trs_enabled;
+    float trs_alpha;
+    int trs_warmup;
+    bool trs_adapt_enabled;
+    float trs_alpha_min;
+    float trs_alpha_max;
+    float trs_target_delta;
+    float trs_kp;
+    float trs_ki;
+    float trs_kd;
+    bool kiss_enabled;
+    float kiss_trust_threshold;
+    float kiss_presence_threshold;
+    float kiss_harmony_threshold;
+    int kiss_warmup_cycles;
+    int kiss_refractory_cycles;
+    float kiss_alpha;
+    bool strict_order;
+    bool dry_run;
 } kernel_options;
+
+static const float MIRROR_GAIN_AMP_MIN_DEFAULT = 0.5f;
+static const float MIRROR_GAIN_AMP_MAX_DEFAULT = 1.2f;
+static const float MIRROR_GAIN_TEMPO_MIN_DEFAULT = 0.8f;
+static const float MIRROR_GAIN_TEMPO_MAX_DEFAULT = 1.2f;
+
+static float sanitize_positive(float value, float fallback)
+{
+    if (!isfinite(value) || value <= 0.0f) {
+        return fallback;
+    }
+    return value;
+}
+
+static void normalize_bounds(float *min_value, float *max_value, float default_min, float default_max)
+{
+    if (!min_value || !max_value) {
+        return;
+    }
+    float min_sanitized = sanitize_positive(*min_value, default_min);
+    float max_sanitized = sanitize_positive(*max_value, default_max);
+    if (min_sanitized > max_sanitized) {
+        float tmp = min_sanitized;
+        min_sanitized = max_sanitized;
+        max_sanitized = tmp;
+    }
+    *min_value = min_sanitized;
+    *max_value = max_sanitized;
+}
+
+static size_t build_exhale_sequence(const kernel_options *opts, const char **steps, size_t capacity)
+{
+    if (!steps || capacity == 0) {
+        return 0;
+    }
+
+    size_t count = 0;
+    bool strict = opts && opts->strict_order;
+    bool include_ant2 = strict || (opts && opts->anticipation2_enabled);
+    bool include_collective = strict || (opts && (opts->collective_enabled || opts->collective_trace));
+    bool include_affinity = strict || (opts && opts->affinity_enabled);
+    bool include_mirror = strict || (opts && opts->mirror_enabled);
+    bool include_introspect = strict || (opts && opts->introspect_enabled);
+    bool include_harmony = strict || include_introspect || (opts && (opts->harmony_enabled || opts->dream_enabled));
+    bool include_astro = strict || (opts && opts->astro_enabled);
+    bool include_dream = opts && opts->dream_enabled;
+
+    if (include_ant2 && count < capacity) {
+        steps[count++] = "ant2";
+    }
+    if (count < capacity) {
+        steps[count++] = "awareness";
+    }
+    if (include_collective && count < capacity) {
+        steps[count++] = "collective";
+    }
+    if (include_affinity && count < capacity) {
+        steps[count++] = "affinity";
+    }
+    if (include_mirror && count < capacity) {
+        steps[count++] = "mirror";
+    }
+    if (include_introspect && count < capacity) {
+        steps[count++] = "introspect";
+    }
+    if (include_harmony && count < capacity) {
+        steps[count++] = "harmony";
+    }
+    if (include_astro && count < capacity) {
+        steps[count++] = "astro";
+    }
+    if (include_dream && count < capacity) {
+        steps[count++] = "dream";
+    }
+
+    return count;
+}
+
+static void format_exhale_sequence(const kernel_options *opts, char *buffer, size_t size)
+{
+    if (!buffer || size == 0) {
+        return;
+    }
+
+    buffer[0] = '\0';
+    const char *steps[8];
+    size_t count = build_exhale_sequence(opts, steps, sizeof(steps) / sizeof(steps[0]));
+    if (count == 0) {
+        return;
+    }
+
+    const char *arrow = "\xE2\x86\x92";
+    size_t written = 0;
+    for (size_t i = 0; i < count; ++i) {
+        int result = 0;
+        if (i == 0) {
+            result = snprintf(buffer + written, size - written, "%s", steps[i]);
+        } else {
+            result = snprintf(buffer + written, size - written, "%s%s", arrow, steps[i]);
+        }
+        if (result < 0) {
+            buffer[written] = '\0';
+            return;
+        }
+        written += (size_t)result;
+        if (written >= size) {
+            buffer[size - 1] = '\0';
+            return;
+        }
+    }
+}
 
 static size_t bounded_string_length(const uint8_t *data, size_t max_len)
 {
@@ -93,6 +289,648 @@ static float clamp_unit(float value)
     return value;
 }
 
+static float clamp_range(float value, float min_value, float max_value)
+{
+    if (!isfinite(value)) {
+        return min_value;
+    }
+    if (value < min_value) {
+        return min_value;
+    }
+    if (value > max_value) {
+        return max_value;
+    }
+    return value;
+}
+
+static void parse_affinity_config(Affinity *aff, const char *value)
+{
+    if (!aff || !value) {
+        return;
+    }
+
+    char buffer[128];
+    strncpy(buffer, value, sizeof(buffer) - 1U);
+    buffer[sizeof(buffer) - 1U] = '\0';
+
+    char *token = strtok(buffer, ",");
+    while (token) {
+        while (*token == ' ') {
+            ++token;
+        }
+        char *colon = strchr(token, ':');
+        if (colon && colon[1] != '\0') {
+            *colon = '\0';
+            const char *name = token;
+            const char *val_text = colon + 1;
+            char *end = NULL;
+            float parsed = strtof(val_text, &end);
+            if (end != val_text && isfinite(parsed)) {
+                float clamped = clamp_unit(parsed);
+                if (strcmp(name, "care") == 0) {
+                    aff->care = clamped;
+                } else if (strcmp(name, "respect") == 0) {
+                    aff->respect = clamped;
+                } else if (strcmp(name, "presence") == 0) {
+                    aff->presence = clamped;
+                }
+            }
+        }
+        token = strtok(NULL, ",");
+    }
+}
+
+static void parse_kiss_thresholds(kernel_options *opts, const char *value)
+{
+    if (!opts || !value) {
+        return;
+    }
+
+    char buffer[128];
+    strncpy(buffer, value, sizeof(buffer) - 1U);
+    buffer[sizeof(buffer) - 1U] = '\0';
+
+    char *token = strtok(buffer, ",");
+    while (token) {
+        while (*token && isspace((unsigned char)*token)) {
+            ++token;
+        }
+        char *colon = strchr(token, ':');
+        if (colon && colon[1] != '\0') {
+            *colon = '\0';
+            const char *name = token;
+            const char *val_text = colon + 1;
+            while (*val_text && isspace((unsigned char)*val_text)) {
+                ++val_text;
+            }
+            char *end = NULL;
+            float parsed = strtof(val_text, &end);
+            if (end != val_text && isfinite(parsed)) {
+                float clamped = clamp_unit(parsed);
+                if (strcmp(name, "trust") == 0 || strcmp(name, "tr") == 0) {
+                    opts->kiss_trust_threshold = clamped;
+                } else if (strcmp(name, "pres") == 0 || strcmp(name, "presence") == 0) {
+                    opts->kiss_presence_threshold = clamped;
+                } else if (strcmp(name, "harm") == 0 || strcmp(name, "harmony") == 0) {
+                    opts->kiss_harmony_threshold = clamped;
+                }
+            }
+        }
+        token = strtok(NULL, ",");
+    }
+}
+
+static Astro astro_state;
+static bool astro_layer_enabled = false;
+static bool astro_trace_enabled = false;
+static FILE *astro_trace_stream = NULL;
+static float astro_feedback_factor = 1.0f;
+static bool astro_priming_pending = false;
+static AstroMemory astro_memory_cache[ASTRO_MEMORY_CAPACITY];
+static size_t astro_memory_count = 0;
+
+typedef struct {
+    int consecutive;
+    float tone_sum;
+    float memory_sum;
+    float stability_sum;
+} AstroStableWindow;
+
+static AstroStableWindow astro_window = {0, 0.0f, 0.0f, 0.0f};
+
+static void astro_window_reset(void)
+{
+    astro_window.consecutive = 0;
+    astro_window.tone_sum = 0.0f;
+    astro_window.memory_sum = 0.0f;
+    astro_window.stability_sum = 0.0f;
+}
+
+static void astro_window_accumulate(float tone, float memory, float stability)
+{
+    astro_window.consecutive += 1;
+    astro_window.tone_sum += tone;
+    astro_window.memory_sum += memory;
+    astro_window.stability_sum += stability;
+}
+
+static void astro_trace_close(void)
+{
+    if (astro_trace_stream) {
+        fclose(astro_trace_stream);
+        astro_trace_stream = NULL;
+    }
+}
+
+static void astro_trace_log_state(float stability, float gain)
+{
+    if (!astro_trace_enabled) {
+        return;
+    }
+    if (!astro_trace_stream) {
+        astro_trace_stream = fopen(ASTRO_TRACE_PATH, "a");
+        if (!astro_trace_stream) {
+            astro_trace_enabled = false;
+            return;
+        }
+    }
+    fprintf(astro_trace_stream,
+            "{\"tone\":%.4f,\"memory\":%.4f,\"drift\":%.4f,\"ca_rate\":%.5f,\"ca_phase\":%.4f,"
+            "\"stability\":%.4f,\"agitation\":%.4f,\"astro_gain\":%.4f}\n",
+            astro_state.tone,
+            astro_state.memory,
+            astro_state.drift,
+            astro_state.ca_rate,
+            astro_state.ca_phase,
+            stability,
+            astro_state.last_agitation,
+            gain);
+    fflush(astro_trace_stream);
+}
+
+static void astro_trace_log_consolidate(float tone_avg,
+                                        float memory_avg,
+                                        float stability_avg,
+                                        uint32_t signature)
+{
+    if (!astro_trace_enabled) {
+        return;
+    }
+    if (!astro_trace_stream) {
+        astro_trace_stream = fopen(ASTRO_TRACE_PATH, "a");
+        if (!astro_trace_stream) {
+            astro_trace_enabled = false;
+            return;
+        }
+    }
+    fprintf(astro_trace_stream,
+            "{\"consolidate\":true,\"tone_avg\":%.4f,\"mem_avg\":%.4f,\"ca_rate\":%.5f,"
+            "\"stability_avg\":%.4f,\"signature\":%u,\"saved\":\"%s\"}\n",
+            tone_avg,
+            memory_avg,
+            astro_state.ca_rate,
+            stability_avg,
+            signature,
+            ASTRO_MEMORY_PATH);
+    fflush(astro_trace_stream);
+}
+
+static void astro_memory_load_cache(void)
+{
+    astro_memory_count = astro_memory_load(ASTRO_MEMORY_PATH, astro_memory_cache, ASTRO_MEMORY_CAPACITY);
+    if (astro_memory_count > ASTRO_MEMORY_CAPACITY) {
+        astro_memory_count = ASTRO_MEMORY_CAPACITY;
+    }
+}
+
+static const AstroMemory *astro_memory_match(uint32_t signature, int *out_distance)
+{
+    if (astro_memory_count == 0) {
+        if (out_distance) {
+            *out_distance = INT_MAX;
+        }
+        return NULL;
+    }
+    const AstroMemory *best = NULL;
+    int best_distance = INT_MAX;
+    for (size_t i = 0; i < astro_memory_count; ++i) {
+        uint32_t entry_sig = astro_memory_cache[i].signature;
+        int distance = cm_signature_distance(signature, entry_sig);
+        if (distance < best_distance) {
+            best_distance = distance;
+            best = &astro_memory_cache[i];
+        }
+    }
+    if (out_distance) {
+        *out_distance = best_distance;
+    }
+    if (best_distance > 6) {
+        return NULL;
+    }
+    return best;
+}
+
+static void astro_memory_store_snapshot(uint32_t signature,
+                                        float tone_avg,
+                                        float memory_avg,
+                                        float stability_avg)
+{
+    uint64_t now = (uint64_t)time(NULL);
+    AstroMemory snapshot = astro_memory_make(signature, tone_avg, memory_avg, astro_state.ca_rate, stability_avg, now);
+    if (astro_memory_append(ASTRO_MEMORY_PATH, &snapshot)) {
+        if (astro_memory_count < ASTRO_MEMORY_CAPACITY) {
+            astro_memory_cache[astro_memory_count++] = snapshot;
+        } else if (astro_memory_count > 0) {
+            astro_memory_cache[astro_memory_count - 1] = snapshot;
+        }
+        astro_trace_log_consolidate(tone_avg, memory_avg, stability_avg, signature);
+    }
+}
+
+static RGraph collective_graph = {0};
+static bool collective_active = false;
+static bool collective_trace_enabled = false;
+static ensemble_strategy collective_strategy = ENSEMBLE_STRATEGY_MEDIAN;
+static float collective_target_level = 0.82f;
+static float collective_pending_adjust = 0.0f;
+static int collective_node_capacity = 0;
+static int collective_edge_capacity = 0;
+static const int COLLECTIVE_DEFAULT_NODES = 16;
+static bool collective_memory_enabled = false;
+static bool collective_memory_trace_enabled = false;
+static bool collective_memory_initialized = false;
+static bool collective_signature_ready = false;
+static uint32_t collective_signature_value = 0;
+static CMemRing collective_memory_ring = {{0.0f}, {0.0f}, 0, 0};
+static char collective_memory_store_path[CM_PATH_MAX] = {0};
+static CMemTrace *collective_memory_match_trace = NULL;
+static float collective_memory_match_score = 0.0f;
+static float collective_warmup_adjust = 0.0f;
+static int collective_warmup_cycles_remaining = 0;
+static uint64_t collective_cycle_count = 0;
+static bool collective_flag_anticipation = false;
+static bool collective_flag_dream = false;
+static bool collective_flag_balancer = false;
+static const int COLLECTIVE_WARMUP_LIMIT = 4;
+
+static bool affinity_layer_enabled = false;
+static Affinity affinity_profile = {0.0f, 0.0f, 0.0f};
+static BondGate bond_gate_state = {0.0f, 0.0f, 0.0f, 0.0f};
+static float explicit_consent_level = 0.2f;
+static bool ant2_module_enabled = false;
+static Ant2 ant2_state;
+static float ant2_delay_factor = 1.0f;
+static const float ANT2_BASE_DELAY = 0.1f;
+static bool mirror_module_enabled = false;
+static float mirror_gain_amp = 1.0f;
+static float mirror_gain_tempo = 1.0f;
+static bool kiss_module_enabled = false;
+static State introspect_state;
+typedef struct {
+    AwarenessState awareness_snapshot;
+    const CoherenceField *coherence_field;
+    float coherence_level;
+    DreamAlignmentBalance dream_balance;
+    InnerCouncil council;
+    bool council_active;
+    bool human_bridge_active;
+    HumanPulse human_pulse;
+    float human_alignment;
+    float human_resonance_level;
+    bool empathic_layer_active;
+    EmpathicResponse empathic_response;
+    float anticipation_field;
+    float anticipation_level;
+    float anticipation_micro;
+    float anticipation_trend;
+    float resonance_for_coherence;
+    float stability_for_coherence;
+    float awareness_for_coherence;
+    float energy_avg;
+    float resonance_avg;
+    float stability;
+} AwarenessCoherenceFeedback;
+
+static const char *ensemble_strategy_name(ensemble_strategy mode)
+{
+    switch (mode) {
+    case ENSEMBLE_STRATEGY_AVG:
+        return "avg";
+    case ENSEMBLE_STRATEGY_LEADER:
+        return "leader";
+    case ENSEMBLE_STRATEGY_MEDIAN:
+    default:
+        return "median";
+    }
+}
+
+static void collective_begin_cycle(void)
+{
+    collective_pending_adjust = 0.0f;
+    if (!collective_active) {
+        return;
+    }
+    if (!collective_graph.nodes || !collective_graph.edges) {
+        return;
+    }
+    collective_graph.n_nodes = 0;
+    collective_graph.n_edges = 0;
+}
+
+static int collective_add_node(const char *id, float vitality, float pulse)
+{
+    if (!collective_active || !collective_graph.nodes) {
+        return -1;
+    }
+    if (collective_graph.n_nodes >= collective_node_capacity || collective_node_capacity <= 0) {
+        return -1;
+    }
+
+    float vitality_clamped = clamp_unit(isfinite(vitality) ? vitality : 0.0f);
+    if (vitality_clamped <= 0.0f) {
+        return -1;
+    }
+
+    RNode *node = &collective_graph.nodes[collective_graph.n_nodes];
+    memset(node, 0, sizeof(*node));
+    if (id && *id) {
+        size_t len = strlen(id);
+        if (len >= sizeof(node->id)) {
+            len = sizeof(node->id) - 1;
+        }
+        memcpy(node->id, id, len);
+        node->id[len] = '\0';
+    } else {
+        snprintf(node->id, sizeof(node->id), "n%d", collective_graph.n_nodes);
+    }
+    node->vitality = vitality_clamped;
+    node->pulse = clamp_unit(isfinite(pulse) ? pulse : 0.0f);
+    ++collective_graph.n_nodes;
+    return collective_graph.n_nodes - 1;
+}
+
+static void collective_connect_complete(void)
+{
+    if (!collective_active || !collective_graph.edges || collective_graph.n_nodes < 2) {
+        collective_graph.n_edges = 0;
+        return;
+    }
+
+    int edge_index = 0;
+    for (int i = 0; i < collective_graph.n_nodes - 1; ++i) {
+        for (int j = i + 1; j < collective_graph.n_nodes; ++j) {
+            if (edge_index >= collective_edge_capacity) {
+                collective_graph.n_edges = edge_index;
+                return;
+            }
+            REdge *edge = &collective_graph.edges[edge_index++];
+            edge->a = i;
+            edge->b = j;
+            edge->harmony = 0.0f;
+            edge->flux = 0.0f;
+        }
+    }
+    collective_graph.n_edges = edge_index;
+}
+
+typedef struct {
+    float harmony;
+    float flux;
+} weighted_edge;
+
+static int compare_weighted_edge(const void *lhs, const void *rhs)
+{
+    const weighted_edge *a = (const weighted_edge *)lhs;
+    const weighted_edge *b = (const weighted_edge *)rhs;
+    if (a->harmony < b->harmony) {
+        return -1;
+    }
+    if (a->harmony > b->harmony) {
+        return 1;
+    }
+    return 0;
+}
+
+static float collective_weighted_median(const RGraph *graph)
+{
+    if (!graph || graph->n_edges <= 0) {
+        return 0.0f;
+    }
+
+    int count = graph->n_edges;
+    weighted_edge *copies = (weighted_edge *)malloc((size_t)count * sizeof(weighted_edge));
+    if (!copies) {
+        return graph->group_coh;
+    }
+
+    int actual = 0;
+    float total_flux = 0.0f;
+    for (int i = 0; i < count; ++i) {
+        const REdge *edge = &graph->edges[i];
+        if (!edge || edge->flux <= 0.0f) {
+            continue;
+        }
+        copies[actual].harmony = clamp_unit(edge->harmony);
+        copies[actual].flux = edge->flux;
+        total_flux += edge->flux;
+        ++actual;
+    }
+
+    if (actual == 0 || total_flux <= 0.0f) {
+        free(copies);
+        return graph->group_coh;
+    }
+
+    qsort(copies, (size_t)actual, sizeof(weighted_edge), compare_weighted_edge);
+    float target = total_flux * 0.5f;
+    float accum = 0.0f;
+    float median = copies[actual - 1].harmony;
+    for (int i = 0; i < actual; ++i) {
+        accum += copies[i].flux;
+        if (accum >= target) {
+            median = copies[i].harmony;
+            break;
+        }
+    }
+
+    free(copies);
+    return clamp_unit(median);
+}
+
+static float collective_leader_pulse(const RGraph *graph)
+{
+    if (!graph || graph->n_nodes <= 0) {
+        return 0.0f;
+    }
+    float best_vitality = -1.0f;
+    float leader_pulse = 0.0f;
+    for (int i = 0; i < graph->n_nodes; ++i) {
+        const RNode *node = &graph->nodes[i];
+        if (!node) {
+            continue;
+        }
+        if (node->vitality > best_vitality) {
+            best_vitality = node->vitality;
+            leader_pulse = node->pulse;
+        }
+    }
+    if (best_vitality <= 0.0f) {
+        return 0.0f;
+    }
+    return clamp_unit(leader_pulse);
+}
+
+static float collective_effective_coherence(const RGraph *graph)
+{
+    if (!graph) {
+        return 0.0f;
+    }
+
+    float base = clamp_unit(graph->group_coh);
+    switch (collective_strategy) {
+    case ENSEMBLE_STRATEGY_AVG:
+        return base;
+    case ENSEMBLE_STRATEGY_LEADER: {
+        float leader = collective_leader_pulse(graph);
+        if (leader <= 0.0f) {
+            return base;
+        }
+        return clamp_unit(0.6f * base + 0.4f * leader);
+    }
+    case ENSEMBLE_STRATEGY_MEDIAN:
+    default: {
+        float median = collective_weighted_median(graph);
+        if (median <= 0.0f) {
+            return base;
+        }
+        return clamp_unit(0.5f * base + 0.5f * median);
+    }
+    }
+}
+
+static FILE *collective_log_open(void)
+{
+    if (mkdir("logs", 0777) != 0) {
+        if (errno != EEXIST) {
+            return NULL;
+        }
+    }
+    return fopen("logs/collective_trace.log", "a");
+}
+
+static void collective_trace_log(const RGraph *graph, float adjust)
+{
+    if (!collective_trace_enabled || !graph) {
+        return;
+    }
+
+    FILE *fp = collective_log_open();
+    if (!fp) {
+        return;
+    }
+
+    fprintf(fp,
+            "{\"nodes\":%d,\"edges\":%d,\"group_coh\":%.2f,\"adjust\":%.3f,\"strategy\":\"%s\"}\n",
+            graph->n_nodes,
+            graph->n_edges,
+            graph->group_coh,
+            adjust,
+            ensemble_strategy_name(collective_strategy));
+    fclose(fp);
+}
+
+static void collective_memory_log_echo(uint32_t signature, float match_score, const CMemTrace *match, float warmup)
+{
+    if (!collective_memory_trace_enabled && !collective_trace_enabled) {
+        return;
+    }
+    FILE *fp = collective_log_open();
+    if (!fp) {
+        return;
+    }
+    float coh = match ? match->group_coh_avg : 0.0f;
+    float adj = match ? match->adjust_avg : 0.0f;
+    fprintf(fp,
+            "memory_echo: sig=0x%08" PRIX32 " match=%.2f coh_avg=%.2f adj_avg=%+.2f warmup=%+.2f\n",
+            signature,
+            match_score,
+            coh,
+            adj,
+            warmup);
+    fclose(fp);
+}
+
+static void collective_memory_log_snapshot(const CMemTrace *snapshot)
+{
+    if (!snapshot) {
+        return;
+    }
+    if (!collective_memory_trace_enabled && !collective_trace_enabled) {
+        return;
+    }
+    FILE *fp = collective_log_open();
+    if (!fp) {
+        return;
+    }
+    fprintf(fp,
+            "snapshot:    coh_avg=%.2f adj_avg=%+.2f vol=%.3f saved=%s\n",
+            snapshot->group_coh_avg,
+            snapshot->adjust_avg,
+            snapshot->volatility,
+            collective_memory_store_path[0] ? collective_memory_store_path : "soil/collective_memory.jsonl");
+    fclose(fp);
+}
+
+typedef struct {
+    uint8_t version;
+    uint8_t strategy;
+    uint8_t flags;
+    uint8_t reserved;
+    uint16_t nodes;
+    uint16_t edges;
+    int16_t vitality_q;
+    int16_t leader_q;
+    int16_t average_q;
+    int16_t median_q;
+} CollectiveSignatureContext;
+
+static uint32_t collective_compute_signature(const RGraph *graph)
+{
+    CollectiveSignatureContext ctx = {0};
+    ctx.version = 1;
+    ctx.strategy = (uint8_t)collective_strategy;
+    uint8_t flags = 0;
+    if (collective_flag_anticipation) {
+        flags |= 0x01u;
+    }
+    if (collective_flag_dream) {
+        flags |= 0x02u;
+    }
+    if (collective_flag_balancer) {
+        flags |= 0x04u;
+    }
+    ctx.flags = flags;
+    if (graph) {
+        if (graph->n_nodes < 0) {
+            ctx.nodes = 0;
+        } else if (graph->n_nodes > UINT16_MAX) {
+            ctx.nodes = UINT16_MAX;
+        } else {
+            ctx.nodes = (uint16_t)graph->n_nodes;
+        }
+        if (graph->n_edges < 0) {
+            ctx.edges = 0;
+        } else if (graph->n_edges > UINT16_MAX) {
+            ctx.edges = UINT16_MAX;
+        } else {
+            ctx.edges = (uint16_t)graph->n_edges;
+        }
+
+        if (graph->n_nodes > 0) {
+            double vitality_sum = 0.0;
+            double pulse_sum = 0.0;
+            for (int i = 0; i < graph->n_nodes; ++i) {
+                const RNode *node = &graph->nodes[i];
+                vitality_sum += clamp_unit(isfinite(node->vitality) ? node->vitality : 0.0f);
+                pulse_sum += clamp_unit(isfinite(node->pulse) ? node->pulse : 0.0f);
+            }
+            float vitality_avg = (float)(vitality_sum / (double)graph->n_nodes);
+            float pulse_avg = (float)(pulse_sum / (double)graph->n_nodes);
+            vitality_avg = cm_clamp(vitality_avg, 0.0f, 1.0f);
+            pulse_avg = cm_clamp(pulse_avg, 0.0f, 1.0f);
+            ctx.vitality_q = (int16_t)lrintf(vitality_avg * 100.0f);
+            ctx.average_q = (int16_t)lrintf(pulse_avg * 100.0f);
+        }
+
+        float leader = cm_clamp(collective_leader_pulse(graph), 0.0f, 1.0f);
+        float median = cm_clamp(collective_weighted_median(graph), 0.0f, 1.0f);
+        ctx.leader_q = (int16_t)lrintf(leader * 100.0f);
+        ctx.median_q = (int16_t)lrintf(median * 100.0f);
+    }
+
+    return cm_signature_hash(&ctx, sizeof(ctx));
+}
+
 static kernel_options parse_options(int argc, char **argv)
 {
     kernel_options opts = {
@@ -111,6 +949,7 @@ static kernel_options parse_options(int argc, char **argv)
         .sync_trace = false,
         .dream_enabled = false,
         .dream_log = false,
+        .balancer_enabled = false,
         .metabolic_enabled = false,
         .metabolic_trace = false,
         .human_bridge_enabled = false,
@@ -119,24 +958,84 @@ static kernel_options parse_options(int argc, char **argv)
         .human_resonance_gain = 1.0f,
         .empathic_enabled = false,
         .empathic_trace = false,
+        .anticipation_trace = false,
+        .anticipation2_enabled = false,
+        .ant2_trace = false,
+        .ant2_gain = 0.6f,
         .emotional_source = EMPATHIC_SOURCE_AUDIO,
         .empathy_gain = 1.0f,
-        .recognition_field_enabled = false,
-        .anticipation_trace = false,
-        .trend_window = EMPATHIC_RECOGNITION_WINDOW_DEFAULT,
+        .emotional_memory_enabled = false,
+        .memory_trace = false,
+        .recognition_threshold = 0.18f,
+        .emotion_trace_path = {0},
         .limit = 0,
         .scan_interval = 10U,
         .target_coherence = 0.80f,
+        .collective_enabled = false,
+        .collective_trace = false,
+        .collective_memory_enabled = false,
+        .collective_memory_trace = false,
+        .cm_snapshot_interval = 20,
+        .cm_path = {0},
+        .group_target = 0.82f,
+        .ensemble_mode = ENSEMBLE_STRATEGY_MEDIAN,
         .council_threshold = 0.05f,
         .phase_count = 8,
         .dream_threshold = 0.90f,
         .vitality_rest_threshold = 0.30f,
-        .vitality_creative_threshold = 0.90f
+        .vitality_creative_threshold = 0.90f,
+        .affinity_enabled = false,
+        .bond_trace_enabled = false,
+        .affinity_config = {0.0f, 0.0f, 0.0f},
+        .allow_align_consent = 0.2f,
+        .mirror_enabled = false,
+        .mirror_trace = false,
+        .mirror_softness = 0.5f,
+        .mirror_amp_min = MIRROR_GAIN_AMP_MIN_DEFAULT,
+        .mirror_amp_max = MIRROR_GAIN_AMP_MAX_DEFAULT,
+        .mirror_tempo_min = MIRROR_GAIN_TEMPO_MIN_DEFAULT,
+        .mirror_tempo_max = MIRROR_GAIN_TEMPO_MAX_DEFAULT,
+        .introspect_enabled = false,
+        .harmony_enabled = false,
+        .astro_enabled = false,
+        .astro_trace = false,
+        .astro_rate = 0.010f,
+        .astro_tone_init = 0.0f,
+        .astro_memory_init = 0.0f,
+        .astro_tone_set = false,
+        .astro_memory_set = false,
+        .trs_enabled = false,
+        .trs_alpha = 0.3f,
+        .trs_warmup = 5,
+        .trs_adapt_enabled = false,
+        .trs_alpha_min = 0.10f,
+        .trs_alpha_max = 0.60f,
+        .trs_target_delta = 0.015f,
+        .trs_kp = 0.4f,
+        .trs_ki = 0.05f,
+        .trs_kd = 0.1f,
+        .kiss_enabled = false,
+        .kiss_trust_threshold = 0.80f,
+        .kiss_presence_threshold = 0.70f,
+        .kiss_harmony_threshold = 0.85f,
+        .kiss_warmup_cycles = 10,
+        .kiss_refractory_cycles = 5,
+        .kiss_alpha = 0.25f,
+        .strict_order = false,
+        .dry_run = false
     };
 
     for (size_t i = 0; i < weave_module_count(); ++i) {
         opts.phase_shift_deg[i] = 0.0f;
         opts.phase_shift_set[i] = false;
+    }
+
+    affinity_default(&opts.affinity_config);
+
+    if (!opts.cm_path[0]) {
+        const char *default_path = "soil/collective_memory.jsonl";
+        strncpy(opts.cm_path, default_path, sizeof(opts.cm_path) - 1);
+        opts.cm_path[sizeof(opts.cm_path) - 1] = '\0';
     }
 
     for (int i = 1; i < argc; ++i) {
@@ -157,6 +1056,32 @@ static kernel_options parse_options(int argc, char **argv)
             opts.show_coherence = true;
         } else if (strcmp(arg, "--auto-tune") == 0) {
             opts.auto_tune = true;
+        } else if (strcmp(arg, "--collective") == 0) {
+            opts.collective_enabled = true;
+        } else if (strcmp(arg, "--collective-trace") == 0) {
+            opts.collective_trace = true;
+        } else if (strcmp(arg, "--collective-memory") == 0) {
+            opts.collective_memory_enabled = true;
+        } else if (strcmp(arg, "--cm-trace") == 0) {
+            opts.collective_memory_trace = true;
+        } else if (strncmp(arg, "--cm-path=", 10) == 0) {
+            const char *value = arg + 10;
+            if (value && *value) {
+                strncpy(opts.cm_path, value, sizeof(opts.cm_path) - 1);
+                opts.cm_path[sizeof(opts.cm_path) - 1] = '\0';
+            }
+        } else if (strncmp(arg, "--cm-snapshot-interval=", 24) == 0) {
+            const char *value = arg + 24;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed > 0) {
+                    if (parsed > INT_MAX) {
+                        parsed = INT_MAX;
+                    }
+                    opts.cm_snapshot_interval = (int)parsed;
+                }
+            }
         } else if (strcmp(arg, "--climate-log") == 0) {
             opts.climate_log = true;
         } else if (strcmp(arg, "--health-scan") == 0) {
@@ -198,6 +1123,31 @@ static kernel_options parse_options(int argc, char **argv)
                     opts.target_coherence = parsed;
                 }
             }
+        } else if (strncmp(arg, "--group-target=", 15) == 0) {
+            const char *value = arg + 15;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    opts.group_target = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--ensemble-strategy=", 20) == 0) {
+            const char *value = arg + 20;
+            if (value && *value) {
+                if (strcmp(value, "avg") == 0) {
+                    opts.ensemble_mode = ENSEMBLE_STRATEGY_AVG;
+                } else if (strcmp(value, "median") == 0) {
+                    opts.ensemble_mode = ENSEMBLE_STRATEGY_MEDIAN;
+                } else if (strcmp(value, "leader") == 0) {
+                    opts.ensemble_mode = ENSEMBLE_STRATEGY_LEADER;
+                }
+            }
         } else if (strncmp(arg, "--council-threshold=", 21) == 0) {
             const char *value = arg + 21;
             if (*value) {
@@ -234,6 +1184,8 @@ static kernel_options parse_options(int argc, char **argv)
             opts.dream_enabled = true;
         } else if (strcmp(arg, "--dream-log") == 0) {
             opts.dream_log = true;
+        } else if (strcmp(arg, "--balancer") == 0) {
+            opts.balancer_enabled = true;
         } else if (strncmp(arg, "--dream-threshold=", 18) == 0) {
             const char *value = arg + 18;
             if (*value) {
@@ -290,6 +1242,290 @@ static kernel_options parse_options(int argc, char **argv)
             opts.empathic_enabled = true;
         } else if (strcmp(arg, "--empathic-trace") == 0) {
             opts.empathic_trace = true;
+        } else if (strcmp(arg, "--anticipation") == 0) {
+            opts.empathic_enabled = true;
+            opts.anticipation_trace = true; // merged by Codex
+        } else if (strcmp(arg, "--anticipation2") == 0) {
+            opts.anticipation2_enabled = true;
+        } else if (strcmp(arg, "--ant2-trace") == 0) {
+            opts.anticipation2_enabled = true;
+            opts.ant2_trace = true;
+        } else if (strncmp(arg, "--ant2-gain=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    opts.anticipation2_enabled = true;
+                    opts.ant2_gain = parsed;
+                }
+            }
+        } else if (strcmp(arg, "--affinity") == 0) {
+            opts.affinity_enabled = true;
+        } else if (strncmp(arg, "--affinity-cfg=", 15) == 0) {
+            const char *value = arg + 15;
+            if (value && *value) {
+                parse_affinity_config(&opts.affinity_config, value);
+            }
+        } else if (strncmp(arg, "--allow-align=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    opts.allow_align_consent = parsed;
+                }
+            }
+        } else if (strcmp(arg, "--bond-trace") == 0) {
+            opts.bond_trace_enabled = true;
+        } else if (strcmp(arg, "--mirror") == 0) {
+            opts.mirror_enabled = true;
+        } else if (strcmp(arg, "--mirror-trace") == 0) {
+            opts.mirror_trace = true;
+        } else if (strcmp(arg, "--introspect") == 0) {
+            opts.introspect_enabled = true;
+        } else if (strcmp(arg, "--harmony") == 0) {
+            opts.harmony_enabled = true;
+        } else if (strcmp(arg, "--astro") == 0) {
+            opts.astro_enabled = true;
+        } else if (strcmp(arg, "--astro-trace") == 0) {
+            opts.astro_trace = true;
+            opts.astro_enabled = true;
+        } else if (strncmp(arg, "--astro-rate=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.astro_rate = clamp_range(parsed, 0.005f, 0.020f);
+                }
+            }
+        } else if (strncmp(arg, "--astro-tone=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.astro_tone_init = clamp_unit(parsed);
+                    opts.astro_tone_set = true;
+                }
+            }
+        } else if (strncmp(arg, "--astro-mem=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.astro_memory_init = clamp_unit(parsed);
+                    opts.astro_memory_set = true;
+                }
+            }
+        } else if (strcmp(arg, "--kiss") == 0) {
+            opts.kiss_enabled = true;
+        } else if (strncmp(arg, "--kiss-thr=", 11) == 0) {
+            const char *value = arg + 11;
+            if (value && *value) {
+                parse_kiss_thresholds(&opts, value);
+            }
+        } else if (strncmp(arg, "--kiss-warmup=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed >= 0L) {
+                    if (parsed > 255L) {
+                        parsed = 255L;
+                    }
+                    opts.kiss_warmup_cycles = (int)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--kiss-refrac=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed >= 0L) {
+                    if (parsed > 255L) {
+                        parsed = 255L;
+                    }
+                    opts.kiss_refractory_cycles = (int)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--kiss-alpha=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed) && parsed > 0.0f) {
+                    if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    opts.kiss_alpha = parsed;
+                }
+            }
+        } else if (strcmp(arg, "--trs") == 0) {
+            opts.trs_enabled = true;
+        } else if (strncmp(arg, "--trs-alpha=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.05f) {
+                        parsed = 0.05f;
+                    } else if (parsed > 0.8f) {
+                        parsed = 0.8f;
+                    }
+                    opts.trs_alpha = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--trs-warmup=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value) {
+                    if (parsed < 0) {
+                        parsed = 0;
+                    } else if (parsed > 10) {
+                        parsed = 10;
+                    }
+                    opts.trs_warmup = (int)parsed;
+                }
+            }
+        } else if (strcmp(arg, "--trs-adapt") == 0) {
+            opts.trs_adapt_enabled = true;
+            opts.trs_enabled = true;
+        } else if (strncmp(arg, "--trs-alpha-min=", 16) == 0) {
+            const char *value = arg + 16;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_alpha_min = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-alpha-max=", 16) == 0) {
+            const char *value = arg + 16;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_alpha_max = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-target-delta=", 20) == 0) {
+            const char *value = arg + 20;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_target_delta = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-kp=", 9) == 0) {
+            const char *value = arg + 9;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_kp = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-ki=", 9) == 0) {
+            const char *value = arg + 9;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_ki = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-kd=", 9) == 0) {
+            const char *value = arg + 9;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_kd = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--mirror-soft=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.1f) {
+                        parsed = 0.1f;
+                    } else if (parsed > 0.9f) {
+                        parsed = 0.9f;
+                    }
+                    opts.mirror_softness = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--amp-min=", 10) == 0) {
+            const char *value = arg + 10;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.mirror_amp_min = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--amp-max=", 10) == 0) {
+            const char *value = arg + 10;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.mirror_amp_max = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--tempo-min=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.mirror_tempo_min = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--tempo-max=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.mirror_tempo_max = parsed;
+                }
+            }
+        } else if (strcmp(arg, "--strict-order") == 0) {
+            opts.strict_order = true;
+        } else if (strcmp(arg, "--dry-run") == 0) {
+            opts.dry_run = true;
         } else if (strncmp(arg, "--emotional-source=", 20) == 0) {
             const char *value = arg + 20;
             if (strcmp(value, "text") == 0) {
@@ -313,22 +1549,28 @@ static kernel_options parse_options(int argc, char **argv)
                     opts.empathy_gain = parsed;
                 }
             }
-        } else if (strcmp(arg, "--recognition-field") == 0) {
-            opts.recognition_field_enabled = true;
-        } else if (strcmp(arg, "--anticipation-trace") == 0) {
-            opts.anticipation_trace = true;
-        } else if (strncmp(arg, "--trend-window=", 15) == 0) {
-            const char *value = arg + 15;
+        } else if (strcmp(arg, "--emotional-memory") == 0) {
+            opts.emotional_memory_enabled = true;
+        } else if (strcmp(arg, "--memory-trace") == 0) {
+            opts.memory_trace = true;
+        } else if (strncmp(arg, "--emotion-trace-path=", 21) == 0) {
+            const char *value = arg + 21;
+            if (value && *value) {
+                strncpy(opts.emotion_trace_path, value, sizeof(opts.emotion_trace_path) - 1U);
+                opts.emotion_trace_path[sizeof(opts.emotion_trace_path) - 1U] = '\0';
+            }
+        } else if (strncmp(arg, "--recognition-threshold=", 24) == 0) {
+            const char *value = arg + 24;
             if (*value) {
                 char *end = NULL;
-                long parsed = strtol(value, &end, 10);
-                if (end != value && parsed > 0) {
-                    if (parsed < EMPATHIC_RECOGNITION_WINDOW_MIN) {
-                        parsed = EMPATHIC_RECOGNITION_WINDOW_MIN;
-                    } else if (parsed > EMPATHIC_RECOGNITION_WINDOW_MAX) {
-                        parsed = EMPATHIC_RECOGNITION_WINDOW_MAX;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.01f) {
+                        parsed = 0.01f;
+                    } else if (parsed > 1.5f) {
+                        parsed = 1.5f;
                     }
-                    opts.trend_window = (int)parsed;
+                    opts.recognition_threshold = parsed;
                 }
             }
         } else if (strncmp(arg, "--vitality-threshold=", 21) == 0) {
@@ -402,6 +1644,12 @@ static kernel_options parse_options(int argc, char **argv)
         }
     }
 
+    normalize_bounds(&opts.mirror_amp_min, &opts.mirror_amp_max, MIRROR_GAIN_AMP_MIN_DEFAULT, MIRROR_GAIN_AMP_MAX_DEFAULT);
+    normalize_bounds(&opts.mirror_tempo_min,
+                     &opts.mirror_tempo_max,
+                     MIRROR_GAIN_TEMPO_MIN_DEFAULT,
+                     MIRROR_GAIN_TEMPO_MAX_DEFAULT);
+
     if (!opts.limit) {
         const char *env = getenv("LIMINAL_PULSE_LIMIT");
         if (env && *env) {
@@ -413,17 +1661,123 @@ static kernel_options parse_options(int argc, char **argv)
         }
     }
 
+    if ((opts.harmony_enabled || opts.dream_enabled) && !opts.introspect_enabled) {
+        opts.introspect_enabled = true;
+    }
+
+    if (opts.astro_trace) {
+        opts.astro_enabled = true;
+    }
+    if (opts.astro_enabled) {
+        if (!opts.introspect_enabled) {
+            opts.introspect_enabled = true;
+        }
+        if (!opts.harmony_enabled) {
+            opts.harmony_enabled = true;
+        }
+    }
+
     return opts;
 }
 
 static void pulse_delay(void)
 {
     const double base_delay = 0.1;
-    double tuned_delay = base_delay * coherence_delay_scale();
-    tuned_delay = awareness_adjust_delay(tuned_delay);
+    double delay_after_coherence = base_delay * coherence_delay_scale();
+    if (!isfinite(delay_after_coherence) || delay_after_coherence <= 0.0) {
+        delay_after_coherence = base_delay;
+    }
+
+    double awareness_scaled = awareness_adjust_delay(delay_after_coherence);
+    double awareness_factor = 1.0;
+    if (delay_after_coherence > 0.0) {
+        awareness_factor = awareness_scaled / delay_after_coherence;
+    }
+    if (!isfinite(awareness_factor) || awareness_factor <= 0.0) {
+        awareness_factor = 1.0;
+    }
+
+    float awareness_adj = (float)(1.0 - awareness_factor);
+    if (!isfinite(awareness_adj)) {
+        awareness_adj = 0.0f;
+    }
+
+    double final_factor = awareness_factor;
+    if (collective_active) {
+        float collective_adj = collective_pending_adjust;
+        if (!isfinite(collective_adj)) {
+            collective_adj = 0.0f;
+        }
+        if (affinity_layer_enabled) {
+            float gated_adj = bond_gate_apply(collective_adj, &bond_gate_state);
+            if (bond_gate_log_enabled()) {
+                bond_gate_trace(&affinity_profile, &bond_gate_state, gated_adj);
+            }
+            collective_adj = gated_adj;
+        }
+        if (fabsf(collective_adj) > 0.0001f) {
+            float total_adj = collective_adj;
+            if (fabsf(awareness_adj) > 0.0001f) {
+                total_adj = 0.5f * awareness_adj + 0.5f * collective_adj;
+            }
+            if (total_adj > 0.95f) {
+                total_adj = 0.95f;
+            } else if (total_adj < -0.95f) {
+                total_adj = -0.95f;
+            }
+            final_factor = 1.0 - (double)total_adj;
+        }
+    }
+
+    if (!isfinite(final_factor)) {
+        final_factor = 1.0;
+    }
+    if (collective_memory_enabled && collective_cycle_count <= 1 && fabsf(collective_warmup_adjust) > 0.0001f) {
+        double warm_factor = 1.0 - (double)collective_warmup_adjust;
+        if (warm_factor < 0.5) {
+            warm_factor = 0.5;
+        } else if (warm_factor > 1.5) {
+            warm_factor = 1.5;
+        }
+        final_factor *= warm_factor;
+    }
+    double baseline_factor = final_factor;
+    if (ant2_module_enabled) {
+        double adjusted_factor = final_factor * (double)ant2_delay_factor;
+        float feedback_delta_rel = 0.0f;
+        if (baseline_factor > 0.0) {
+            feedback_delta_rel = (float)(adjusted_factor / baseline_factor - 1.0);
+        }
+        ant2_feedback_adjust(&ant2_state, feedback_delta_rel, ANT2_FEEDBACK_WINDUP_THRESHOLD);
+        final_factor = adjusted_factor;
+    }
+    if (final_factor < 0.1) {
+        final_factor = 0.1;
+    } else if (final_factor > 2.0) {
+        final_factor = 2.0;
+    }
+
+    double tuned_delay = delay_after_coherence * final_factor;
+    collective_pending_adjust = 0.0f;
+
     tuned_delay *= metabolic_delay_scale();
     tuned_delay *= symbiosis_delay_scale();
     tuned_delay *= empathic_delay_scale();
+    if (astro_layer_enabled) {
+        double astro_scale = (double)astro_feedback_factor;
+        if (astro_scale < 0.85) {
+            astro_scale = 0.85;
+        } else if (astro_scale > 1.15) {
+            astro_scale = 1.15;
+        }
+        if (astro_scale > 0.0) {
+            tuned_delay /= astro_scale;
+        }
+    }
+
+    if (isfinite(mirror_gain_tempo) && mirror_gain_tempo > 0.0f) {
+        tuned_delay /= (double)mirror_gain_tempo;
+    }
 
     const double min_delay = 0.03;
     const double max_delay = 0.25;
@@ -507,60 +1861,49 @@ static void reflect(const kernel_options *opts)
     fputs("reflect\n", stdout);
 }
 
-static void exhale(const kernel_options *opts)
+static float anticipation2_feedforward(const kernel_options *opts)
 {
-    soil_decay();
+    float cycle_influence = affinity_layer_enabled ? clamp_unit(bond_gate_state.influence) : 1.0f;
 
-    const char *label = "exhale";
-    soil_trace trace = soil_trace_make(ENERGY_EXHALE, label, strlen(label));
-    soil_write(&trace);
-
-    static const char exhale_signal[] = "ebb";
-    resonant_msg exhale_msg = resonant_msg_make(SENSOR_EXHALE, RESONANT_BROADCAST_ID, ENERGY_EXHALE, exhale_signal, sizeof(exhale_signal) - 1);
-    bus_emit(&exhale_msg);
-
-    size_t activated = symbol_layer_pulse();
-
-    const Symbol *active[16];
-    size_t active_count = symbol_layer_active(active, sizeof(active) / sizeof(active[0]));
-
-    float energy_sum = 0.0f;
-    float resonance_sum = 0.0f;
-    for (size_t i = 0; i < active_count; ++i) {
-        if (!active[i]) {
-            continue;
+    if (ant2_module_enabled) {
+        float target_coh = opts ? opts->target_coherence : 0.8f;
+        const CoherenceField *previous_field = coherence_state();
+        float actual_coh = previous_field ? clamp_unit(previous_field->coherence) : target_coh;
+        double last_delay = coherence_last_delay();
+        float delay_norm = 1.0f;
+        if (isfinite(last_delay) && ANT2_BASE_DELAY > 0.0f) {
+            delay_norm = (float)(last_delay / ANT2_BASE_DELAY);
         }
-        energy_sum += active[i]->energy;
-        resonance_sum += active[i]->resonance;
+        if (!isfinite(delay_norm) || delay_norm < 0.0f) {
+            delay_norm = 1.0f;
+        }
+        float pred_coh = 0.0f;
+        float pred_delay = 0.0f;
+        float ff = 0.0f;
+        ant2_delay_factor = ant2_feedforward(&ant2_state,
+                                             target_coh,
+                                             actual_coh,
+                                             delay_norm,
+                                             cycle_influence,
+                                             &pred_coh,
+                                             &pred_delay,
+                                             &ff);
+    } else {
+        ant2_delay_factor = 1.0f;
     }
 
-    float energy_avg = 0.0f;
-    float resonance_avg = 0.0f;
-    if (active_count > 0) {
-        energy_avg = energy_sum / (float)active_count;
-        resonance_avg = resonance_sum / (float)active_count;
-    }
+    symbol_set_affinity_scale(cycle_influence);
+    return cycle_influence;
+}
 
-    float stability = 0.0f;
-    if (active_count > 0) {
-        const float max_signal = 12.0f;
-        float energy_norm = energy_avg / max_signal;
-        float resonance_norm = resonance_avg / max_signal;
-        if (energy_norm > 1.0f) {
-            energy_norm = 1.0f;
-        }
-        if (resonance_norm > 1.0f) {
-            resonance_norm = 1.0f;
-        }
-        float presence = (float)active_count / 4.0f;
-        if (presence > 1.0f) {
-            presence = 1.0f;
-        }
-        stability = (energy_norm + resonance_norm) * 0.45f + presence * 0.10f;
-        if (stability > 1.0f) {
-            stability = 1.0f;
-        }
-    }
+static AwarenessCoherenceFeedback
+awareness_coherence_feedback(const kernel_options *opts,
+                             float energy_avg,
+                             float resonance_avg,
+                             float stability,
+                             size_t active_count)
+{
+    AwarenessCoherenceFeedback feedback = {0};
 
     HumanPulse human_pulse = {0.0f, 0.0f, 0.0f};
     float human_alignment = 0.0f;
@@ -569,8 +1912,13 @@ static void exhale(const kernel_options *opts)
     float human_metabolic_intake = 0.0f;
     float human_metabolic_output = 0.0f;
     bool human_bridge_active = opts && opts->human_bridge_enabled;
-    EmpathicResponse empathic_response = {0};
+    EmpathicResponse empathic_response = (EmpathicResponse){0};
     bool empathic_layer_active = opts && opts->empathic_enabled;
+    bool emotional_memory_active = opts && opts->emotional_memory_enabled;
+    float anticipation_field = 0.5f;
+    float anticipation_level = 0.5f;
+    float anticipation_micro = 0.5f;
+    float anticipation_trend = 0.5f;
 
     if (human_bridge_active) {
         float liminal_frequency = resonance_avg / 12.0f;
@@ -608,8 +1956,31 @@ static void exhale(const kernel_options *opts)
     if (empathic_layer_active) {
         float alignment_hint = human_bridge_active ? human_alignment : stability;
         float resonance_hint = clamp_unit(resonance_avg / 12.0f);
+        if (emotional_memory_active) {
+            float boost = emotion_memory_resonance_boost();
+            if (boost > 0.0f) {
+                resonance_hint = clamp_unit(resonance_hint + boost);
+            }
+        }
         empathic_response = empathic_step(opts->target_coherence, alignment_hint, resonance_hint);
         coherence_set_target(empathic_response.target_coherence);
+        anticipation_field = empathic_response.field.anticipation;
+        anticipation_level = empathic_response.anticipation_level;
+        anticipation_micro = empathic_response.micro_pattern_signal;
+        anticipation_trend = empathic_response.prediction_trend;
+        if (opts->anticipation_trace) {
+            printf("anticipation_bridge: field=%.2f level=%.2f micro=%.2f trend=%.2f target=%.2f\n",
+                   anticipation_field,
+                   anticipation_level,
+                   anticipation_micro,
+                   anticipation_trend,
+                   empathic_response.target_coherence);
+        }
+    }
+
+    if (emotional_memory_active) {
+        EmotionField field_snapshot = empathic_layer_active ? empathic_response.field : empathic_field();
+        emotion_memory_update(field_snapshot);
     }
 
     char note[64];
@@ -642,6 +2013,7 @@ static void exhale(const kernel_options *opts)
 
     const DreamState *dream_snapshot = dream_state();
     bool dream_active = dream_snapshot && dream_snapshot->active;
+    DreamAlignmentBalance dream_balance = (DreamAlignmentBalance){0.0f, 0.0f, 0.5f};
     float awareness_energy = awareness_snapshot.awareness_level * 0.6f;
     if (human_bridge_active) {
         awareness_energy += (human_resonance_level - 0.5f) * 0.12f;
@@ -653,20 +2025,7 @@ static void exhale(const kernel_options *opts)
     if (empathic_layer_active) {
         awareness_energy = clamp_unit(awareness_energy + (empathic_response.field.warmth - 0.5f) * 0.08f);
         reflection_energy = clamp_unit(reflection_energy + (0.5f - empathic_response.field.tension) * 0.05f);
-        if (opts->recognition_field_enabled) {
-            if (empathic_response.anxiety_predicted) {
-                awareness_energy = clamp_unit(awareness_energy * 0.94f);
-                float softness_boost = (0.35f - empathic_response.field.tension) * 0.12f;
-                if (softness_boost < 0.0f) {
-                    softness_boost = 0.0f;
-                }
-                reflection_energy = clamp_unit(reflection_energy + 0.05f + softness_boost);
-            } else if (empathic_response.calm_predicted) {
-                float harmony_lift = (empathic_response.field.harmony - 0.5f) * 0.08f;
-                awareness_energy = clamp_unit(awareness_energy + 0.05f + harmony_lift);
-                reflection_energy = clamp_unit(reflection_energy + 0.02f);
-            }
-        }
+        awareness_energy = clamp_unit(awareness_energy + (anticipation_field - 0.5f) * 0.06f);
     }
     float dream_cost = dream_active ? 0.3f : 0.1f;
     float rebirth_cost = 0.0f;
@@ -681,7 +2040,7 @@ static void exhale(const kernel_options *opts)
         awareness_snapshot.awareness_level = clamp_unit(awareness_snapshot.awareness_level + awareness_bias);
     }
 
-    InnerCouncil council = {0};
+    InnerCouncil council = (InnerCouncil){0};
     bool council_active = false;
     float pid_scale = 1.0f;
     if (opts) {
@@ -695,11 +2054,30 @@ static void exhale(const kernel_options *opts)
                                      awareness_snapshot.awareness_level,
                                      coherence_level,
                                      health_drift,
+                                     anticipation_field,
+                                     anticipation_level,
+                                     anticipation_micro,
+                                     anticipation_trend,
                                      opts->council_threshold);
             if (opts->council_enabled) {
                 pid_scale = 1.0f + council.final_decision * 0.1f;
             }
         }
+    }
+
+    dream_balance = dream_alignment_balance(council_active ? &council : NULL,
+                                            dream_snapshot,
+                                            anticipation_field,
+                                            anticipation_level,
+                                            anticipation_trend);
+    anticipation_level = clamp_unit(anticipation_level * 0.7f + dream_balance.anticipation_sync * 0.3f);
+    anticipation_field = clamp_unit(anticipation_field * 0.8f + dream_balance.anticipation_sync * 0.2f);
+    anticipation_trend = clamp_unit(anticipation_trend * 0.85f + dream_balance.balance_strength * 0.08f +
+                                    dream_balance.anticipation_sync * 0.07f);
+    if (council_active) {
+        pid_scale += dream_balance.balance_strength * 0.05f;
+    } else {
+        pid_scale += dream_balance.balance_strength * 0.02f;
     }
 
     if (!isfinite(pid_scale) || pid_scale <= 0.0f) {
@@ -708,14 +2086,542 @@ static void exhale(const kernel_options *opts)
 
     coherence_set_pid_scale(pid_scale);
 
+    float resonance_for_coherence = resonance_avg;
+    float stability_for_coherence = stability;
+    float awareness_for_coherence = awareness_snapshot.awareness_level;
+    if (empathic_layer_active) {
+        float anticipation_bias = (anticipation_level - 0.5f) * 2.0f;
+        float micro_bias = (anticipation_micro - 0.5f) * 1.2f;
+        float trend_bias = (anticipation_trend - 0.5f) * 1.5f;
+        resonance_for_coherence += (anticipation_bias + micro_bias + trend_bias);
+        if (resonance_for_coherence < 0.0f) {
+            resonance_for_coherence = 0.0f;
+        } else if (resonance_for_coherence > 12.0f) {
+            resonance_for_coherence = 12.0f;
+        }
+        stability_for_coherence = clamp_unit(stability + (anticipation_level - 0.5f) * 0.12f);
+        awareness_for_coherence =
+            clamp_unit(awareness_snapshot.awareness_level + (anticipation_trend - 0.5f) * 0.10f);
+    }
+
+    resonance_for_coherence += dream_balance.balance_strength * 0.6f;
+    if (resonance_for_coherence < 0.0f) {
+        resonance_for_coherence = 0.0f;
+    } else if (resonance_for_coherence > 12.0f) {
+        resonance_for_coherence = 12.0f;
+    }
+    stability_for_coherence = clamp_unit(stability_for_coherence + dream_balance.coherence_bias);
+    awareness_for_coherence = clamp_unit(awareness_for_coherence + dream_balance.coherence_bias * 0.5f);
+
     const CoherenceField *coherence_field =
-        coherence_update(energy_avg, resonance_avg, stability, awareness_snapshot.awareness_level);
+        coherence_update(energy_avg, resonance_for_coherence, stability_for_coherence, awareness_for_coherence);
 
     float coherence_level = coherence_field ? coherence_field->coherence : 0.0f;
     if (empathic_layer_active) {
         coherence_level = empathic_apply_coherence(coherence_level);
     }
-    dream_update(coherence_level, awareness_snapshot.awareness_level);
+    dream_update(coherence_level,
+                 awareness_snapshot.awareness_level,
+                 anticipation_field,
+                 anticipation_level,
+                 anticipation_micro,
+                 anticipation_trend,
+                 dream_balance.balance_strength);
+
+    feedback.awareness_snapshot = awareness_snapshot;
+    feedback.coherence_field = coherence_field;
+    feedback.coherence_level = coherence_level;
+    feedback.dream_balance = dream_balance;
+    feedback.council = council;
+    feedback.council_active = council_active;
+    feedback.human_bridge_active = human_bridge_active;
+    feedback.human_pulse = human_pulse;
+    feedback.human_alignment = human_alignment;
+    feedback.human_resonance_level = human_resonance_level;
+    feedback.empathic_layer_active = empathic_layer_active;
+    feedback.empathic_response = empathic_response;
+    feedback.anticipation_field = anticipation_field;
+    feedback.anticipation_level = anticipation_level;
+    feedback.anticipation_micro = anticipation_micro;
+    feedback.anticipation_trend = anticipation_trend;
+    feedback.resonance_for_coherence = resonance_for_coherence;
+    feedback.stability_for_coherence = stability_for_coherence;
+    feedback.awareness_for_coherence = awareness_for_coherence;
+    feedback.energy_avg = energy_avg;
+    feedback.resonance_avg = resonance_avg;
+    feedback.stability = stability;
+
+    return feedback;
+}
+
+static void collective_adjust(const AwarenessCoherenceFeedback *feedback)
+{
+    if (!collective_active) {
+        return;
+    }
+
+    if (!collective_graph.nodes || !collective_graph.edges) {
+        collective_pending_adjust = 0.0f;
+        return;
+    }
+
+    const AwarenessState *awareness_snapshot = &feedback->awareness_snapshot;
+    const CoherenceField *coherence_field = feedback->coherence_field;
+    float coherence_level = feedback->coherence_level;
+    float stability_for_coherence = feedback->stability_for_coherence;
+    const DreamAlignmentBalance *dream_balance = &feedback->dream_balance;
+    bool council_active = feedback->council_active;
+    const InnerCouncil *council = &feedback->council;
+    bool human_bridge_active = feedback->human_bridge_active;
+    const HumanPulse *human_pulse = &feedback->human_pulse;
+    float human_alignment = feedback->human_alignment;
+    bool empathic_layer_active = feedback->empathic_layer_active;
+    const EmpathicResponse *empathic_response = &feedback->empathic_response;
+    float anticipation_level = feedback->anticipation_level;
+    float anticipation_trend = feedback->anticipation_trend;
+    float anticipation_field = feedback->anticipation_field;
+
+    float awareness_vitality = clamp_unit(awareness_snapshot->awareness_level);
+    if (awareness_vitality > 0.0f) {
+        collective_add_node("awareness", awareness_vitality, clamp_unit(awareness_snapshot->self_coherence));
+    }
+
+    float coherence_vitality = clamp_unit(coherence_level);
+    float coherence_pulse = coherence_field ? clamp_unit(coherence_field->resonance_smooth) : coherence_vitality;
+    if (coherence_vitality > 0.0f) {
+        collective_add_node("coherence", coherence_vitality, coherence_pulse);
+    }
+
+    float stability_vitality = clamp_unit(stability_for_coherence);
+    if (stability_vitality > 0.0f) {
+        collective_add_node("stability", stability_vitality, stability_vitality);
+    }
+
+    float dream_vitality = clamp_unit(fabsf(dream_balance->balance_strength));
+    if (dream_vitality > 0.0f) {
+        float dream_pulse = clamp_unit(0.5f + 0.5f * dream_balance->anticipation_sync);
+        collective_add_node("dream", dream_vitality, dream_pulse);
+    }
+
+    if (council_active) {
+        float council_vitality = clamp_unit(fabsf(council->final_decision));
+        if (council_vitality > 0.0f) {
+            float council_pulse = clamp_unit(0.5f + 0.5f * council->final_decision);
+            collective_add_node("council", council_vitality, council_pulse);
+        }
+    }
+
+    if (human_bridge_active) {
+        float human_vitality = clamp_unit(human_alignment);
+        if (human_vitality > 0.0f) {
+            float human_pulse_norm = clamp_unit(human_pulse->beat_rate * 0.5f);
+            collective_add_node("human", human_vitality, human_pulse_norm);
+        }
+    }
+
+    if (empathic_layer_active) {
+        float empathy_vitality = clamp_unit(empathic_response->field.harmony);
+        if (empathy_vitality > 0.0f) {
+            float empathy_pulse = clamp_unit(empathic_response->field.anticipation);
+            collective_add_node("empathy", empathy_vitality, empathy_pulse);
+        }
+    }
+
+    float anticipation_vitality = clamp_unit((anticipation_level + anticipation_trend) * 0.5f);
+    if (anticipation_vitality > 0.0f) {
+        collective_add_node("anticipation", anticipation_vitality, clamp_unit(anticipation_field));
+    }
+
+    collective_connect_complete();
+    rgraph_update_edges(&collective_graph);
+    rgraph_compute_coh(&collective_graph);
+    collective_graph.group_coh = collective_effective_coherence(&collective_graph);
+
+    if (collective_memory_enabled) {
+        collective_signature_value = collective_compute_signature(&collective_graph);
+        collective_signature_ready = true;
+        if (!collective_memory_initialized) {
+            const char *store_path = collective_memory_store_path[0] ? collective_memory_store_path
+                                                                     : "soil/collective_memory.jsonl";
+            collective_memory_match_trace = cm_best_match(collective_signature_value, store_path);
+            if (collective_memory_match_trace) {
+                collective_memory_match_score =
+                    cm_signature_similarity(collective_signature_value, collective_memory_match_trace->signature);
+                int distance =
+                    cm_signature_distance(collective_signature_value, collective_memory_match_trace->signature);
+                float match_coh = collective_memory_match_trace->group_coh_avg;
+                if (!isfinite(match_coh)) {
+                    match_coh = collective_target_level;
+                }
+                match_coh = cm_clamp(match_coh, 0.0f, 1.0f);
+                float blended = 0.5f * 0.82f + 0.5f * match_coh;
+                collective_target_level = clamp_unit(blended);
+                float warmup = collective_memory_match_trace->adjust_avg;
+                if (!isfinite(warmup)) {
+                    warmup = 0.0f;
+                }
+                warmup = cm_clamp(warmup, -0.05f, 0.05f);
+                if (distance > 4) {
+                    warmup = 0.0f;
+                }
+                collective_warmup_adjust = warmup;
+                collective_warmup_cycles_remaining = warmup != 0.0f ? COLLECTIVE_WARMUP_LIMIT : 0;
+            } else {
+                collective_memory_match_score = 0.0f;
+                collective_warmup_adjust = 0.0f;
+                collective_warmup_cycles_remaining = 0;
+            }
+            collective_memory_initialized = true;
+            collective_memory_log_echo(collective_signature_value,
+                                       collective_memory_match_score,
+                                       collective_memory_match_trace,
+                                       collective_warmup_adjust);
+        }
+    } else {
+        collective_signature_ready = false;
+    }
+
+    float adjust = rgraph_ensemble_adjust(&collective_graph, collective_target_level);
+    collective_pending_adjust = adjust;
+    if (collective_graph.n_edges > 0 && fabsf(adjust) > 0.0001f) {
+        bus_emit_wave("ensemble", fabsf(adjust));
+    }
+    collective_trace_log(&collective_graph, adjust);
+    if (collective_memory_enabled && collective_signature_ready) {
+        cm_ring_push(&collective_memory_ring, collective_graph.group_coh, adjust);
+        if (collective_warmup_cycles_remaining > 0) {
+            --collective_warmup_cycles_remaining;
+            if (collective_warmup_cycles_remaining == 0) {
+                collective_warmup_adjust = 0.0f;
+            }
+        }
+        if (cm_should_snapshot(&collective_memory_ring)) {
+            CMemTrace snapshot = cm_build_snapshot(&collective_memory_ring, collective_signature_value);
+            const char *store_path = collective_memory_store_path[0] ? collective_memory_store_path
+                                                                     : "soil/collective_memory.jsonl";
+            cm_store(&snapshot, store_path);
+            collective_memory_log_snapshot(&snapshot);
+        }
+    }
+}
+
+static void exhale(const kernel_options *opts)
+{
+    soil_decay();
+
+    int kiss_flag = 0;
+    float presence_metric = 0.0f;
+    float cycle_influence = anticipation2_feedforward(opts);
+
+    const char *label = "exhale";
+    soil_trace trace = soil_trace_make(ENERGY_EXHALE, label, strlen(label));
+    soil_write(&trace);
+
+    static const char exhale_signal[] = "ebb";
+
+    collective_begin_cycle();
+
+    size_t activated = symbol_layer_pulse();
+
+    const Symbol *active[16];
+    size_t active_count = symbol_layer_active(active, sizeof(active) / sizeof(active[0]));
+
+    float energy_sum = 0.0f;
+    float resonance_sum = 0.0f;
+    for (size_t i = 0; i < active_count; ++i) {
+        if (!active[i]) {
+            continue;
+        }
+        energy_sum += active[i]->energy;
+        resonance_sum += active[i]->resonance;
+    }
+
+    float energy_avg = 0.0f;
+    float resonance_avg = 0.0f;
+    if (active_count > 0) {
+        energy_avg = energy_sum / (float)active_count;
+        resonance_avg = resonance_sum / (float)active_count;
+    }
+
+    if (affinity_layer_enabled) {
+        energy_avg *= cycle_influence;
+        resonance_avg *= cycle_influence;
+    }
+
+    float stability = 0.0f;
+    if (active_count > 0) {
+        const float max_signal = 12.0f;
+        float energy_norm = energy_avg / max_signal;
+        float resonance_norm = resonance_avg / max_signal;
+        if (energy_norm > 1.0f) {
+            energy_norm = 1.0f;
+        }
+        if (resonance_norm > 1.0f) {
+            resonance_norm = 1.0f;
+        }
+        float presence = (float)active_count / 4.0f;
+        if (presence > 1.0f) {
+            presence = 1.0f;
+        }
+        presence_metric = clamp_unit(presence);
+        stability = (energy_norm + resonance_norm) * 0.45f + presence * 0.10f;
+        if (stability > 1.0f) {
+            stability = 1.0f;
+        }
+    }
+
+    if (affinity_layer_enabled) {
+        stability *= cycle_influence;
+        if (stability > 1.0f) {
+            stability = 1.0f;
+        }
+    }
+
+    AwarenessCoherenceFeedback feedback =
+        awareness_coherence_feedback(opts, energy_avg, resonance_avg, stability, active_count);
+
+    energy_avg = feedback.energy_avg;
+    resonance_avg = feedback.resonance_avg;
+    stability = feedback.stability;
+
+    AwarenessState awareness_snapshot = feedback.awareness_snapshot;
+    const CoherenceField *coherence_field = feedback.coherence_field;
+    float coherence_level = feedback.coherence_level;
+    DreamAlignmentBalance dream_balance = feedback.dream_balance;
+    InnerCouncil council = feedback.council;
+    bool council_active = feedback.council_active;
+    bool human_bridge_active = feedback.human_bridge_active;
+    HumanPulse human_pulse = feedback.human_pulse;
+    float human_alignment = feedback.human_alignment;
+    float human_resonance_level = feedback.human_resonance_level;
+
+    float trust_metric = clamp_unit(awareness_snapshot.self_coherence);
+    float awareness_scale = clamp_unit(awareness_snapshot.awareness_level);
+
+    collective_adjust(&feedback);
+
+    if (astro_layer_enabled && astro_priming_pending && collective_signature_ready) {
+        int distance = INT_MAX;
+        const AstroMemory *profile = astro_memory_match(collective_signature_value, &distance);
+        if (profile) {
+            if (!opts || !opts->astro_tone_set) {
+                astro_set_tone(&astro_state, clamp_unit(profile->tone_avg));
+            }
+            if (!opts || !opts->astro_memory_set) {
+                astro_set_memory(&astro_state, clamp_unit(profile->memory_avg));
+            }
+            astro_set_ca_rate(&astro_state, profile->ca_rate);
+        }
+        astro_priming_pending = false;
+    }
+
+    if (affinity_layer_enabled) {
+        float field_coherence = coherence_field ? clamp_unit(coherence_field->coherence) : 0.0f;
+        float explicit_consent = clamp_unit(explicit_consent_level);
+        float implicit_consent = 0.0f;
+        if (human_bridge_active) {
+            implicit_consent = clamp_unit(human_alignment);
+            if (explicit_consent < 0.6f && implicit_consent > 0.6f) {
+                implicit_consent = 0.6f;
+            }
+        }
+        float consent_level = explicit_consent;
+        if (implicit_consent > consent_level) {
+            consent_level = implicit_consent;
+        }
+        bond_gate_update(&bond_gate_state, &affinity_profile, consent_level, field_coherence);
+        bool allow_personal = bond_gate_state.consent >= 0.3f && bond_gate_state.influence > 0.0f;
+        dream_set_affinity_gate(bond_gate_state.influence, allow_personal);
+        cycle_influence = clamp_unit(bond_gate_state.influence);
+    } else {
+        dream_set_affinity_gate(1.0f, true);
+        cycle_influence = 1.0f;
+    }
+
+    float amp_min = opts ? opts->mirror_amp_min : MIRROR_GAIN_AMP_MIN_DEFAULT;
+    float amp_max = opts ? opts->mirror_amp_max : MIRROR_GAIN_AMP_MAX_DEFAULT;
+    float tempo_min = opts ? opts->mirror_tempo_min : MIRROR_GAIN_TEMPO_MIN_DEFAULT;
+    float tempo_max = opts ? opts->mirror_tempo_max : MIRROR_GAIN_TEMPO_MAX_DEFAULT;
+
+    bool mirror_stage_required = mirror_module_enabled || (opts && opts->strict_order);
+    float introspect_consent = affinity_layer_enabled ? bond_gate_state.consent : 1.0f;
+    float introspect_influence = affinity_layer_enabled ? cycle_influence : 1.0f;
+    float introspect_bond = affinity_layer_enabled ? bond_gate_state.bond_coh : 0.0f;
+    if (mirror_stage_required) {
+        float mirror_energy = active_count > 0 ? clamp_unit(energy_avg / 12.0f) : 0.0f;
+        float mirror_calm = clamp_unit(stability);
+        float mirror_tempo = 0.0f;
+        if (coherence_field) {
+            mirror_tempo = clamp_unit(coherence_field->resonance_smooth / 12.0f);
+        } else {
+            mirror_tempo = active_count > 0 ? clamp_unit(resonance_avg / 12.0f) : 0.0f;
+        }
+        float mirror_consent = introspect_consent;
+        float mirror_influence = introspect_influence;
+        if (mirror_consent < 0.3f || mirror_influence < 0.3f) {
+            mirror_reset();
+            mirror_gain_amp = clamp_range(1.0f, amp_min, amp_max);
+            mirror_gain_tempo = clamp_range(1.0f, tempo_min, tempo_max);
+        } else if (mirror_module_enabled) {
+            MirrorGains mirror_gains =
+                mirror_update(mirror_influence, mirror_energy, mirror_calm, mirror_tempo, mirror_consent);
+            mirror_gain_amp = clamp_range(mirror_gains.gain_amp, amp_min, amp_max);
+            mirror_gain_tempo = clamp_range(mirror_gains.gain_tempo, tempo_min, tempo_max);
+            if (fabsf(mirror_gain_amp - 1.0f) > 0.0001f) {
+                symbol_scale_active(mirror_gain_amp);
+            }
+        } else {
+            mirror_reset();
+            mirror_gain_amp = clamp_range(1.0f, amp_min, amp_max);
+            mirror_gain_tempo = clamp_range(1.0f, tempo_min, tempo_max);
+        }
+    } else {
+        mirror_gain_amp = clamp_range(1.0f, amp_min, amp_max);
+        mirror_gain_tempo = clamp_range(1.0f, tempo_min, tempo_max);
+    }
+
+    Metrics introspect_metrics = {
+        .amp = mirror_gain_amp,
+        .tempo = mirror_gain_tempo,
+        .consent = introspect_consent,
+        .influence = introspect_influence,
+        .bond_coh = introspect_bond,
+        .error_margin = fabsf(mirror_gain_amp - mirror_gain_tempo),
+        .harmony = clamp_unit(coherence_level),
+        .kiss = 0
+    };
+
+    if (opts && opts->dream_enabled) {
+        Metrics preview_metrics = introspect_metrics;
+        preview_metrics.amp = clamp_unit(energy_avg / 12.0f);
+        float harmony_signal = coherence_level;
+        if (dream_balance.balance_strength > 0.0f) {
+            harmony_signal += dream_balance.balance_strength * 0.3f;
+        }
+        float tempo_balance = clamp_unit(mirror_gain_tempo);
+        harmony_signal += (1.0f - tempo_balance) * 0.25f;
+        preview_metrics.harmony = clamp_unit(harmony_signal);
+        float tempo_signal = mirror_gain_tempo * (1.0f + cycle_influence);
+        if (!isfinite(tempo_signal)) {
+            tempo_signal = mirror_gain_tempo;
+        }
+        preview_metrics.tempo = tempo_signal;
+        DreamCouplerPhase preview_phase = dream_coupler_evaluate(&preview_metrics);
+        introspect_set_dream_preview(&introspect_state, preview_phase, true);
+    } else {
+        introspect_set_dream_preview(&introspect_state, introspect_state.dream_phase, false);
+    }
+
+    Metrics harmony_metrics = introspect_metrics;
+    if (opts && (opts->harmony_enabled || opts->dream_enabled)) {
+        harmony_sync(&introspect_state, &harmony_metrics);
+    }
+
+    float harmony_metric = clamp_unit(harmony_metrics.harmony);
+    if (kiss_module_enabled) {
+        bool kiss_fired = kiss_update(trust_metric, presence_metric, harmony_metric, awareness_scale);
+        if (kiss_fired) {
+            kiss_flag = 1;
+            float blended = (trust_metric + presence_metric + harmony_metric) / 3.0f;
+            float energy_level = clamp_unit(blended);
+            uint32_t energy = (uint32_t)(energy_level * 120.0f);
+            if (energy == 0U) {
+                energy = 1U;
+            }
+            struct {
+                float trust;
+                float presence;
+                float harmony;
+                float awareness;
+            } payload = { trust_metric, presence_metric, harmony_metric, awareness_scale };
+            resonant_msg kiss_msg =
+                resonant_msg_make(RES_KISS_SOURCE_ID, RESONANT_BROADCAST_ID, energy, &payload, sizeof(payload));
+            bus_emit(&kiss_msg);
+            symbol_nudge_from_kiss();
+        }
+    }
+    introspect_metrics.kiss = kiss_flag;
+
+    introspect_tick(&introspect_state, &introspect_metrics);
+    float astro_factor = 1.0f;
+    if (astro_layer_enabled) {
+        float harmony_signal = clamp_unit(harmony_metrics.harmony);
+        float group_coherence = collective_active ? clamp_unit(collective_graph.group_coh) : clamp_unit(coherence_level);
+        float trs_delta = fabsf(introspect_get_last_trs_delta());
+        float consent_level = introspect_consent;
+        float influence_level = introspect_influence;
+        astro_update(&astro_state, harmony_signal, group_coherence, trs_delta, consent_level, influence_level);
+        float astro_gain = astro_modulate_feedback(&astro_state);
+        if (consent_level < 0.3f) {
+            astro_gain = 1.0f;
+        }
+        astro_factor = clamp_range(astro_gain, 0.85f, 1.15f);
+        astro_feedback_factor = astro_factor;
+        astro_trace_log_state(astro_state.last_stability, astro_gain);
+        bool stable_window = astro_state.memory > 0.7f && astro_state.last_stability > 0.8f;
+        if (stable_window) {
+            astro_window_accumulate(astro_state.tone, astro_state.memory, astro_state.last_stability);
+            if (astro_window.consecutive >= ASTRO_STABLE_WINDOW) {
+                float samples = (float)astro_window.consecutive;
+                float tone_avg = astro_window.tone_sum / samples;
+                float memory_avg = astro_window.memory_sum / samples;
+                float stability_avg = astro_window.stability_sum / samples;
+                uint32_t signature = collective_signature_ready ? collective_signature_value : 0U;
+                astro_memory_store_snapshot(signature, tone_avg, memory_avg, stability_avg);
+                astro_window_reset();
+            }
+        } else if (astro_window.consecutive > 0) {
+            astro_window_reset();
+        }
+        harmony_metrics.amp = clamp_unit(harmony_metrics.amp * astro_factor);
+        harmony_metrics.tempo = clamp_range(harmony_metrics.tempo * astro_factor, 0.2f, 2.0f);
+    } else {
+        astro_feedback_factor = 1.0f;
+        if (astro_window.consecutive > 0) {
+            astro_window_reset();
+        }
+    }
+    if (astro_layer_enabled && opts && opts->dream_enabled) {
+        Metrics preview_metrics = introspect_metrics;
+        preview_metrics.amp = clamp_unit((energy_avg / 12.0f) * astro_factor);
+        float harmony_signal = coherence_level;
+        if (dream_balance.balance_strength > 0.0f) {
+            harmony_signal += dream_balance.balance_strength * 0.3f;
+        }
+        float tempo_balance = clamp_unit(mirror_gain_tempo);
+        harmony_signal += (1.0f - tempo_balance) * 0.25f;
+        preview_metrics.harmony = clamp_unit(harmony_signal);
+        float tempo_signal = mirror_gain_tempo * (1.0f + cycle_influence);
+        if (!isfinite(tempo_signal)) {
+            tempo_signal = mirror_gain_tempo;
+        }
+        tempo_signal *= astro_factor;
+        preview_metrics.tempo = tempo_signal;
+        DreamCouplerPhase preview_phase = dream_coupler_evaluate(&preview_metrics);
+        introspect_set_dream_preview(&introspect_state, preview_phase, true);
+    }
+    if (opts && opts->dream_enabled) {
+        Metrics coupling_metrics = harmony_metrics;
+        coupling_metrics.amp = clamp_unit((energy_avg / 12.0f) * astro_factor);
+        float harmony_signal = coherence_level;
+        if (dream_balance.balance_strength > 0.0f) {
+            harmony_signal += dream_balance.balance_strength * 0.3f;
+        }
+        float tempo_balance = clamp_unit(mirror_gain_tempo);
+        harmony_signal += (1.0f - tempo_balance) * 0.25f;
+        coupling_metrics.harmony = clamp_unit(harmony_signal);
+        float tempo_signal = mirror_gain_tempo * (1.0f + cycle_influence);
+        if (!isfinite(tempo_signal)) {
+            tempo_signal = mirror_gain_tempo;
+        }
+        tempo_signal *= astro_factor;
+        coupling_metrics.tempo = tempo_signal;
+        dream_couple(&introspect_state, &coupling_metrics);
+    }
+
+    if (collective_active) {
+        ++collective_cycle_count;
+    }
 
     if (opts && opts->show_symbols) {
         if (activated == 0) {
@@ -769,11 +2675,17 @@ static void exhale(const kernel_options *opts)
     }
 
     if (opts && opts->council_log && council_active) {
-        printf("council: refl=%+0.2f aware=%+0.2f coh=%+0.2f health=%+0.2f => decision=%+0.2f\n",
+        printf("council: refl=%+0.2f aware=%+0.2f coh=%+0.2f health=%+0.2f anti=%+0.2f (field=%+0.2f level=%+0.2f micro=%+0.2f trend=%+0.2f) bal=%+0.2f => decision=%+0.2f\n",
                council.reflection_vote,
                council.awareness_vote,
                council.coherence_vote,
                council.health_vote,
+               council.anticipation_vote,
+               council.anticipation_field_vote,
+               council.anticipation_level_vote,
+               council.anticipation_micro_vote,
+               council.anticipation_trend_vote,
+               dream_balance.balance_strength,
                council.final_decision);
     }
 
@@ -809,6 +2721,10 @@ static void exhale(const kernel_options *opts)
         }
     }
 
+    resonant_msg exhale_msg =
+        resonant_msg_make(SENSOR_EXHALE, RESONANT_BROADCAST_ID, ENERGY_EXHALE, exhale_signal, sizeof(exhale_signal) - 1);
+    bus_emit(&exhale_msg);
+
     fputs("exhale\n", stdout);
 }
 
@@ -838,6 +2754,101 @@ int main(int argc, char **argv)
 {
     kernel_options opts = parse_options(argc, argv);
 
+    introspect_state_init(&introspect_state);
+    introspect_enable(&introspect_state, opts.introspect_enabled);
+    introspect_enable_harmony(
+        &introspect_state,
+        opts.harmony_enabled || opts.dream_enabled);
+    introspect_configure_trs(opts.trs_enabled,
+                             opts.trs_alpha,
+                             opts.trs_warmup,
+                             opts.trs_adapt_enabled,
+                             opts.trs_alpha_min,
+                             opts.trs_alpha_max,
+                             opts.trs_target_delta,
+                             opts.trs_kp,
+                             opts.trs_ki,
+                             opts.trs_kd,
+                             opts.dry_run);
+
+    astro_layer_enabled = opts.astro_enabled;
+    astro_trace_enabled = opts.astro_trace;
+    astro_feedback_factor = 1.0f;
+    astro_trace_close();
+    astro_window_reset();
+    astro_memory_count = 0;
+    astro_priming_pending = false;
+    if (astro_layer_enabled) {
+        astro_init(&astro_state);
+        astro_set_ca_rate(&astro_state, opts.astro_rate);
+        if (opts.astro_tone_set) {
+            astro_set_tone(&astro_state, opts.astro_tone_init);
+        }
+        if (opts.astro_memory_set) {
+            astro_set_memory(&astro_state, opts.astro_memory_init);
+        }
+        astro_memory_load_cache();
+        astro_priming_pending = true;
+    } else {
+        astro_state.tone = 0.0f;
+        astro_state.memory = 0.0f;
+        astro_state.drift = 0.0f;
+    }
+
+    if (opts.dry_run) {
+        char sequence[128];
+        format_exhale_sequence(&opts, sequence, sizeof(sequence));
+        puts("liminal_core dry run");
+        printf("strict-order: %s\n", opts.strict_order ? "enabled" : "disabled");
+        printf("exhale sequence: %s\n", sequence[0] ? sequence : "(none)");
+        printf("mirror clamps: amp=[%.2f, %.2f] tempo=[%.2f, %.2f]\n",
+               opts.mirror_amp_min,
+               opts.mirror_amp_max,
+               opts.mirror_tempo_min,
+               opts.mirror_tempo_max);
+        return 0;
+    }
+
+    collective_active = opts.collective_enabled || opts.collective_trace;
+    collective_trace_enabled = opts.collective_trace;
+    collective_strategy = opts.ensemble_mode;
+    collective_target_level = clamp_unit(opts.group_target);
+    collective_pending_adjust = 0.0f;
+    collective_memory_enabled = collective_active && opts.collective_memory_enabled;
+    collective_memory_trace_enabled = opts.collective_memory_trace;
+    collective_memory_initialized = false;
+    collective_signature_ready = false;
+    collective_memory_match_score = 0.0f;
+    collective_warmup_adjust = 0.0f;
+    collective_warmup_cycles_remaining = 0;
+    collective_cycle_count = 0;
+    if (collective_memory_match_trace) {
+        cm_trace_free(collective_memory_match_trace);
+        collective_memory_match_trace = NULL;
+    }
+    collective_flag_anticipation = opts.anticipation_trace;
+    collective_flag_dream = opts.dream_enabled;
+    collective_flag_balancer = opts.balancer_enabled;
+    if (collective_memory_enabled) {
+        strncpy(collective_memory_store_path, opts.cm_path, sizeof(collective_memory_store_path) - 1);
+        collective_memory_store_path[sizeof(collective_memory_store_path) - 1] = '\0';
+        cm_ring_reset(&collective_memory_ring);
+        cm_set_snapshot_interval(opts.cm_snapshot_interval);
+    } else {
+        collective_memory_store_path[0] = '\0';
+    }
+    if (collective_active) {
+        collective_node_capacity = COLLECTIVE_DEFAULT_NODES;
+        if (collective_node_capacity < 2) {
+            collective_node_capacity = 2;
+        }
+        collective_edge_capacity = (collective_node_capacity * (collective_node_capacity - 1)) / 2;
+        rgraph_init(&collective_graph, collective_node_capacity, collective_edge_capacity);
+    } else {
+        collective_node_capacity = 0;
+        collective_edge_capacity = 0;
+    }
+
     soil_init();
     bus_init();
     bus_register_sensor(SENSOR_INHALE);
@@ -851,6 +2862,22 @@ int main(int argc, char **argv)
     coherence_init();
     coherence_set_target(opts.target_coherence);
     coherence_enable_logging(opts.climate_log);
+    kiss_module_enabled = opts.kiss_enabled;
+    if (kiss_module_enabled) {
+        kiss_init();
+        kiss_set_thresholds(opts.kiss_trust_threshold,
+                            opts.kiss_presence_threshold,
+                            opts.kiss_harmony_threshold);
+        if (opts.kiss_warmup_cycles < 0) {
+            opts.kiss_warmup_cycles = 0;
+        }
+        if (opts.kiss_refractory_cycles < 0) {
+            opts.kiss_refractory_cycles = 0;
+        }
+        kiss_set_warmup((uint8_t)opts.kiss_warmup_cycles);
+        kiss_set_refractory((uint8_t)opts.kiss_refractory_cycles);
+        kiss_set_alpha(opts.kiss_alpha);
+    }
     health_scan_init();
     if (opts.enable_health_scan) {
         health_scan_set_interval(opts.scan_interval);
@@ -876,11 +2903,46 @@ int main(int argc, char **argv)
     metabolic_set_thresholds(opts.vitality_rest_threshold, opts.vitality_creative_threshold);
     empathic_init(opts.emotional_source, opts.empathic_trace, opts.empathy_gain);
     empathic_enable(opts.empathic_enabled);
-    empathic_set_trend_window(opts.trend_window);
-    empathic_recognition_enable(opts.recognition_field_enabled);
-    empathic_recognition_trace(opts.anticipation_trace);
+    emotion_memory_configure(opts.emotional_memory_enabled,
+                             opts.memory_trace,
+                             opts.emotion_trace_path[0] ? opts.emotion_trace_path : NULL,
+                             opts.recognition_threshold);
     symbiosis_init(opts.human_source, opts.human_trace, opts.human_resonance_gain);
     symbiosis_enable(opts.human_bridge_enabled);
+
+    bond_gate_set_log_enabled(opts.bond_trace_enabled);
+    affinity_layer_enabled = opts.affinity_enabled;
+    affinity_profile = opts.affinity_config;
+    explicit_consent_level = clamp_unit(opts.allow_align_consent);
+    bond_gate_reset(&bond_gate_state);
+    if (affinity_layer_enabled) {
+        bond_gate_update(&bond_gate_state, &affinity_profile, explicit_consent_level, 0.0f);
+        float initial_influence = clamp_unit(bond_gate_state.influence);
+        symbol_set_affinity_scale(initial_influence);
+        dream_set_affinity_gate(bond_gate_state.influence, bond_gate_state.consent >= 0.3f);
+    } else {
+        bond_gate_state.influence = 1.0f;
+        bond_gate_state.consent = 0.0f;
+        bond_gate_state.bond_coh = 0.0f;
+        bond_gate_state.safety = 0.0f;
+        symbol_set_affinity_scale(1.0f);
+        dream_set_affinity_gate(1.0f, true);
+    }
+
+    mirror_reset();
+    mirror_set_softness(opts.mirror_softness);
+    mirror_set_trace(opts.mirror_trace);
+    mirror_enable(opts.mirror_enabled);
+    mirror_module_enabled = opts.mirror_enabled;
+    mirror_gain_amp = 1.0f;
+    mirror_gain_tempo = 1.0f;
+
+    ant2_module_enabled = opts.anticipation2_enabled;
+    ant2_delay_factor = 1.0f;
+    if (ant2_module_enabled) {
+        ant2_init(&ant2_state, opts.ant2_gain);
+        ant2_set_trace(opts.ant2_trace);
+    }
     uint64_t pulses = 0;
     while (!opts.limit || pulses < opts.limit) {
         inhale();
@@ -914,7 +2976,17 @@ int main(int argc, char **argv)
         reflect_dump(10);
     }
 
+    emotion_memory_finalize();
     metabolic_shutdown();
+
+    introspect_finalize(&introspect_state);
+
+    if (collective_memory_match_trace) {
+        cm_trace_free(collective_memory_match_trace);
+        collective_memory_match_trace = NULL;
+    }
+
+    astro_trace_close();
 
     return 0;
 }

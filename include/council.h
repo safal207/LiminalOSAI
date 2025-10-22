@@ -1,5 +1,5 @@
-#ifndef COUNCIL_H
-#define COUNCIL_H
+#ifndef LIMINAL_COUNCIL_H
+#define LIMINAL_COUNCIL_H
 
 #include <stddef.h>
 
@@ -7,11 +7,16 @@
 extern "C" {
 #endif
 
-typedef struct {
+typedef struct InnerCouncil {
     float reflection_vote;
     float awareness_vote;
     float coherence_vote;
     float health_vote;
+    float anticipation_vote;
+    float anticipation_field_vote;
+    float anticipation_level_vote;
+    float anticipation_micro_vote;
+    float anticipation_trend_vote;
     float final_decision;
 } InnerCouncil;
 
@@ -21,6 +26,10 @@ InnerCouncil council_update(float reflection_stability,
                             float awareness_level,
                             float coherence_level,
                             float health_drift,
+                            float anticipation_field,
+                            float anticipation_level,
+                            float anticipation_micro,
+                            float anticipation_trend,
                             float decision_threshold);
 const InnerCouncil *council_state(void);
 
@@ -29,4 +38,4 @@ const InnerCouncil *council_state(void);
 }
 #endif
 
-#endif /* COUNCIL_H */
+#endif /* LIMINAL_COUNCIL_H */

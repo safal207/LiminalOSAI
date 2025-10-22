@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_HEALTH_SCAN_H
-#define LIMINAL_INCLUDE_HEALTH_SCAN_H
+#ifndef LIMINAL_HEALTH_SCAN_H
+#define LIMINAL_HEALTH_SCAN_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -29,4 +29,4 @@ const HealthScan *health_scan_state(void);
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_HEALTH_SCAN_H */
+#endif /* LIMINAL_HEALTH_SCAN_H */

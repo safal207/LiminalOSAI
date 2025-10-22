@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_METABOLIC_H
-#define LIMINAL_INCLUDE_METABOLIC_H
+#ifndef LIMINAL_METABOLIC_H
+#define LIMINAL_METABOLIC_H
 
 #include <stdbool.h>
 
@@ -30,4 +30,4 @@ void metabolic_shutdown(void);
 }
 #endif
 
-#endif /* LIMINAL_INCLUDE_METABOLIC_H */
+#endif /* LIMINAL_METABOLIC_H */

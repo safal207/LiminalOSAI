@@ -1,5 +1,5 @@
-#ifndef LIMINAL_INCLUDE_COHERENCE_H
-#define LIMINAL_INCLUDE_COHERENCE_H
+#ifndef LIMINAL_COHERENCE_H
+#define LIMINAL_COHERENCE_H
 
 #include <stdbool.h>
 
@@ -25,5 +25,6 @@ void coherence_register_delay(double seconds);
 double coherence_last_delay(void);
 float coherence_adjustment(void);
 void coherence_set_pid_scale(float scale);
+void coherence_apply_kiss_boost(float delta);
 
-#endif /* LIMINAL_INCLUDE_COHERENCE_H */
+#endif /* LIMINAL_COHERENCE_H */
