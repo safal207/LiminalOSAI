@@ -1,5 +1,7 @@
 #include "harmony.h"
 
+#include "introspect.h"
+
 #include <math.h>
 
 static double sanitize_metric(double value)
@@ -10,7 +12,7 @@ static double sanitize_metric(double value)
     return value;
 }
 
-void harmony_sync(State *state, Metrics *metrics)
+void harmony_sync(struct introspect_state *state, struct introspect_metrics *metrics)
 {
     if (!state || !metrics) {
         return;
@@ -19,7 +21,6 @@ void harmony_sync(State *state, Metrics *metrics)
     if (!state->enabled || !state->harmony_enabled) {
         return;
     }
-
     double amp = sanitize_metric(metrics->amp);
     double tempo = sanitize_metric(metrics->tempo);
     double influence = sanitize_metric(metrics->influence);

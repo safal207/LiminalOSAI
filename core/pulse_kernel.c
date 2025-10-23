@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 199309L
 
+#include <ctype.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -37,6 +38,8 @@
 #include "mirror.h"
 #include "introspect.h"
 #include "harmony.h"
+#include "astro_sync.h"
+#include "kiss.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -49,6 +52,11 @@
 #ifndef EMOTION_TRACE_PATH_MAX
 #define EMOTION_TRACE_PATH_MAX 256
 #endif
+
+#define ASTRO_TRACE_PATH "logs/astro_trace.jsonl"
+#define ASTRO_MEMORY_PATH "soil/astro_memory.jsonl"
+#define ASTRO_MEMORY_CAPACITY 64
+#define ASTRO_STABLE_WINDOW 10
 
 typedef enum {
     ENSEMBLE_STRATEGY_AVG = 0,
@@ -122,6 +130,30 @@ typedef struct {
     float mirror_tempo_max;
     bool introspect_enabled;
     bool harmony_enabled;
+    bool astro_enabled;
+    bool astro_trace;
+    float astro_rate;
+    float astro_tone_init;
+    float astro_memory_init;
+    bool astro_tone_set;
+    bool astro_memory_set;
+    bool trs_enabled;
+    float trs_alpha;
+    int trs_warmup;
+    bool trs_adapt_enabled;
+    float trs_alpha_min;
+    float trs_alpha_max;
+    float trs_target_delta;
+    float trs_kp;
+    float trs_ki;
+    float trs_kd;
+    bool kiss_enabled;
+    float kiss_trust_threshold;
+    float kiss_presence_threshold;
+    float kiss_harmony_threshold;
+    int kiss_warmup_cycles;
+    int kiss_refractory_cycles;
+    float kiss_alpha;
     bool strict_order;
     bool dry_run;
 } kernel_options;
@@ -169,6 +201,7 @@ static size_t build_exhale_sequence(const kernel_options *opts, const char **ste
     bool include_mirror = strict || (opts && opts->mirror_enabled);
     bool include_introspect = strict || (opts && opts->introspect_enabled);
     bool include_harmony = strict || include_introspect || (opts && (opts->harmony_enabled || opts->dream_enabled));
+    bool include_astro = strict || (opts && opts->astro_enabled);
     bool include_dream = opts && opts->dream_enabled;
 
     if (include_ant2 && count < capacity) {
@@ -191,6 +224,9 @@ static size_t build_exhale_sequence(const kernel_options *opts, const char **ste
     }
     if (include_harmony && count < capacity) {
         steps[count++] = "harmony";
+    }
+    if (include_astro && count < capacity) {
+        steps[count++] = "astro";
     }
     if (include_dream && count < capacity) {
         steps[count++] = "dream";
@@ -304,6 +340,193 @@ static void parse_affinity_config(Affinity *aff, const char *value)
     }
 }
 
+static void parse_kiss_thresholds(kernel_options *opts, const char *value)
+{
+    if (!opts || !value) {
+        return;
+    }
+
+    char buffer[128];
+    strncpy(buffer, value, sizeof(buffer) - 1U);
+    buffer[sizeof(buffer) - 1U] = '\0';
+
+    char *token = strtok(buffer, ",");
+    while (token) {
+        while (*token && isspace((unsigned char)*token)) {
+            ++token;
+        }
+        char *colon = strchr(token, ':');
+        if (colon && colon[1] != '\0') {
+            *colon = '\0';
+            const char *name = token;
+            const char *val_text = colon + 1;
+            while (*val_text && isspace((unsigned char)*val_text)) {
+                ++val_text;
+            }
+            char *end = NULL;
+            float parsed = strtof(val_text, &end);
+            if (end != val_text && isfinite(parsed)) {
+                float clamped = clamp_unit(parsed);
+                if (strcmp(name, "trust") == 0 || strcmp(name, "tr") == 0) {
+                    opts->kiss_trust_threshold = clamped;
+                } else if (strcmp(name, "pres") == 0 || strcmp(name, "presence") == 0) {
+                    opts->kiss_presence_threshold = clamped;
+                } else if (strcmp(name, "harm") == 0 || strcmp(name, "harmony") == 0) {
+                    opts->kiss_harmony_threshold = clamped;
+                }
+            }
+        }
+        token = strtok(NULL, ",");
+    }
+}
+
+static Astro astro_state;
+static bool astro_layer_enabled = false;
+static bool astro_trace_enabled = false;
+static FILE *astro_trace_stream = NULL;
+static float astro_feedback_factor = 1.0f;
+static bool astro_priming_pending = false;
+static AstroMemory astro_memory_cache[ASTRO_MEMORY_CAPACITY];
+static size_t astro_memory_count = 0;
+
+typedef struct {
+    int consecutive;
+    float tone_sum;
+    float memory_sum;
+    float stability_sum;
+} AstroStableWindow;
+
+static AstroStableWindow astro_window = {0, 0.0f, 0.0f, 0.0f};
+
+static void astro_window_reset(void)
+{
+    astro_window.consecutive = 0;
+    astro_window.tone_sum = 0.0f;
+    astro_window.memory_sum = 0.0f;
+    astro_window.stability_sum = 0.0f;
+}
+
+static void astro_window_accumulate(float tone, float memory, float stability)
+{
+    astro_window.consecutive += 1;
+    astro_window.tone_sum += tone;
+    astro_window.memory_sum += memory;
+    astro_window.stability_sum += stability;
+}
+
+static void astro_trace_close(void)
+{
+    if (astro_trace_stream) {
+        fclose(astro_trace_stream);
+        astro_trace_stream = NULL;
+    }
+}
+
+static void astro_trace_log_state(float stability, float gain)
+{
+    if (!astro_trace_enabled) {
+        return;
+    }
+    if (!astro_trace_stream) {
+        astro_trace_stream = fopen(ASTRO_TRACE_PATH, "a");
+        if (!astro_trace_stream) {
+            astro_trace_enabled = false;
+            return;
+        }
+    }
+    fprintf(astro_trace_stream,
+            "{\"tone\":%.4f,\"memory\":%.4f,\"drift\":%.4f,\"ca_rate\":%.5f,\"ca_phase\":%.4f,"
+            "\"stability\":%.4f,\"agitation\":%.4f,\"astro_gain\":%.4f}\n",
+            astro_state.tone,
+            astro_state.memory,
+            astro_state.drift,
+            astro_state.ca_rate,
+            astro_state.ca_phase,
+            stability,
+            astro_state.last_agitation,
+            gain);
+    fflush(astro_trace_stream);
+}
+
+static void astro_trace_log_consolidate(float tone_avg,
+                                        float memory_avg,
+                                        float stability_avg,
+                                        uint32_t signature)
+{
+    if (!astro_trace_enabled) {
+        return;
+    }
+    if (!astro_trace_stream) {
+        astro_trace_stream = fopen(ASTRO_TRACE_PATH, "a");
+        if (!astro_trace_stream) {
+            astro_trace_enabled = false;
+            return;
+        }
+    }
+    fprintf(astro_trace_stream,
+            "{\"consolidate\":true,\"tone_avg\":%.4f,\"mem_avg\":%.4f,\"ca_rate\":%.5f,"
+            "\"stability_avg\":%.4f,\"signature\":%u,\"saved\":\"%s\"}\n",
+            tone_avg,
+            memory_avg,
+            astro_state.ca_rate,
+            stability_avg,
+            signature,
+            ASTRO_MEMORY_PATH);
+    fflush(astro_trace_stream);
+}
+
+static void astro_memory_load_cache(void)
+{
+    astro_memory_count = astro_memory_load(ASTRO_MEMORY_PATH, astro_memory_cache, ASTRO_MEMORY_CAPACITY);
+    if (astro_memory_count > ASTRO_MEMORY_CAPACITY) {
+        astro_memory_count = ASTRO_MEMORY_CAPACITY;
+    }
+}
+
+static const AstroMemory *astro_memory_match(uint32_t signature, int *out_distance)
+{
+    if (astro_memory_count == 0) {
+        if (out_distance) {
+            *out_distance = INT_MAX;
+        }
+        return NULL;
+    }
+    const AstroMemory *best = NULL;
+    int best_distance = INT_MAX;
+    for (size_t i = 0; i < astro_memory_count; ++i) {
+        uint32_t entry_sig = astro_memory_cache[i].signature;
+        int distance = cm_signature_distance(signature, entry_sig);
+        if (distance < best_distance) {
+            best_distance = distance;
+            best = &astro_memory_cache[i];
+        }
+    }
+    if (out_distance) {
+        *out_distance = best_distance;
+    }
+    if (best_distance > 6) {
+        return NULL;
+    }
+    return best;
+}
+
+static void astro_memory_store_snapshot(uint32_t signature,
+                                        float tone_avg,
+                                        float memory_avg,
+                                        float stability_avg)
+{
+    uint64_t now = (uint64_t)time(NULL);
+    AstroMemory snapshot = astro_memory_make(signature, tone_avg, memory_avg, astro_state.ca_rate, stability_avg, now);
+    if (astro_memory_append(ASTRO_MEMORY_PATH, &snapshot)) {
+        if (astro_memory_count < ASTRO_MEMORY_CAPACITY) {
+            astro_memory_cache[astro_memory_count++] = snapshot;
+        } else if (astro_memory_count > 0) {
+            astro_memory_cache[astro_memory_count - 1] = snapshot;
+        }
+        astro_trace_log_consolidate(tone_avg, memory_avg, stability_avg, signature);
+    }
+}
+
 static RGraph collective_graph = {0};
 static bool collective_active = false;
 static bool collective_trace_enabled = false;
@@ -341,9 +564,8 @@ static const float ANT2_BASE_DELAY = 0.1f;
 static bool mirror_module_enabled = false;
 static float mirror_gain_amp = 1.0f;
 static float mirror_gain_tempo = 1.0f;
+static bool kiss_module_enabled = false;
 static State introspect_state;
-
-
 typedef struct {
     AwarenessState awareness_snapshot;
     const CoherenceField *coherence_field;
@@ -775,6 +997,30 @@ static kernel_options parse_options(int argc, char **argv)
         .mirror_tempo_max = MIRROR_GAIN_TEMPO_MAX_DEFAULT,
         .introspect_enabled = false,
         .harmony_enabled = false,
+        .astro_enabled = false,
+        .astro_trace = false,
+        .astro_rate = 0.010f,
+        .astro_tone_init = 0.0f,
+        .astro_memory_init = 0.0f,
+        .astro_tone_set = false,
+        .astro_memory_set = false,
+        .trs_enabled = false,
+        .trs_alpha = 0.3f,
+        .trs_warmup = 5,
+        .trs_adapt_enabled = false,
+        .trs_alpha_min = 0.10f,
+        .trs_alpha_max = 0.60f,
+        .trs_target_delta = 0.015f,
+        .trs_kp = 0.4f,
+        .trs_ki = 0.05f,
+        .trs_kd = 0.1f,
+        .kiss_enabled = false,
+        .kiss_trust_threshold = 0.80f,
+        .kiss_presence_threshold = 0.70f,
+        .kiss_harmony_threshold = 0.85f,
+        .kiss_warmup_cycles = 10,
+        .kiss_refractory_cycles = 5,
+        .kiss_alpha = 0.25f,
         .strict_order = false,
         .dry_run = false
     };
@@ -1053,6 +1299,182 @@ static kernel_options parse_options(int argc, char **argv)
             opts.introspect_enabled = true;
         } else if (strcmp(arg, "--harmony") == 0) {
             opts.harmony_enabled = true;
+        } else if (strcmp(arg, "--astro") == 0) {
+            opts.astro_enabled = true;
+        } else if (strcmp(arg, "--astro-trace") == 0) {
+            opts.astro_trace = true;
+            opts.astro_enabled = true;
+        } else if (strncmp(arg, "--astro-rate=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.astro_rate = clamp_range(parsed, 0.005f, 0.020f);
+                }
+            }
+        } else if (strncmp(arg, "--astro-tone=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.astro_tone_init = clamp_unit(parsed);
+                    opts.astro_tone_set = true;
+                }
+            }
+        } else if (strncmp(arg, "--astro-mem=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.astro_memory_init = clamp_unit(parsed);
+                    opts.astro_memory_set = true;
+                }
+            }
+        } else if (strcmp(arg, "--kiss") == 0) {
+            opts.kiss_enabled = true;
+        } else if (strncmp(arg, "--kiss-thr=", 11) == 0) {
+            const char *value = arg + 11;
+            if (value && *value) {
+                parse_kiss_thresholds(&opts, value);
+            }
+        } else if (strncmp(arg, "--kiss-warmup=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed >= 0L) {
+                    if (parsed > 255L) {
+                        parsed = 255L;
+                    }
+                    opts.kiss_warmup_cycles = (int)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--kiss-refrac=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed >= 0L) {
+                    if (parsed > 255L) {
+                        parsed = 255L;
+                    }
+                    opts.kiss_refractory_cycles = (int)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--kiss-alpha=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed) && parsed > 0.0f) {
+                    if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    opts.kiss_alpha = parsed;
+                }
+            }
+        } else if (strcmp(arg, "--trs") == 0) {
+            opts.trs_enabled = true;
+        } else if (strncmp(arg, "--trs-alpha=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.05f) {
+                        parsed = 0.05f;
+                    } else if (parsed > 0.8f) {
+                        parsed = 0.8f;
+                    }
+                    opts.trs_alpha = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--trs-warmup=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value) {
+                    if (parsed < 0) {
+                        parsed = 0;
+                    } else if (parsed > 10) {
+                        parsed = 10;
+                    }
+                    opts.trs_warmup = (int)parsed;
+                }
+            }
+        } else if (strcmp(arg, "--trs-adapt") == 0) {
+            opts.trs_adapt_enabled = true;
+            opts.trs_enabled = true;
+        } else if (strncmp(arg, "--trs-alpha-min=", 16) == 0) {
+            const char *value = arg + 16;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_alpha_min = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-alpha-max=", 16) == 0) {
+            const char *value = arg + 16;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_alpha_max = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-target-delta=", 20) == 0) {
+            const char *value = arg + 20;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_target_delta = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-kp=", 9) == 0) {
+            const char *value = arg + 9;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_kp = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-ki=", 9) == 0) {
+            const char *value = arg + 9;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_ki = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--trs-kd=", 9) == 0) {
+            const char *value = arg + 9;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.trs_kd = parsed;
+                    opts.trs_adapt_enabled = true;
+                    opts.trs_enabled = true;
+                }
+            }
         } else if (strncmp(arg, "--mirror-soft=", 14) == 0) {
             const char *value = arg + 14;
             if (*value) {
@@ -1246,6 +1668,18 @@ static kernel_options parse_options(int argc, char **argv)
         opts.introspect_enabled = true;
     }
 
+    if (opts.astro_trace) {
+        opts.astro_enabled = true;
+    }
+    if (opts.astro_enabled) {
+        if (!opts.introspect_enabled) {
+            opts.introspect_enabled = true;
+        }
+        if (!opts.harmony_enabled) {
+            opts.harmony_enabled = true;
+        }
+    }
+
     return opts;
 }
 
@@ -1332,6 +1766,17 @@ static void pulse_delay(void)
     tuned_delay *= metabolic_delay_scale();
     tuned_delay *= symbiosis_delay_scale();
     tuned_delay *= empathic_delay_scale();
+    if (astro_layer_enabled) {
+        double astro_scale = (double)astro_feedback_factor;
+        if (astro_scale < 0.85) {
+            astro_scale = 0.85;
+        } else if (astro_scale > 1.15) {
+            astro_scale = 1.15;
+        }
+        if (astro_scale > 0.0) {
+            tuned_delay /= astro_scale;
+        }
+    }
 
     if (isfinite(mirror_gain_tempo) && mirror_gain_tempo > 0.0f) {
         tuned_delay /= (double)mirror_gain_tempo;
@@ -1556,6 +2001,14 @@ awareness_coherence_feedback(const kernel_options *opts,
         strcpy(note, "seeking balance");
     }
 
+    if (empathic_layer_active && opts->recognition_field_enabled) {
+        if (empathic_response.anxiety_predicted) {
+            strcpy(note, "anticipating turbulence");
+        } else if (empathic_response.calm_predicted) {
+            strcpy(note, "anticipating calm expansion");
+        }
+    }
+
     reflect_log(energy_avg, resonance_avg, stability, note);
 
     awareness_update(resonance_avg, stability);
@@ -1670,14 +2123,6 @@ awareness_coherence_feedback(const kernel_options *opts,
     if (empathic_layer_active) {
         coherence_level = empathic_apply_coherence(coherence_level);
     }
-    dream_update(coherence_level,
-                 awareness_snapshot.awareness_level,
-                 anticipation_field,
-                 anticipation_level,
-                 anticipation_micro,
-                 anticipation_trend,
-                 dream_balance.balance_strength);
-
     feedback.awareness_snapshot = awareness_snapshot;
     feedback.coherence_field = coherence_field;
     feedback.coherence_level = coherence_level;
@@ -1859,6 +2304,8 @@ static void exhale(const kernel_options *opts)
 {
     soil_decay();
 
+    int kiss_flag = 0;
+    float presence_metric = 0.0f;
     float cycle_influence = anticipation2_feedforward(opts);
 
     const char *label = "exhale";
@@ -1867,9 +2314,9 @@ static void exhale(const kernel_options *opts)
 
     static const char exhale_signal[] = "ebb";
 
-    collective_begin_cycle();
-
     size_t activated = symbol_layer_pulse();
+
+    collective_begin_cycle();
 
     const Symbol *active[16];
     size_t active_count = symbol_layer_active(active, sizeof(active) / sizeof(active[0]));
@@ -1911,6 +2358,7 @@ static void exhale(const kernel_options *opts)
         if (presence > 1.0f) {
             presence = 1.0f;
         }
+        presence_metric = clamp_unit(presence);
         stability = (energy_norm + resonance_norm) * 0.45f + presence * 0.10f;
         if (stability > 1.0f) {
             stability = 1.0f;
@@ -1942,7 +2390,25 @@ static void exhale(const kernel_options *opts)
     float human_alignment = feedback.human_alignment;
     float human_resonance_level = feedback.human_resonance_level;
 
+    float trust_metric = clamp_unit(awareness_snapshot.self_coherence);
+    float awareness_scale = clamp_unit(awareness_snapshot.awareness_level);
+
     collective_adjust(&feedback);
+
+    if (astro_layer_enabled && astro_priming_pending && collective_signature_ready) {
+        int distance = INT_MAX;
+        const AstroMemory *profile = astro_memory_match(collective_signature_value, &distance);
+        if (profile) {
+            if (!opts || !opts->astro_tone_set) {
+                astro_set_tone(&astro_state, clamp_unit(profile->tone_avg));
+            }
+            if (!opts || !opts->astro_memory_set) {
+                astro_set_memory(&astro_state, clamp_unit(profile->memory_avg));
+            }
+            astro_set_ca_rate(&astro_state, profile->ca_rate);
+        }
+        astro_priming_pending = false;
+    }
 
     if (affinity_layer_enabled) {
         float field_coherence = coherence_field ? clamp_unit(coherence_field->coherence) : 0.0f;
@@ -1975,7 +2441,6 @@ static void exhale(const kernel_options *opts)
     bool mirror_stage_required = mirror_module_enabled || (opts && opts->strict_order);
     float introspect_consent = affinity_layer_enabled ? bond_gate_state.consent : 1.0f;
     float introspect_influence = affinity_layer_enabled ? cycle_influence : 1.0f;
-    float introspect_bond = affinity_layer_enabled ? bond_gate_state.bond_coh : 0.0f;
     if (mirror_stage_required) {
         float mirror_energy = active_count > 0 ? clamp_unit(energy_avg / 12.0f) : 0.0f;
         float mirror_calm = clamp_unit(stability);
@@ -2009,14 +2474,28 @@ static void exhale(const kernel_options *opts)
         mirror_gain_tempo = clamp_range(1.0f, tempo_min, tempo_max);
     }
 
-    Metrics introspect_metrics = {
+    float introspect_dream = NAN;
+    if (opts && opts->dream_enabled) {
+        float balance_strength = dream_balance.balance_strength;
+        if (!isfinite(balance_strength)) {
+            balance_strength = 0.0f;
+        }
+        float normalized = 0.5f + 0.5f * balance_strength;
+        if (!isfinite(normalized)) {
+            normalized = 0.5f;
+        }
+        introspect_dream = clamp_unit(normalized);
+    }
+
+    introspect_metrics metrics = {
         .amp = mirror_gain_amp,
         .tempo = mirror_gain_tempo,
         .consent = introspect_consent,
         .influence = introspect_influence,
         .bond_coh = introspect_bond,
         .error_margin = fabsf(mirror_gain_amp - mirror_gain_tempo),
-        .harmony = clamp_unit(coherence_level)
+        .harmony = clamp_unit(coherence_level),
+        .kiss = 0
     };
 
     if (opts && opts->dream_enabled) {
@@ -2040,7 +2519,120 @@ static void exhale(const kernel_options *opts)
         introspect_set_dream_preview(&introspect_state, introspect_state.dream_phase, false);
     }
 
+    Metrics harmony_metrics = introspect_metrics;
+    if (opts && (opts->harmony_enabled || opts->dream_enabled)) {
+        harmony_sync(&introspect_state, &harmony_metrics);
+    }
+
+    float harmony_metric = clamp_unit(harmony_metrics.harmony);
+    if (kiss_module_enabled) {
+        bool kiss_fired = kiss_update(trust_metric, presence_metric, harmony_metric, awareness_scale);
+        if (kiss_fired) {
+            kiss_flag = 1;
+            float blended = (trust_metric + presence_metric + harmony_metric) / 3.0f;
+            float energy_level = clamp_unit(blended);
+            uint32_t energy = (uint32_t)(energy_level * 120.0f);
+            if (energy == 0U) {
+                energy = 1U;
+            }
+            struct {
+                float trust;
+                float presence;
+                float harmony;
+                float awareness;
+            } payload = { trust_metric, presence_metric, harmony_metric, awareness_scale };
+            resonant_msg kiss_msg =
+                resonant_msg_make(RES_KISS_SOURCE_ID, RESONANT_BROADCAST_ID, energy, &payload, sizeof(payload));
+            bus_emit(&kiss_msg);
+            symbol_nudge_from_kiss();
+        }
+    }
+    introspect_metrics.kiss = kiss_flag;
+
     introspect_tick(&introspect_state, &introspect_metrics);
+    float astro_factor = 1.0f;
+    if (astro_layer_enabled) {
+        float harmony_signal = clamp_unit(harmony_metrics.harmony);
+        float group_coherence = collective_active ? clamp_unit(collective_graph.group_coh) : clamp_unit(coherence_level);
+        float trs_delta = fabsf(introspect_get_last_trs_delta());
+        float consent_level = introspect_consent;
+        float influence_level = introspect_influence;
+        astro_update(&astro_state, harmony_signal, group_coherence, trs_delta, consent_level, influence_level);
+        float astro_gain = astro_modulate_feedback(&astro_state);
+        if (consent_level < 0.3f) {
+            astro_gain = 1.0f;
+        }
+        astro_factor = clamp_range(astro_gain, 0.85f, 1.15f);
+        astro_feedback_factor = astro_factor;
+        astro_trace_log_state(astro_state.last_stability, astro_gain);
+        bool stable_window = astro_state.memory > 0.7f && astro_state.last_stability > 0.8f;
+        if (stable_window) {
+            astro_window_accumulate(astro_state.tone, astro_state.memory, astro_state.last_stability);
+            if (astro_window.consecutive >= ASTRO_STABLE_WINDOW) {
+                float samples = (float)astro_window.consecutive;
+                float tone_avg = astro_window.tone_sum / samples;
+                float memory_avg = astro_window.memory_sum / samples;
+                float stability_avg = astro_window.stability_sum / samples;
+                uint32_t signature = collective_signature_ready ? collective_signature_value : 0U;
+                astro_memory_store_snapshot(signature, tone_avg, memory_avg, stability_avg);
+                astro_window_reset();
+            }
+        } else if (astro_window.consecutive > 0) {
+            astro_window_reset();
+        }
+        harmony_metrics.amp = clamp_unit(harmony_metrics.amp * astro_factor);
+        harmony_metrics.tempo = clamp_range(harmony_metrics.tempo * astro_factor, 0.2f, 2.0f);
+    } else {
+        astro_feedback_factor = 1.0f;
+        if (astro_window.consecutive > 0) {
+            astro_window_reset();
+        }
+    }
+    if (astro_layer_enabled && opts && opts->dream_enabled) {
+        Metrics preview_metrics = introspect_metrics;
+        preview_metrics.amp = clamp_unit((energy_avg / 12.0f) * astro_factor);
+        float harmony_signal = coherence_level;
+        if (dream_balance.balance_strength > 0.0f) {
+            harmony_signal += dream_balance.balance_strength * 0.3f;
+        }
+        float tempo_balance = clamp_unit(mirror_gain_tempo);
+        harmony_signal += (1.0f - tempo_balance) * 0.25f;
+        preview_metrics.harmony = clamp_unit(harmony_signal);
+        float tempo_signal = mirror_gain_tempo * (1.0f + cycle_influence);
+        if (!isfinite(tempo_signal)) {
+            tempo_signal = mirror_gain_tempo;
+        }
+        tempo_signal *= astro_factor;
+        preview_metrics.tempo = tempo_signal;
+        DreamCouplerPhase preview_phase = dream_coupler_evaluate(&preview_metrics);
+        introspect_set_dream_preview(&introspect_state, preview_phase, true);
+    }
+    if (opts && opts->dream_enabled) {
+        Metrics coupling_metrics = harmony_metrics;
+        coupling_metrics.amp = clamp_unit((energy_avg / 12.0f) * astro_factor);
+        float harmony_signal = coherence_level;
+        if (dream_balance.balance_strength > 0.0f) {
+            harmony_signal += dream_balance.balance_strength * 0.3f;
+        }
+        float tempo_balance = clamp_unit(mirror_gain_tempo);
+        harmony_signal += (1.0f - tempo_balance) * 0.25f;
+        coupling_metrics.harmony = clamp_unit(harmony_signal);
+        float tempo_signal = mirror_gain_tempo * (1.0f + cycle_influence);
+        if (!isfinite(tempo_signal)) {
+            tempo_signal = mirror_gain_tempo;
+        }
+        tempo_signal *= astro_factor;
+        coupling_metrics.tempo = tempo_signal;
+        dream_couple(&introspect_state, &coupling_metrics);
+    }
+
+    dream_update(feedback.coherence_level,
+                 feedback.awareness_snapshot.awareness_level,
+                 feedback.anticipation_field,
+                 feedback.anticipation_level,
+                 feedback.anticipation_micro,
+                 feedback.anticipation_trend,
+                 feedback.dream_balance.balance_strength);
 
     Metrics harmony_metrics = introspect_metrics;
     if (opts && (opts->harmony_enabled || opts->dream_enabled)) {
@@ -2205,13 +2797,47 @@ int main(int argc, char **argv)
     introspect_enable_harmony(
         &introspect_state,
         opts.harmony_enabled || opts.dream_enabled);
+    introspect_configure_trs(opts.trs_enabled,
+                             opts.trs_alpha,
+                             opts.trs_warmup,
+                             opts.trs_adapt_enabled,
+                             opts.trs_alpha_min,
+                             opts.trs_alpha_max,
+                             opts.trs_target_delta,
+                             opts.trs_kp,
+                             opts.trs_ki,
+                             opts.trs_kd,
+                             opts.dry_run);
+
+    astro_layer_enabled = opts.astro_enabled;
+    astro_trace_enabled = opts.astro_trace;
+    astro_feedback_factor = 1.0f;
+    astro_trace_close();
+    astro_window_reset();
+    astro_memory_count = 0;
+    astro_priming_pending = false;
+    if (astro_layer_enabled) {
+        astro_init(&astro_state);
+        astro_set_ca_rate(&astro_state, opts.astro_rate);
+        if (opts.astro_tone_set) {
+            astro_set_tone(&astro_state, opts.astro_tone_init);
+        }
+        if (opts.astro_memory_set) {
+            astro_set_memory(&astro_state, opts.astro_memory_init);
+        }
+        astro_memory_load_cache();
+        astro_priming_pending = true;
+    } else {
+        astro_state.tone = 0.0f;
+        astro_state.memory = 0.0f;
+        astro_state.drift = 0.0f;
+    }
 
     if (opts.dry_run) {
         char sequence[128];
         format_exhale_sequence(&opts, sequence, sizeof(sequence));
         puts("liminal_core dry run");
-        printf("strict-order: %s\n", opts.strict_order ? "enabled" : "disabled");
-        printf("exhale sequence: %s\n", sequence[0] ? sequence : "(none)");
+        printf("pipeline: %s\n", sequence[0] ? sequence : "(none)");
         printf("mirror clamps: amp=[%.2f, %.2f] tempo=[%.2f, %.2f]\n",
                opts.mirror_amp_min,
                opts.mirror_amp_max,
@@ -2219,6 +2845,10 @@ int main(int argc, char **argv)
                opts.mirror_tempo_max);
         return 0;
     }
+
+    introspect_state_init(&kernel_introspect_state);
+    introspect_enable(&kernel_introspect_state, opts.introspect_enabled);
+    introspect_enable_harmony(&kernel_introspect_state, opts.harmony_enabled);
 
     collective_active = opts.collective_enabled || opts.collective_trace;
     collective_trace_enabled = opts.collective_trace;
@@ -2273,6 +2903,22 @@ int main(int argc, char **argv)
     coherence_init();
     coherence_set_target(opts.target_coherence);
     coherence_enable_logging(opts.climate_log);
+    kiss_module_enabled = opts.kiss_enabled;
+    if (kiss_module_enabled) {
+        kiss_init();
+        kiss_set_thresholds(opts.kiss_trust_threshold,
+                            opts.kiss_presence_threshold,
+                            opts.kiss_harmony_threshold);
+        if (opts.kiss_warmup_cycles < 0) {
+            opts.kiss_warmup_cycles = 0;
+        }
+        if (opts.kiss_refractory_cycles < 0) {
+            opts.kiss_refractory_cycles = 0;
+        }
+        kiss_set_warmup((uint8_t)opts.kiss_warmup_cycles);
+        kiss_set_refractory((uint8_t)opts.kiss_refractory_cycles);
+        kiss_set_alpha(opts.kiss_alpha);
+    }
     health_scan_init();
     if (opts.enable_health_scan) {
         health_scan_set_interval(opts.scan_interval);
@@ -2374,12 +3020,14 @@ int main(int argc, char **argv)
     emotion_memory_finalize();
     metabolic_shutdown();
 
-    introspect_finalize(&introspect_state);
+    introspect_finalize(&kernel_introspect_state);
 
     if (collective_memory_match_trace) {
         cm_trace_free(collective_memory_match_trace);
         collective_memory_match_trace = NULL;
     }
+
+    astro_trace_close();
 
     return 0;
 }

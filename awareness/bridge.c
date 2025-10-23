@@ -78,7 +78,8 @@ bool awareness_update(float resonance_avg, float stability)
     }
     res_norm = clamp_unit(res_norm);
 
-    float drift = fabsf(stability - res_norm);
+    float stability_norm = clamp_unit(isfinite(stability) ? stability : 0.0f);
+    float drift = fabsf(stability_norm - res_norm);
     if (!isfinite(drift)) {
         drift = 1.0f;
     }
@@ -88,16 +89,16 @@ bool awareness_update(float resonance_avg, float stability)
     state.awareness_level = clamp_unit(1.0f - drift);
 
     if (last_resonance >= 0.0f && last_stability >= 0.0f) {
-        float resonance_delta = clamp_unit(fabsf(resonance_avg - last_resonance));
-        float stability_delta = clamp_unit(fabsf(stability - last_stability));
+        float resonance_delta = clamp_unit(fabsf(res_norm - last_resonance));
+        float stability_delta = clamp_unit(fabsf(stability_norm - last_stability));
         float coherence = 1.0f - 0.5f * (resonance_delta + stability_delta);
         state.self_coherence = clamp_unit(coherence);
     } else {
         state.self_coherence = 1.0f;
     }
 
-    last_resonance = resonance_avg;
-    last_stability = stability;
+    last_resonance = res_norm;
+    last_stability = stability_norm;
 
     bool wave_emitted = false;
     if (drift > 0.2f) {

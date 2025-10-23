@@ -3,6 +3,10 @@
 
 #include <stdbool.h>
 
+#define EMPATHIC_RECOGNITION_WINDOW_MIN 10
+#define EMPATHIC_RECOGNITION_WINDOW_MAX 240
+#define EMPATHIC_RECOGNITION_WINDOW_DEFAULT 100
+
 typedef enum {
     EMPATHIC_SOURCE_AUDIO = 0,
     EMPATHIC_SOURCE_TEXT,
@@ -38,5 +42,11 @@ double empathic_delay_scale(void);
 float empathic_apply_coherence(float base_value);
 float empathic_coherence_value(float fallback);
 float empathic_target_level(void);
+void empathic_recognition_enable(bool enable);
+void empathic_recognition_trace(bool enable);
+void empathic_set_trend_window(int window);
+float empathic_anticipation(void);
+bool empathic_calm_prediction(void);
+bool empathic_anxiety_prediction(void);
 
 #endif /* LIMINAL_EMPATHIC_H */
