@@ -936,6 +936,9 @@ static kernel_options parse_options(int argc, char **argv)
             opts.sync_trace = true;
         } else if (strcmp(arg, "--dream") == 0) {
             opts.dream_enabled = true;
+        } else if (strcmp(arg, "--dreamsync") == 0) {
+            opts.dream_enabled = true;
+            opts.enable_sync = true;
         } else if (strcmp(arg, "--dream-log") == 0) {
             opts.dream_log = true;
         } else if (strcmp(arg, "--balancer") == 0) {
@@ -2199,7 +2202,9 @@ int main(int argc, char **argv)
     introspect_state_init(&introspect_state);
     bool introspect_harmony = opts.harmony_enabled || opts.dream_enabled;
     introspect_enable(&introspect_state, opts.introspect_enabled);
-    introspect_enable_harmony(&introspect_state, introspect_harmony);
+    introspect_enable_harmony(
+        &introspect_state,
+        opts.harmony_enabled || opts.dream_enabled);
 
     if (opts.dry_run) {
         char sequence[128];

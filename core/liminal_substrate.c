@@ -565,6 +565,8 @@ static substrate_config parse_args(int argc, char **argv)
             cfg.harmony_enabled = true;
         } else if (strcmp(arg, "--dream") == 0) {
             cfg.dream_enabled = true;
+        } else if (strcmp(arg, "--dreamsync") == 0) {
+            cfg.dream_enabled = true;
         } else if (strcmp(arg, "--strict-order") == 0) {
             cfg.strict_order = true;
         } else if (strcmp(arg, "--dry-run") == 0) {
@@ -1169,7 +1171,9 @@ int main(int argc, char **argv)
     introspect_state_init(&substrate_introspect_state);
     bool introspect_harmony = cfg.harmony_enabled || cfg.dream_enabled;
     introspect_enable(&substrate_introspect_state, cfg.introspect_enabled);
-    introspect_enable_harmony(&substrate_introspect_state, introspect_harmony);
+    introspect_enable_harmony(
+        &substrate_introspect_state,
+        cfg.harmony_enabled || cfg.dream_enabled);
 
     if (cfg.dry_run) {
         char sequence[128];
