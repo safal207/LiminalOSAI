@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -77,6 +78,31 @@ static void shift_left_from(size_t index)
     }
 }
 
+static uint32_t sensor_bit(int sensor_id)
+{
+    if (sensor_id == RESONANT_BROADCAST_ID || sensor_id == 0) {
+        return 0U;
+    }
+
+    for (size_t i = 0; i < sensor_count && i < 32; ++i) {
+        if (sensor_registry[i] == sensor_id) {
+            return 1U << i;
+        }
+    }
+
+    return 0U;
+}
+
+static uint32_t sensor_mask(void)
+{
+    uint32_t mask = 0U;
+    size_t limit = sensor_count < 32 ? sensor_count : 32;
+    for (size_t i = 0; i < limit; ++i) {
+        mask |= (1U << i);
+    }
+    return mask;
+}
+
 void bus_init(void)
 {
     memset(bus_queue, 0, sizeof(bus_queue));
@@ -94,7 +120,7 @@ void bus_emit(const resonant_msg *msg)
 
     if (bus_count == RESONANT_BUS_CAPACITY) {
         size_t last = bus_count - 1;
-        if (bus_queue[last].energy >= msg->energy) {
+        if (bus_queue[last].msg.energy >= msg->energy) {
             return;
         }
         bus_queue[last] = *msg;
@@ -112,7 +138,7 @@ void bus_emit(const resonant_msg *msg)
     }
 
     size_t insert_index = 0;
-    while (insert_index < bus_count && bus_queue[insert_index].energy >= msg->energy) {
+    while (insert_index < bus_count && bus_queue[insert_index].msg.energy >= msg->energy) {
         ++insert_index;
     }
 

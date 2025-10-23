@@ -31,8 +31,6 @@ typedef struct introspect_metrics {
     float tempo;
     float consent;
     float influence;
-    float bond_coh;
-    float error_margin;
     float harmony;
     int kiss;
 } Metrics;

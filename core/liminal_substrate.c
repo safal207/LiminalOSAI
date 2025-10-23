@@ -2853,7 +2853,6 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
             emit_analysis_trace(state, cfg, cfg->empathic_enabled ? &response : NULL);
             float consent = substrate_affinity_enabled ? clamp_unit(substrate_bond_gate.consent) : 1.0f;
             float influence = substrate_affinity_enabled ? clamp_unit(substrate_bond_gate.influence) : 1.0f;
-            float bond_coh = substrate_affinity_enabled ? clamp_unit(substrate_bond_gate.bond_coh) : 0.0f;
             float amp = clamp_unit(state->resonance);
             float tempo_gain = clamp_unit(state->breath_rate / 2.4f);
             int kiss_flag = 0;
@@ -3209,8 +3208,7 @@ int main(int argc, char **argv)
         char sequence[128];
         format_exhale_sequence(&cfg, sequence, sizeof(sequence));
         puts("liminal_core dry run");
-        printf("strict-order: %s\n", cfg.strict_order ? "enabled" : "disabled");
-        printf("exhale sequence: %s\n", sequence[0] ? sequence : "(none)");
+        printf("pipeline: %s\n", sequence[0] ? sequence : "(none)");
         printf("mirror clamps: amp=[%.2f, %.2f] tempo=[%.2f, %.2f]\n",
                cfg.mirror_amp_min,
                cfg.mirror_amp_max,

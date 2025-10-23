@@ -2120,14 +2120,6 @@ awareness_coherence_feedback(const kernel_options *opts,
     if (empathic_layer_active) {
         coherence_level = empathic_apply_coherence(coherence_level);
     }
-    dream_update(coherence_level,
-                 awareness_snapshot.awareness_level,
-                 anticipation_field,
-                 anticipation_level,
-                 anticipation_micro,
-                 anticipation_trend,
-                 dream_balance.balance_strength);
-
     feedback.awareness_snapshot = awareness_snapshot;
     feedback.coherence_field = coherence_field;
     feedback.coherence_level = coherence_level;
@@ -2319,9 +2311,9 @@ static void exhale(const kernel_options *opts)
 
     static const char exhale_signal[] = "ebb";
 
-    collective_begin_cycle();
-
     size_t activated = symbol_layer_pulse();
+
+    collective_begin_cycle();
 
     const Symbol *active[16];
     size_t active_count = symbol_layer_active(active, sizeof(active) / sizeof(active[0]));
@@ -2446,7 +2438,6 @@ static void exhale(const kernel_options *opts)
     bool mirror_stage_required = mirror_module_enabled || (opts && opts->strict_order);
     float introspect_consent = affinity_layer_enabled ? bond_gate_state.consent : 1.0f;
     float introspect_influence = affinity_layer_enabled ? cycle_influence : 1.0f;
-    float introspect_bond = affinity_layer_enabled ? bond_gate_state.bond_coh : 0.0f;
     if (mirror_stage_required) {
         float mirror_energy = active_count > 0 ? clamp_unit(energy_avg / 12.0f) : 0.0f;
         float mirror_calm = clamp_unit(stability);
@@ -2480,7 +2471,20 @@ static void exhale(const kernel_options *opts)
         mirror_gain_tempo = clamp_range(1.0f, tempo_min, tempo_max);
     }
 
-    Metrics introspect_metrics = {
+    float introspect_dream = NAN;
+    if (opts && opts->dream_enabled) {
+        float balance_strength = dream_balance.balance_strength;
+        if (!isfinite(balance_strength)) {
+            balance_strength = 0.0f;
+        }
+        float normalized = 0.5f + 0.5f * balance_strength;
+        if (!isfinite(normalized)) {
+            normalized = 0.5f;
+        }
+        introspect_dream = clamp_unit(normalized);
+    }
+
+    introspect_metrics metrics = {
         .amp = mirror_gain_amp,
         .tempo = mirror_gain_tempo,
         .consent = introspect_consent,
@@ -2618,6 +2622,14 @@ static void exhale(const kernel_options *opts)
         coupling_metrics.tempo = tempo_signal;
         dream_couple(&introspect_state, &coupling_metrics);
     }
+
+    dream_update(feedback.coherence_level,
+                 feedback.awareness_snapshot.awareness_level,
+                 feedback.anticipation_field,
+                 feedback.anticipation_level,
+                 feedback.anticipation_micro,
+                 feedback.anticipation_trend,
+                 feedback.dream_balance.balance_strength);
 
     if (collective_active) {
         ++collective_cycle_count;
@@ -2799,8 +2811,7 @@ int main(int argc, char **argv)
         char sequence[128];
         format_exhale_sequence(&opts, sequence, sizeof(sequence));
         puts("liminal_core dry run");
-        printf("strict-order: %s\n", opts.strict_order ? "enabled" : "disabled");
-        printf("exhale sequence: %s\n", sequence[0] ? sequence : "(none)");
+        printf("pipeline: %s\n", sequence[0] ? sequence : "(none)");
         printf("mirror clamps: amp=[%.2f, %.2f] tempo=[%.2f, %.2f]\n",
                opts.mirror_amp_min,
                opts.mirror_amp_max,
@@ -2808,6 +2819,10 @@ int main(int argc, char **argv)
                opts.mirror_tempo_max);
         return 0;
     }
+
+    introspect_state_init(&kernel_introspect_state);
+    introspect_enable(&kernel_introspect_state, opts.introspect_enabled);
+    introspect_enable_harmony(&kernel_introspect_state, opts.harmony_enabled);
 
     collective_active = opts.collective_enabled || opts.collective_trace;
     collective_trace_enabled = opts.collective_trace;
@@ -2979,7 +2994,7 @@ int main(int argc, char **argv)
     emotion_memory_finalize();
     metabolic_shutdown();
 
-    introspect_finalize(&introspect_state);
+    introspect_finalize(&kernel_introspect_state);
 
     if (collective_memory_match_trace) {
         cm_trace_free(collective_memory_match_trace);
