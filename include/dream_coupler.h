@@ -7,6 +7,7 @@
 extern "C" {
 #endif
 
+DreamCouplerPhase dream_coupler_evaluate(const Metrics *metrics);
 void dream_couple(State *state, Metrics *metrics);
 const char *dream_coupler_phase_name(DreamCouplerPhase phase);
 

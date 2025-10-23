@@ -438,3 +438,29 @@ size_t symbol_layer_active(const Symbol **out_symbols, size_t max_count)
 
     return to_copy;
 }
+
+void symbol_nudge_from_kiss(void)
+{
+    if (current_active_count == 0) {
+        return;
+    }
+
+    const float energy_cap = 12.0f;
+    const float energy_nudge = 0.18f;
+    const float resonance_nudge = 0.12f;
+
+    for (size_t i = 0; i < current_active_count; ++i) {
+        Symbol *symbol = current_active[i];
+        if (!symbol) {
+            continue;
+        }
+        symbol->energy += energy_nudge;
+        if (symbol->energy > energy_cap) {
+            symbol->energy = energy_cap;
+        }
+        symbol->resonance += resonance_nudge;
+        if (symbol->resonance > energy_cap) {
+            symbol->resonance = energy_cap;
+        }
+    }
+}

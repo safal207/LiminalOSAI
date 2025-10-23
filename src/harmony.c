@@ -19,7 +19,6 @@ void harmony_sync(State *state, Metrics *metrics)
     if (!state->enabled || !state->harmony_enabled) {
         return;
     }
-
     double amp = sanitize_metric(metrics->amp);
     double tempo = sanitize_metric(metrics->tempo);
     double influence = sanitize_metric(metrics->influence);
