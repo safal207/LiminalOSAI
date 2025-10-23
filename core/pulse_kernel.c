@@ -1182,6 +1182,9 @@ static kernel_options parse_options(int argc, char **argv)
             opts.sync_trace = true;
         } else if (strcmp(arg, "--dream") == 0) {
             opts.dream_enabled = true;
+        } else if (strcmp(arg, "--dreamsync") == 0) {
+            opts.dream_enabled = true;
+            opts.enable_sync = true;
         } else if (strcmp(arg, "--dream-log") == 0) {
             opts.dream_log = true;
         } else if (strcmp(arg, "--balancer") == 0) {
@@ -2631,6 +2634,28 @@ static void exhale(const kernel_options *opts)
                  feedback.anticipation_trend,
                  feedback.dream_balance.balance_strength);
 
+    Metrics harmony_metrics = introspect_metrics;
+    if (opts && (opts->harmony_enabled || opts->dream_enabled)) {
+        harmony_sync(&introspect_state, &harmony_metrics);
+    }
+    if (opts && opts->dream_enabled) {
+        Metrics coupling_metrics = harmony_metrics;
+        coupling_metrics.amp = clamp_unit(energy_avg / 12.0f);
+        float harmony_signal = coherence_level;
+        if (dream_balance.balance_strength > 0.0f) {
+            harmony_signal += dream_balance.balance_strength * 0.3f;
+        }
+        float tempo_balance = clamp_unit(mirror_gain_tempo);
+        harmony_signal += (1.0f - tempo_balance) * 0.25f;
+        coupling_metrics.harmony = clamp_unit(harmony_signal);
+        float tempo_signal = mirror_gain_tempo * (1.0f + cycle_influence);
+        if (!isfinite(tempo_signal)) {
+            tempo_signal = mirror_gain_tempo;
+        }
+        coupling_metrics.tempo = tempo_signal;
+        dream_couple(&introspect_state, &coupling_metrics);
+    }
+
     if (collective_active) {
         ++collective_cycle_count;
     }
@@ -2767,6 +2792,7 @@ int main(int argc, char **argv)
     kernel_options opts = parse_options(argc, argv);
 
     introspect_state_init(&introspect_state);
+    bool introspect_harmony = opts.harmony_enabled || opts.dream_enabled;
     introspect_enable(&introspect_state, opts.introspect_enabled);
     introspect_enable_harmony(
         &introspect_state,

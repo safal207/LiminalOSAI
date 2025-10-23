@@ -3109,6 +3109,7 @@ int main(int argc, char **argv)
     }
 
     introspect_state_init(&substrate_introspect_state);
+    bool introspect_harmony = cfg.harmony_enabled || cfg.dream_enabled;
     introspect_enable(&substrate_introspect_state, cfg.introspect_enabled);
     introspect_enable_harmony(
         &substrate_introspect_state,
