@@ -565,6 +565,8 @@ static substrate_config parse_args(int argc, char **argv)
             cfg.harmony_enabled = true;
         } else if (strcmp(arg, "--dream") == 0) {
             cfg.dream_enabled = true;
+        } else if (strcmp(arg, "--dreamsync") == 0) {
+            cfg.dream_enabled = true;
         } else if (strcmp(arg, "--strict-order") == 0) {
             cfg.strict_order = true;
         } else if (strcmp(arg, "--dry-run") == 0) {
