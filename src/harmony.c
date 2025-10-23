@@ -21,11 +21,6 @@ void harmony_sync(struct introspect_state *state, struct introspect_metrics *met
     if (!state->enabled || !state->harmony_enabled) {
         return;
     }
-
-    if (!state->stream || !state->harmony_line_open) {
-        return;
-    }
-
     double amp = sanitize_metric(metrics->amp);
     double tempo = sanitize_metric(metrics->tempo);
     double influence = sanitize_metric(metrics->influence);
@@ -47,5 +42,5 @@ void harmony_sync(struct introspect_state *state, struct introspect_metrics *met
     }
 
     metrics->harmony = (float)harmony;
-    introspect_commit(state, harmony);
+    state->last_harmony = harmony;
 }

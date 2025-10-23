@@ -4,14 +4,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
-typedef struct {
-    resonant_msg msg;
-    uint32_t read_mask;
-} bus_entry;
-
-static bus_entry bus_queue[RESONANT_BUS_CAPACITY];
+static resonant_msg bus_queue[RESONANT_BUS_CAPACITY];
+static uint64_t broadcast_delivery_mask[RESONANT_BUS_CAPACITY];
 static size_t bus_count = 0;
 
 static int sensor_registry[RESONANT_BUS_CAPACITY];
@@ -30,6 +28,21 @@ static bool sensor_registered(int sensor_id)
     }
 
     return false;
+}
+
+static int sensor_index_of(int sensor_id)
+{
+    if (sensor_id == RESONANT_BROADCAST_ID) {
+        return -1;
+    }
+
+    for (size_t i = 0; i < sensor_count; ++i) {
+        if (sensor_registry[i] == sensor_id) {
+            return (int)i;
+        }
+    }
+
+    return -1;
 }
 
 void bus_register_sensor(int sensor_id)
@@ -53,6 +66,7 @@ static void shift_right_from(size_t index)
 {
     for (size_t i = bus_count; i > index; --i) {
         bus_queue[i] = bus_queue[i - 1];
+        broadcast_delivery_mask[i] = broadcast_delivery_mask[i - 1];
     }
 }
 
@@ -60,6 +74,7 @@ static void shift_left_from(size_t index)
 {
     for (size_t i = index; i + 1 < bus_count; ++i) {
         bus_queue[i] = bus_queue[i + 1];
+        broadcast_delivery_mask[i] = broadcast_delivery_mask[i + 1];
     }
 }
 
@@ -91,6 +106,7 @@ static uint32_t sensor_mask(void)
 void bus_init(void)
 {
     memset(bus_queue, 0, sizeof(bus_queue));
+    memset(broadcast_delivery_mask, 0, sizeof(broadcast_delivery_mask));
     bus_count = 0;
     memset(sensor_registry, 0, sizeof(sensor_registry));
     sensor_count = 0;
@@ -107,12 +123,15 @@ void bus_emit(const resonant_msg *msg)
         if (bus_queue[last].msg.energy >= msg->energy) {
             return;
         }
-        bus_queue[last].msg = *msg;
-        bus_queue[last].read_mask = 0U;
-        while (last > 0 && bus_queue[last - 1].msg.energy < bus_queue[last].msg.energy) {
-            bus_entry tmp = bus_queue[last - 1];
+        bus_queue[last] = *msg;
+        broadcast_delivery_mask[last] = 0ULL;
+        while (last > 0 && bus_queue[last - 1].energy < bus_queue[last].energy) {
+            resonant_msg tmp = bus_queue[last - 1];
             bus_queue[last - 1] = bus_queue[last];
             bus_queue[last] = tmp;
+            uint64_t mask_tmp = broadcast_delivery_mask[last - 1];
+            broadcast_delivery_mask[last - 1] = broadcast_delivery_mask[last];
+            broadcast_delivery_mask[last] = mask_tmp;
             --last;
         }
         return;
@@ -124,8 +143,8 @@ void bus_emit(const resonant_msg *msg)
     }
 
     shift_right_from(insert_index);
-    bus_queue[insert_index].msg = *msg;
-    bus_queue[insert_index].read_mask = 0U;
+    bus_queue[insert_index] = *msg;
+    broadcast_delivery_mask[insert_index] = 0ULL;
     ++bus_count;
 }
 
@@ -137,33 +156,48 @@ bool bus_listen(int sensor_id, resonant_msg *out_msg)
 
     bus_register_sensor(sensor_id);
 
-    uint32_t listener_bit = sensor_bit(sensor_id);
+    int registry_index = sensor_index_of(sensor_id);
 
     for (size_t i = 0; i < bus_count; ++i) {
-        resonant_msg *message = &bus_queue[i].msg;
-        if (message->target_id == sensor_id) {
-            resonant_msg delivered = *message;
+        resonant_msg message = bus_queue[i];
+        if (message.target_id == sensor_id) {
             shift_left_from(i);
             --bus_count;
-            *out_msg = delivered;
+            broadcast_delivery_mask[bus_count] = 0ULL;
+            *out_msg = message;
             return true;
         }
 
-        if (message->target_id == RESONANT_BROADCAST_ID && listener_bit != 0U) {
-            if ((bus_queue[i].read_mask & listener_bit) != 0U) {
-                continue;
-            }
-
-            bus_queue[i].read_mask |= listener_bit;
-            *out_msg = *message;
-
-            uint32_t all_bits = sensor_mask();
-            if (all_bits != 0U && (bus_queue[i].read_mask & all_bits) == all_bits) {
-                shift_left_from(i);
-                --bus_count;
-            }
-            return true;
+        if (message.target_id != RESONANT_BROADCAST_ID || registry_index < 0) {
+            continue;
         }
+
+        uint64_t delivered_mask = broadcast_delivery_mask[i];
+        uint64_t sensor_bit = 1ULL << (uint64_t)registry_index;
+        if (delivered_mask & sensor_bit) {
+            continue;
+        }
+
+        delivered_mask |= sensor_bit;
+        broadcast_delivery_mask[i] = delivered_mask;
+        *out_msg = message;
+
+        bool all_delivered = true;
+        for (size_t sensor_index = 0; sensor_index < sensor_count; ++sensor_index) {
+            uint64_t bit = 1ULL << (uint64_t)sensor_index;
+            if ((delivered_mask & bit) == 0ULL) {
+                all_delivered = false;
+                break;
+            }
+        }
+
+        if (all_delivered) {
+            shift_left_from(i);
+            --bus_count;
+            broadcast_delivery_mask[bus_count] = 0ULL;
+        }
+
+        return true;
     }
 
     return false;
