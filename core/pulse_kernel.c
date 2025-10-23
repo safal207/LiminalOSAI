@@ -1998,6 +1998,14 @@ awareness_coherence_feedback(const kernel_options *opts,
         strcpy(note, "seeking balance");
     }
 
+    if (empathic_layer_active && opts->recognition_field_enabled) {
+        if (empathic_response.anxiety_predicted) {
+            strcpy(note, "anticipating turbulence");
+        } else if (empathic_response.calm_predicted) {
+            strcpy(note, "anticipating calm expansion");
+        }
+    }
+
     reflect_log(energy_avg, resonance_avg, stability, note);
 
     awareness_update(resonance_avg, stability);
