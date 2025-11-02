@@ -120,7 +120,7 @@ void bus_emit(const resonant_msg *msg)
 
     if (bus_count == RESONANT_BUS_CAPACITY) {
         size_t last = bus_count - 1;
-        if (bus_queue[last].msg.energy >= msg->energy) {
+        if (bus_queue[last].energy >= msg->energy) {
             return;
         }
         bus_queue[last] = *msg;
@@ -138,7 +138,7 @@ void bus_emit(const resonant_msg *msg)
     }
 
     size_t insert_index = 0;
-    while (insert_index < bus_count && bus_queue[insert_index].msg.energy >= msg->energy) {
+    while (insert_index < bus_count && bus_queue[insert_index].energy >= msg->energy) {
         ++insert_index;
     }
 

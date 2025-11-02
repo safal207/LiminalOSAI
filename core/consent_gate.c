@@ -1,245 +1,169 @@
 #include "consent_gate.h"
 
 #include <math.h>
-#include <stddef.h>
-#include <string.h>
 
-static float clamp_unit(float value)
+static int
+is_invalid_signal(float v)
 {
-    if (!isfinite(value)) {
-        return 0.0f;
-    }
-    if (value < 0.0f) {
-        return 0.0f;
-    }
-    if (value > 1.0f) {
-        return 1.0f;
-    }
-    return value;
+    return !isfinite(v);
 }
 
-static float clamp_score(float value)
+static float
+max_threshold(const ConsentGate* g)
 {
-    if (!isfinite(value)) {
-        return 0.0f;
+    float max = g->thr_consent;
+    if (g->thr_trust > max) {
+        max = g->thr_trust;
     }
-    if (value < 0.0f) {
-        return 0.0f;
+    if (g->thr_presence > max) {
+        max = g->thr_presence;
     }
-    if (value > 1.0f) {
-        return 1.0f;
+    if (g->thr_harmony > max) {
+        max = g->thr_harmony;
     }
-    return value;
+    return max;
 }
 
-static void set_reason(ConsentGate *gate, const char *reason)
+static void
+close_gate(ConsentGate* g, int* event)
 {
-    if (!gate) {
-        return;
-    }
-    if (!reason || !*reason) {
-        gate->last_reason[0] = '\0';
-        return;
-    }
-    strncpy(gate->last_reason, reason, CONSENT_GATE_REASON_MAX - 1);
-    gate->last_reason[CONSENT_GATE_REASON_MAX - 1] = '\0';
-}
-
-void consent_gate_init(ConsentGate *gate)
-{
-    if (!gate) {
-        return;
-    }
-    memset(gate, 0, sizeof(*gate));
-    gate->threshold_open = 0.75f;
-    gate->threshold_close = 0.60f;
-    gate->hysteresis = 0.05f;
-    gate->open_bias = 0.0f;
-    gate->warmup_cycles = 0U;
-    gate->warmup_remaining = 0U;
-    gate->refractory_cycles = 0U;
-    gate->refractory_remaining = 0U;
-    gate->open = false;
-    gate->nan_guard = false;
-    gate->last_reason[0] = '\0';
-}
-
-void consent_gate_set_thresholds(ConsentGate *gate, float open_threshold, float close_threshold)
-{
-    if (!gate) {
-        return;
-    }
-
-    float open_clamped = clamp_unit(open_threshold);
-    float close_clamped = clamp_unit(close_threshold);
-    if (open_clamped < close_clamped) {
-        float mid = 0.5f * (open_clamped + close_clamped);
-        open_clamped = mid;
-        close_clamped = mid;
-    }
-
-    gate->threshold_open = open_clamped;
-    gate->threshold_close = close_clamped;
-}
-
-void consent_gate_set_hysteresis(ConsentGate *gate, float hysteresis)
-{
-    if (!gate) {
-        return;
-    }
-    if (!isfinite(hysteresis) || hysteresis < 0.0f) {
-        hysteresis = 0.0f;
-    }
-    if (hysteresis > 1.0f) {
-        hysteresis = 1.0f;
-    }
-    gate->hysteresis = hysteresis;
-}
-
-void consent_gate_update(ConsentGate *gate,
-                         float consent,
-                         float trust,
-                         float harmony,
-                         float presence,
-                         float kiss)
-{
-    if (!gate) {
-        return;
-    }
-
-    bool invalid = false;
-    float inputs[5] = { consent, trust, harmony, presence, kiss };
-    for (size_t i = 0; i < 5U; ++i) {
-        if (!isfinite(inputs[i])) {
-            invalid = true;
-            break;
+    if (g->is_open) {
+        g->is_open = 0;
+        g->refr_countdown = g->refractory;
+        if (event) {
+            *event = -1;
         }
+    } else if (g->refr_countdown < g->refractory) {
+        g->refr_countdown = g->refractory;
     }
+}
 
-    if (invalid) {
-        gate->nan_guard = true;
-        gate->consent = 0.0f;
-        gate->trust = 0.0f;
-        gate->harmony = 0.0f;
-        gate->presence = 0.0f;
-        gate->kiss = 0.0f;
-        gate->score = 0.0f;
-        if (gate->refractory_cycles > 0U) {
-            gate->refractory_remaining = gate->refractory_cycles;
-        }
-        gate->open = false;
-        set_reason(gate, "nan_guard");
+void
+consent_gate_init(ConsentGate* g)
+{
+    if (!g) {
         return;
     }
 
-    gate->nan_guard = false;
-    gate->consent = clamp_unit(consent);
-    gate->trust = clamp_unit(trust);
-    gate->harmony = clamp_unit(harmony);
-    gate->presence = clamp_unit(presence);
-    gate->kiss = clamp_unit(kiss);
+    g->thr_consent = 0.70f;
+    g->thr_trust = 0.80f;
+    g->thr_presence = 0.70f;
+    g->thr_harmony = 0.85f;
+    g->open_bias = 0.0f;
+    g->warmup_cycles = 10;
+    g->refractory = 5;
+    g->tick = 0;
+    g->refr_countdown = 0;
+    g->is_open = 0;
+    g->score = 0.0f;
+}
 
-    float bias = gate->open_bias;
-    if (!isfinite(bias)) {
-        bias = 0.0f;
-    }
-    if (bias > 1.0f) {
-        bias = 1.0f;
-    } else if (bias < -1.0f) {
-        bias = -1.0f;
-    }
-
-    float weighted = 0.30f * gate->consent +
-                     0.30f * gate->trust +
-                     0.20f * gate->harmony +
-                     0.15f * gate->presence +
-                     0.05f * gate->kiss +
-                     bias;
-    gate->score = clamp_score(weighted);
-
-    bool warm_block = false;
-    if (gate->warmup_remaining > 0U) {
-        warm_block = true;
-        gate->warmup_remaining -= 1U;
-    }
-
-    bool refractory_block = false;
-    if (gate->refractory_remaining > 0U) {
-        refractory_block = true;
-        gate->refractory_remaining -= 1U;
-    }
-
-    const float consent_floor = 0.3f;
-    bool forced_block = false;
-    if (gate->consent < consent_floor) {
-        forced_block = true;
-        set_reason(gate, "low_consent");
-    }
-
-    float trust_presence = 0.5f * (gate->trust + gate->presence);
-    if (!forced_block && trust_presence < 0.5f) {
-        forced_block = true;
-        set_reason(gate, "trust_presence");
-    }
-
-    if (forced_block) {
-        gate->open = false;
-        if (gate->refractory_cycles > 0U) {
-            gate->refractory_remaining = gate->refractory_cycles;
-        }
+void
+consent_gate_set_thresholds(ConsentGate* g, float c, float t, float p, float h)
+{
+    if (!g) {
         return;
     }
+    g->thr_consent = c;
+    g->thr_trust = t;
+    g->thr_presence = p;
+    g->thr_harmony = h;
+}
 
-    float close_threshold = gate->threshold_close - gate->hysteresis;
-    if (close_threshold < 0.0f) {
-        close_threshold = 0.0f;
-    }
-    float open_threshold = gate->threshold_open + gate->hysteresis;
-    if (open_threshold > 1.0f) {
-        open_threshold = 1.0f;
-    }
-
-    if (gate->open) {
-        if (gate->score < close_threshold) {
-            gate->open = false;
-            if (gate->refractory_cycles > 0U) {
-                gate->refractory_remaining = gate->refractory_cycles;
-            }
-            set_reason(gate, "score");
-        }
+void
+consent_gate_set_hysteresis(ConsentGate* g, float open_bias, int warmup, int refractory)
+{
+    if (!g) {
         return;
     }
+    g->open_bias = open_bias;
+    g->warmup_cycles = warmup;
+    g->refractory = refractory;
+    if (g->refr_countdown > g->refractory) {
+        g->refr_countdown = g->refractory;
+    }
+}
 
-    if (warm_block) {
-        set_reason(gate, "warmup");
-        return;
+int
+consent_gate_update(ConsentGate* g,
+                    float consent,
+                    float trust,
+                    float presence,
+                    float harmony,
+                    int kiss)
+{
+    if (!g) {
+        return 0;
     }
 
-    if (refractory_block) {
-        set_reason(gate, "refractory");
-        return;
+    g->tick += 1;
+
+    int event = 0;
+    int refractory_active = g->refr_countdown > 0;
+
+    if (is_invalid_signal(consent) || is_invalid_signal(trust) ||
+        is_invalid_signal(presence) || is_invalid_signal(harmony)) {
+        g->score = 0.0f;
+        close_gate(g, &event);
+        return event;
     }
 
-    if (gate->score >= open_threshold) {
-        gate->open = true;
-        set_reason(gate, "");
+    float kiss_level = kiss ? 1.0f : 0.0f;
+    float score = 0.30f * consent + 0.30f * trust + 0.20f * harmony +
+                  0.15f * presence + 0.05f * kiss_level;
+    if (score < 0.0f) {
+        score = 0.0f;
+    } else if (score > 1.0f) {
+        score = 1.0f;
+    }
+    g->score = score;
+
+    float max_thr_value = max_threshold(g);
+    float open_threshold = max_thr_value + g->open_bias;
+    float close_threshold = max_thr_value - 0.05f;
+
+    int warmup_ready = g->tick >= g->warmup_cycles;
+    int hard_block = consent < 0.3f;
+    int failsafe = (trust < 0.5f) && (presence < 0.5f);
+
+    if (hard_block || failsafe) {
+        close_gate(g, &event);
     } else {
-        set_reason(gate, "score");
+        if (g->is_open) {
+            if (score < close_threshold || refractory_active) {
+                close_gate(g, &event);
+            }
+        } else if (!refractory_active && warmup_ready && (score >= open_threshold)) {
+            g->is_open = 1;
+            g->refr_countdown = 0;
+            event = 1;
+        }
     }
+
+    if (g->refr_countdown > 0) {
+        g->refr_countdown -= 1;
+        if (g->refr_countdown < 0) {
+            g->refr_countdown = 0;
+        }
+    }
+
+    return event;
 }
 
-float consent_gate_score(const ConsentGate *gate)
+float
+consent_gate_score(const ConsentGate* g)
 {
-    if (!gate) {
+    if (!g) {
         return 0.0f;
     }
-    return gate->score;
+    return g->score;
 }
 
-bool consent_gate_is_open(const ConsentGate *gate)
+int
+consent_gate_is_open(const ConsentGate* g)
 {
-    if (!gate) {
-        return false;
+    if (!g) {
+        return 0;
     }
-    return gate->open;
+    return g->is_open;
 }

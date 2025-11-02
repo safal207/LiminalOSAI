@@ -1,41 +1,35 @@
 #ifndef LIMINAL_CONSENT_GATE_H
 #define LIMINAL_CONSENT_GATE_H
 
-#include <stdbool.h>
-#include <stdint.h>
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define CONSENT_GATE_REASON_MAX 32
-
 typedef struct {
-    float consent;
-    float trust;
-    float harmony;
-    float presence;
-    float kiss;
-    float score;
-    float threshold_open;
-    float threshold_close;
-    float hysteresis;
-    float open_bias;
-    uint16_t warmup_cycles;
-    uint16_t warmup_remaining;
-    uint16_t refractory_cycles;
-    uint16_t refractory_remaining;
-    bool open;
-    bool nan_guard;
-    char last_reason[CONSENT_GATE_REASON_MAX];
+  float thr_consent;
+  float thr_trust;
+  float thr_presence;
+  float thr_harmony;
+  float open_bias;
+  int warmup_cycles;
+  int refractory;
+  int tick;
+  int refr_countdown;
+  int is_open;
+  float score;
 } ConsentGate;
 
-void consent_gate_init(ConsentGate *gate);
-void consent_gate_set_thresholds(ConsentGate *gate, float open_threshold, float close_threshold);
-void consent_gate_set_hysteresis(ConsentGate *gate, float hysteresis);
-void consent_gate_update(ConsentGate *gate, float consent, float trust, float harmony, float presence, float kiss);
-float consent_gate_score(const ConsentGate *gate);
-bool consent_gate_is_open(const ConsentGate *gate);
+void consent_gate_init(ConsentGate* g);
+void consent_gate_set_thresholds(ConsentGate* g, float c, float t, float p, float h);
+void consent_gate_set_hysteresis(ConsentGate* g, float open_bias, int warmup, int refractory);
+int consent_gate_update(ConsentGate* g,
+                        float consent,
+                        float trust,
+                        float presence,
+                        float harmony,
+                        int kiss);
+float consent_gate_score(const ConsentGate* g);
+int consent_gate_is_open(const ConsentGate* g);
 
 #ifdef __cplusplus
 }

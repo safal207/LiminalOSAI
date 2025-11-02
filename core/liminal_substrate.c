@@ -217,7 +217,6 @@ static bool substrate_astro_enabled = false;
 static bool substrate_astro_trace_enabled = false;
 static bool substrate_kiss_enabled = false;
 static ConsentGate substrate_consent_gate;
-static bool substrate_nan_guard_active = false;
 static FILE *substrate_astro_trace_stream = NULL;
 static float substrate_astro_feedback = 1.0f;
 static AstroMemory substrate_astro_cache[ASTRO_MEMORY_CAPACITY];
@@ -231,6 +230,7 @@ static bool substrate_bridge_enabled = false;
 static bool substrate_bridge_trace = false;
 static SynapticBridge substrate_bridge;
 static FILE *substrate_bridge_stream = NULL;
+static void ensure_logs_directory_path(void);
 typedef struct {
     int consecutive;
     float tone_sum;
@@ -2950,6 +2950,8 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
             float influence = substrate_affinity_enabled ? clamp_unit(substrate_bond_gate.influence) : 1.0f;
             float amp = clamp_unit(state->resonance);
             float tempo_gain = clamp_unit(state->breath_rate / 2.4f);
+            float bond_coh = substrate_affinity_enabled ? clamp_unit(substrate_bond_gate.bond_coh)
+                                                        : clamp_unit(state->sync_quality);
             int kiss_flag = 0;
             Metrics metrics = {
                 .amp = amp,
@@ -2995,9 +2997,9 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
             consent_gate_update(&substrate_consent_gate,
                                 clamp_unit(metrics.consent),
                                 trust_metric,
-                                harmony_metric,
                                 presence_metric,
-                                kiss_flag ? 1.0f : 0.0f);
+                                harmony_metric,
+                                kiss_flag ? 1 : 0);
             bool gate_is_open = consent_gate_is_open(&substrate_consent_gate);
             bool gate_closed_transition = gate_was_open && !gate_is_open;
             if (!gate_was_open && gate_is_open) {
@@ -3009,23 +3011,8 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
             } else if (gate_closed_transition) {
                 float gate_score = consent_gate_score(&substrate_consent_gate);
                 bus_broadcast(RES_ACTION_CLOSE, gate_score);
-                const char *reason = substrate_consent_gate.last_reason;
                 if (cfg->trace) {
-                    printf("[consent-gate] close reason=%s score=%.3f\n",
-                           (reason && *reason) ? reason : "score",
-                           gate_score);
-                }
-            }
-            bool nan_guard_event = substrate_consent_gate.nan_guard && !substrate_nan_guard_active;
-            substrate_nan_guard_active = substrate_consent_gate.nan_guard;
-            if (nan_guard_event && !gate_closed_transition) {
-                float gate_score = consent_gate_score(&substrate_consent_gate);
-                bus_broadcast(RES_ACTION_CLOSE, gate_score);
-                const char *reason = substrate_consent_gate.last_reason;
-                if (cfg->trace) {
-                    printf("[consent-gate] nan_guard score=%.3f (%s)\n",
-                           gate_score,
-                           (reason && *reason) ? reason : "nan_guard");
+                    printf("[consent-gate] close score=%.3f\n", gate_score);
                 }
             }
             metrics.kiss = kiss_flag;
@@ -3178,39 +3165,6 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                 tempo_signal *= astro_factor;
                 coupling_metrics.tempo = tempo_signal;
                 dream_couple(&substrate_introspect_state, &coupling_metrics);
-            }
-            if (substrate_resonance_enabled) {
-                const Astro *astro_for_resonance = astro_snapshot ? astro_snapshot : &fallback_astro;
-                const DreamReplay *dream_ref = substrate_dream_replay_enabled ? &substrate_dream_replay : NULL;
-                Harmony resonance_harmony = {
-                    .baseline = clamp_unit(harmony_metrics.harmony),
-                    .agreement = clamp_unit(0.5f * (metrics.consent + metrics.influence)),
-                    .amplitude = clamp_range(harmony_metrics.amp, 0.0f, 2.0f),
-                    .coherence = clamp_unit(state->sync_quality)
-                };
-                const EmpathicResponse *bridge_response = cfg->empathic_enabled ? &response : NULL;
-                SynapticBridge bridge_state = substrate_synaptic_bridge_snapshot(state, cfg, bridge_response);
-                resonance_update(&substrate_resonance, &resonance_harmony, astro_for_resonance, dream_ref, &bridge_state);
-                float resonance_stab = resonance_stability(&substrate_resonance);
-                if (substrate_resonance.coherence > 0.85f) {
-                    float phase_feedback = clamp_range(substrate_resonance.phase_shift, -0.25f, 0.25f);
-                    state->phase_offset = fmodf(state->phase_offset + phase_feedback, 1.0f);
-                    if (state->phase_offset < 0.0f) {
-                        state->phase_offset += 1.0f;
-                    }
-                    state->sync_quality = clamp_unit(state->sync_quality * 0.8f + substrate_resonance.coherence * 0.2f);
-                }
-                state->resonance = clamp_unit(state->resonance * 0.7f + clamp_unit(substrate_resonance.amplitude) * 0.3f);
-                state->vitality = clamp_unit(state->vitality * 0.9f + resonance_stab * 0.1f);
-                if (cfg->trace) {
-                    printf("[resonance-layer] freq=%.3fHz coherence=%.3f amp=%.3f phase=%.3f stability=%.3f\n",
-                           substrate_resonance.freq_hz,
-                           substrate_resonance.coherence,
-                           substrate_resonance.amplitude,
-                           substrate_resonance.phase_shift,
-                           resonance_stab);
-                }
-                substrate_resonance_log(state->cycles, &substrate_resonance, resonance_stab);
             }
             if (substrate_astro_enabled) {
                 float rate_adjust = 1.0f / substrate_astro_feedback;
@@ -3413,29 +3367,36 @@ int main(int argc, char **argv)
     }
 
     consent_gate_init(&substrate_consent_gate);
+    float gate_threshold = clamp_unit(cfg.consent_gate_open_threshold);
     consent_gate_set_thresholds(&substrate_consent_gate,
-                                clamp_unit(cfg.consent_gate_open_threshold),
-                                clamp_unit(cfg.consent_gate_close_threshold));
-    consent_gate_set_hysteresis(&substrate_consent_gate, cfg.consent_gate_hysteresis);
-    substrate_consent_gate.open_bias = cfg.consent_gate_bias;
-    if (cfg.consent_gate_warmup_cycles < 0) {
-        cfg.consent_gate_warmup_cycles = 0;
+                                gate_threshold,
+                                gate_threshold,
+                                gate_threshold,
+                                gate_threshold);
+    int warmup_cycles = cfg.consent_gate_warmup_cycles;
+    int refractory_cycles = cfg.consent_gate_refractory_cycles;
+    if (warmup_cycles < 0) {
+        warmup_cycles = 0;
     }
-    if (cfg.consent_gate_refractory_cycles < 0) {
-        cfg.consent_gate_refractory_cycles = 0;
+    if (refractory_cycles < 0) {
+        refractory_cycles = 0;
     }
-    if (cfg.consent_gate_warmup_cycles > 255) {
-        cfg.consent_gate_warmup_cycles = 255;
+    if (warmup_cycles > 255) {
+        warmup_cycles = 255;
     }
-    if (cfg.consent_gate_refractory_cycles > 255) {
-        cfg.consent_gate_refractory_cycles = 255;
+    if (refractory_cycles > 255) {
+        refractory_cycles = 255;
     }
-    substrate_consent_gate.warmup_cycles = (uint16_t)cfg.consent_gate_warmup_cycles;
-    substrate_consent_gate.warmup_remaining = substrate_consent_gate.warmup_cycles;
-    substrate_consent_gate.refractory_cycles = (uint16_t)cfg.consent_gate_refractory_cycles;
-    substrate_consent_gate.refractory_remaining = 0U;
-    substrate_consent_gate.open = false;
-    substrate_nan_guard_active = false;
+    float gate_bias = cfg.consent_gate_bias;
+    if (gate_bias < -0.03f) {
+        gate_bias = -0.03f;
+    } else if (gate_bias > 0.03f) {
+        gate_bias = 0.03f;
+    }
+    consent_gate_set_hysteresis(&substrate_consent_gate,
+                                gate_bias,
+                                warmup_cycles,
+                                refractory_cycles);
 
     substrate_kiss_enabled = cfg.kiss_enabled;
     if (substrate_kiss_enabled) {
@@ -3475,7 +3436,6 @@ int main(int argc, char **argv)
 
     substrate_astro_trace_close();
     substrate_dream_replay_trace_close();
-    substrate_resonance_log_close();
 
     return 0;
 }

@@ -573,8 +573,7 @@ static float mirror_gain_amp = 1.0f;
 static float mirror_gain_tempo = 1.0f;
 static bool kiss_module_enabled = false;
 static ConsentGate consent_gate_state;
-static bool consent_nan_guard_active = false;
-static State introspect_state;
+static introspect_state g_introspect_state;
 typedef struct {
     AwarenessState awareness_snapshot;
     const CoherenceField *coherence_field;
@@ -2096,10 +2095,10 @@ awareness_coherence_feedback(const kernel_options *opts,
         strcpy(note, "seeking balance");
     }
 
-    if (empathic_layer_active && opts->recognition_field_enabled) {
-        if (empathic_response.anxiety_predicted) {
+    if (empathic_layer_active) {
+        if (empathic_anxiety_prediction()) {
             strcpy(note, "anticipating turbulence");
-        } else if (empathic_response.calm_predicted) {
+        } else if (empathic_calm_prediction()) {
             strcpy(note, "anticipating calm expansion");
         }
     }
@@ -2569,32 +2568,19 @@ static void exhale(const kernel_options *opts)
         mirror_gain_tempo = clamp_range(1.0f, tempo_min, tempo_max);
     }
 
-    float introspect_dream = NAN;
-    if (opts && opts->dream_enabled) {
-        float balance_strength = dream_balance.balance_strength;
-        if (!isfinite(balance_strength)) {
-            balance_strength = 0.0f;
-        }
-        float normalized = 0.5f + 0.5f * balance_strength;
-        if (!isfinite(normalized)) {
-            normalized = 0.5f;
-        }
-        introspect_dream = clamp_unit(normalized);
-    }
-
-    introspect_metrics metrics = {
+    Metrics cycle_metrics = {
         .amp = mirror_gain_amp,
         .tempo = mirror_gain_tempo,
         .consent = introspect_consent,
         .influence = introspect_influence,
-        .bond_coh = introspect_bond,
+        .bond_coh = bond_gate_state.bond_coh,
         .error_margin = fabsf(mirror_gain_amp - mirror_gain_tempo),
         .harmony = clamp_unit(coherence_level),
         .kiss = 0
     };
 
     if (opts && opts->dream_enabled) {
-        Metrics preview_metrics = introspect_metrics;
+        Metrics preview_metrics = cycle_metrics;
         preview_metrics.amp = clamp_unit(energy_avg / 12.0f);
         float harmony_signal = coherence_level;
         if (dream_balance.balance_strength > 0.0f) {
@@ -2609,14 +2595,14 @@ static void exhale(const kernel_options *opts)
         }
         preview_metrics.tempo = tempo_signal;
         DreamCouplerPhase preview_phase = dream_coupler_evaluate(&preview_metrics);
-        introspect_set_dream_preview(&introspect_state, preview_phase, true);
+        introspect_set_dream_preview(&g_introspect_state, preview_phase, true);
     } else {
-        introspect_set_dream_preview(&introspect_state, introspect_state.dream_phase, false);
+        introspect_set_dream_preview(&g_introspect_state, g_introspect_state.dream_phase, false);
     }
 
-    Metrics harmony_metrics = introspect_metrics;
+    Metrics harmony_metrics = cycle_metrics;
     if (opts && (opts->harmony_enabled || opts->dream_enabled)) {
-        harmony_sync(&introspect_state, &harmony_metrics);
+        harmony_sync(&g_introspect_state, &harmony_metrics);
     }
 
     float harmony_metric = clamp_unit(harmony_metrics.harmony);
@@ -2646,9 +2632,9 @@ static void exhale(const kernel_options *opts)
     consent_gate_update(&consent_gate_state,
                         clamp_unit(introspect_consent),
                         trust_metric,
-                        harmony_metric,
                         presence_metric,
-                        kiss_flag ? 1.0f : 0.0f);
+                        harmony_metric,
+                        kiss_flag ? 1 : 0);
     bool gate_is_open = consent_gate_is_open(&consent_gate_state);
     bool gate_closed_transition = gate_was_open && !gate_is_open;
     if (!gate_was_open && gate_is_open) {
@@ -2657,12 +2643,10 @@ static void exhale(const kernel_options *opts)
     } else if (gate_closed_transition) {
         float gate_score = consent_gate_score(&consent_gate_state);
         bus_broadcast(RES_ACTION_CLOSE, gate_score);
-        const char *reason = consent_gate_state.last_reason;
         char imprint[SOIL_TRACE_DATA_SIZE];
         int written = snprintf(imprint,
                                sizeof(imprint),
-                               "consent_gate:%s:%.3f",
-                               (reason && *reason) ? reason : "score",
+                               "consent_gate:close:%.3f",
                                gate_score);
         if (written < 0) {
             imprint[0] = '\0';
@@ -2671,28 +2655,9 @@ static void exhale(const kernel_options *opts)
         soil_trace gate_trace = soil_trace_make(ENERGY_REFLECT, imprint, (size_t)written);
         soil_write(&gate_trace);
     }
-    bool nan_guard_event = consent_gate_state.nan_guard && !consent_nan_guard_active;
-    consent_nan_guard_active = consent_gate_state.nan_guard;
-    if (nan_guard_event && !gate_closed_transition) {
-        float gate_score = consent_gate_score(&consent_gate_state);
-        bus_broadcast(RES_ACTION_CLOSE, gate_score);
-        const char *reason = consent_gate_state.last_reason;
-        char imprint[SOIL_TRACE_DATA_SIZE];
-        int written = snprintf(imprint,
-                               sizeof(imprint),
-                               "consent_gate:%s:%.3f",
-                               (reason && *reason) ? reason : "nan_guard",
-                               gate_score);
-        if (written < 0) {
-            imprint[0] = '\0';
-            written = 0;
-        }
-        soil_trace gate_trace = soil_trace_make(ENERGY_REFLECT, imprint, (size_t)written);
-        soil_write(&gate_trace);
-    }
-    introspect_metrics.kiss = kiss_flag;
+    cycle_metrics.kiss = kiss_flag;
 
-    introspect_tick(&introspect_state, &introspect_metrics);
+    introspect_tick(&g_introspect_state, &cycle_metrics);
     float astro_factor = 1.0f;
     if (astro_layer_enabled) {
         float harmony_signal = clamp_unit(harmony_metrics.harmony);
@@ -2732,7 +2697,7 @@ static void exhale(const kernel_options *opts)
         }
     }
     if (astro_layer_enabled && opts && opts->dream_enabled) {
-        Metrics preview_metrics = introspect_metrics;
+        Metrics preview_metrics = cycle_metrics;
         preview_metrics.amp = clamp_unit((energy_avg / 12.0f) * astro_factor);
         float harmony_signal = coherence_level;
         if (dream_balance.balance_strength > 0.0f) {
@@ -2748,7 +2713,7 @@ static void exhale(const kernel_options *opts)
         tempo_signal *= astro_factor;
         preview_metrics.tempo = tempo_signal;
         DreamCouplerPhase preview_phase = dream_coupler_evaluate(&preview_metrics);
-        introspect_set_dream_preview(&introspect_state, preview_phase, true);
+        introspect_set_dream_preview(&g_introspect_state, preview_phase, true);
     }
     if (opts && opts->dream_enabled) {
         Metrics coupling_metrics = harmony_metrics;
@@ -2766,7 +2731,7 @@ static void exhale(const kernel_options *opts)
         }
         tempo_signal *= astro_factor;
         coupling_metrics.tempo = tempo_signal;
-        dream_couple(&introspect_state, &coupling_metrics);
+        dream_couple(&g_introspect_state, &coupling_metrics);
     }
 
     dream_update(feedback.coherence_level,
@@ -2777,9 +2742,9 @@ static void exhale(const kernel_options *opts)
                  feedback.anticipation_trend,
                  feedback.dream_balance.balance_strength);
 
-    Metrics harmony_metrics = introspect_metrics;
+    harmony_metrics = cycle_metrics;
     if (opts && (opts->harmony_enabled || opts->dream_enabled)) {
-        harmony_sync(&introspect_state, &harmony_metrics);
+        harmony_sync(&g_introspect_state, &harmony_metrics);
     }
     if (opts && opts->dream_enabled) {
         Metrics coupling_metrics = harmony_metrics;
@@ -2796,7 +2761,7 @@ static void exhale(const kernel_options *opts)
             tempo_signal = mirror_gain_tempo;
         }
         coupling_metrics.tempo = tempo_signal;
-        dream_couple(&introspect_state, &coupling_metrics);
+        dream_couple(&g_introspect_state, &coupling_metrics);
     }
 
     if (collective_active) {
@@ -2934,11 +2899,10 @@ int main(int argc, char **argv)
 {
     kernel_options opts = parse_options(argc, argv);
 
-    introspect_state_init(&introspect_state);
-    bool introspect_harmony = opts.harmony_enabled || opts.dream_enabled;
-    introspect_enable(&introspect_state, opts.introspect_enabled);
+    introspect_state_init(&g_introspect_state);
+    introspect_enable(&g_introspect_state, opts.introspect_enabled);
     introspect_enable_harmony(
-        &introspect_state,
+        &g_introspect_state,
         opts.harmony_enabled || opts.dream_enabled);
     introspect_configure_trs(opts.trs_enabled,
                              opts.trs_alpha,
@@ -2988,10 +2952,6 @@ int main(int argc, char **argv)
                opts.mirror_tempo_max);
         return 0;
     }
-
-    introspect_state_init(&kernel_introspect_state);
-    introspect_enable(&kernel_introspect_state, opts.introspect_enabled);
-    introspect_enable_harmony(&kernel_introspect_state, opts.harmony_enabled);
 
     collective_active = opts.collective_enabled || opts.collective_trace;
     collective_trace_enabled = opts.collective_trace;
@@ -3047,29 +3007,36 @@ int main(int argc, char **argv)
     coherence_set_target(opts.target_coherence);
     coherence_enable_logging(opts.climate_log);
     consent_gate_init(&consent_gate_state);
+    float gate_threshold = clamp_unit(opts.consent_gate_open_threshold);
     consent_gate_set_thresholds(&consent_gate_state,
-                                clamp_unit(opts.consent_gate_open_threshold),
-                                clamp_unit(opts.consent_gate_close_threshold));
-    consent_gate_set_hysteresis(&consent_gate_state, opts.consent_gate_hysteresis);
-    consent_gate_state.open_bias = opts.consent_gate_bias;
-    if (opts.consent_gate_warmup_cycles < 0) {
-        opts.consent_gate_warmup_cycles = 0;
+                                gate_threshold,
+                                gate_threshold,
+                                gate_threshold,
+                                gate_threshold);
+    int warmup_cycles = opts.consent_gate_warmup_cycles;
+    int refractory_cycles = opts.consent_gate_refractory_cycles;
+    if (warmup_cycles < 0) {
+        warmup_cycles = 0;
     }
-    if (opts.consent_gate_refractory_cycles < 0) {
-        opts.consent_gate_refractory_cycles = 0;
+    if (refractory_cycles < 0) {
+        refractory_cycles = 0;
     }
-    if (opts.consent_gate_warmup_cycles > 255) {
-        opts.consent_gate_warmup_cycles = 255;
+    if (warmup_cycles > 255) {
+        warmup_cycles = 255;
     }
-    if (opts.consent_gate_refractory_cycles > 255) {
-        opts.consent_gate_refractory_cycles = 255;
+    if (refractory_cycles > 255) {
+        refractory_cycles = 255;
     }
-    consent_gate_state.warmup_cycles = (uint16_t)opts.consent_gate_warmup_cycles;
-    consent_gate_state.warmup_remaining = consent_gate_state.warmup_cycles;
-    consent_gate_state.refractory_cycles = (uint16_t)opts.consent_gate_refractory_cycles;
-    consent_gate_state.refractory_remaining = 0U;
-    consent_gate_state.open = false;
-    consent_nan_guard_active = false;
+    float gate_bias = opts.consent_gate_bias;
+    if (gate_bias < -0.03f) {
+        gate_bias = -0.03f;
+    } else if (gate_bias > 0.03f) {
+        gate_bias = 0.03f;
+    }
+    consent_gate_set_hysteresis(&consent_gate_state,
+                                gate_bias,
+                                warmup_cycles,
+                                refractory_cycles);
     kiss_module_enabled = opts.kiss_enabled;
     if (kiss_module_enabled) {
         kiss_init();
@@ -3187,7 +3154,7 @@ int main(int argc, char **argv)
     emotion_memory_finalize();
     metabolic_shutdown();
 
-    introspect_finalize(&kernel_introspect_state);
+    introspect_finalize(&g_introspect_state);
 
     if (collective_memory_match_trace) {
         cm_trace_free(collective_memory_match_trace);
