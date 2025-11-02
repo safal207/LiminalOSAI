@@ -148,6 +148,33 @@ void bus_emit(const resonant_msg *msg)
     ++bus_count;
 }
 
+void bus_broadcast(int action_id, float value)
+{
+    float sanitized = value;
+    if (!isfinite(sanitized)) {
+        sanitized = 0.0f;
+    }
+    if (sanitized < 0.0f) {
+        sanitized = 0.0f;
+    } else if (sanitized > 1.0f) {
+        sanitized = 1.0f;
+    }
+
+    struct {
+        int32_t action_id;
+        float score;
+    } payload = { action_id, sanitized };
+
+    uint32_t energy = (uint32_t)(sanitized * 120.0f);
+    if (energy == 0U) {
+        energy = 1U;
+    }
+
+    resonant_msg msg =
+        resonant_msg_make(action_id, RESONANT_BROADCAST_ID, energy, &payload, sizeof(payload));
+    bus_emit(&msg);
+}
+
 bool bus_listen(int sensor_id, resonant_msg *out_msg)
 {
     if (!out_msg || bus_count == 0) {

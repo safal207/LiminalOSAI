@@ -44,6 +44,7 @@
 #include "synaptic_bridge.h"
 #include "resonant.h"
 #include "kiss.h"
+#include "consent_gate.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -169,6 +170,12 @@ typedef struct {
     int kiss_warmup_cycles;
     int kiss_refractory_cycles;
     float kiss_alpha;
+    float consent_gate_open_threshold;
+    float consent_gate_close_threshold;
+    float consent_gate_hysteresis;
+    float consent_gate_bias;
+    int consent_gate_warmup_cycles;
+    int consent_gate_refractory_cycles;
     bool erb_enabled;
     int erb_pre;
     int erb_post;
@@ -209,6 +216,8 @@ static Astro substrate_astro;
 static bool substrate_astro_enabled = false;
 static bool substrate_astro_trace_enabled = false;
 static bool substrate_kiss_enabled = false;
+static ConsentGate substrate_consent_gate;
+static bool substrate_nan_guard_active = false;
 static FILE *substrate_astro_trace_stream = NULL;
 static float substrate_astro_feedback = 1.0f;
 static AstroMemory substrate_astro_cache[ASTRO_MEMORY_CAPACITY];
@@ -972,6 +981,12 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.kiss_warmup_cycles = 10;
     cfg.kiss_refractory_cycles = 5;
     cfg.kiss_alpha = 0.25f;
+    cfg.consent_gate_open_threshold = 0.75f;
+    cfg.consent_gate_close_threshold = 0.60f;
+    cfg.consent_gate_hysteresis = 0.05f;
+    cfg.consent_gate_bias = 0.0f;
+    cfg.consent_gate_warmup_cycles = 8;
+    cfg.consent_gate_refractory_cycles = 6;
     cfg.erb_enabled = false;
     cfg.erb_pre = 24;
     cfg.erb_post = 32;
@@ -1410,6 +1425,86 @@ static substrate_config parse_args(int argc, char **argv)
                         parsed = 1.0f;
                     }
                     cfg.kiss_alpha = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--gate-open=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    cfg.consent_gate_open_threshold = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--gate-close=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 1.0f) {
+                        parsed = 1.0f;
+                    }
+                    cfg.consent_gate_close_threshold = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--gate-hyst=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < 0.0f) {
+                        parsed = 0.0f;
+                    } else if (parsed > 0.5f) {
+                        parsed = 0.5f;
+                    }
+                    cfg.consent_gate_hysteresis = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--gate-bias=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    if (parsed < -0.5f) {
+                        parsed = -0.5f;
+                    } else if (parsed > 0.5f) {
+                        parsed = 0.5f;
+                    }
+                    cfg.consent_gate_bias = parsed;
+                }
+            }
+        } else if (strncmp(arg, "--gate-warmup=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed >= 0L) {
+                    if (parsed > 255L) {
+                        parsed = 255L;
+                    }
+                    cfg.consent_gate_warmup_cycles = (int)parsed;
+                }
+            }
+        } else if (strncmp(arg, "--gate-refrac=", 14) == 0) {
+            const char *value = arg + 14;
+            if (*value) {
+                char *end = NULL;
+                long parsed = strtol(value, &end, 10);
+                if (end != value && parsed >= 0L) {
+                    if (parsed > 255L) {
+                        parsed = 255L;
+                    }
+                    cfg.consent_gate_refractory_cycles = (int)parsed;
                 }
             }
         } else if (strncmp(arg, "--trs-alpha=", 12) == 0) {
@@ -2896,6 +2991,43 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                     bus_emit(&kiss_msg);
                 }
             }
+            bool gate_was_open = consent_gate_is_open(&substrate_consent_gate);
+            consent_gate_update(&substrate_consent_gate,
+                                clamp_unit(metrics.consent),
+                                trust_metric,
+                                harmony_metric,
+                                presence_metric,
+                                kiss_flag ? 1.0f : 0.0f);
+            bool gate_is_open = consent_gate_is_open(&substrate_consent_gate);
+            bool gate_closed_transition = gate_was_open && !gate_is_open;
+            if (!gate_was_open && gate_is_open) {
+                float gate_score = consent_gate_score(&substrate_consent_gate);
+                bus_broadcast(RES_ACTION_OPEN, gate_score);
+                if (cfg->trace) {
+                    printf("[consent-gate] open score=%.3f\n", gate_score);
+                }
+            } else if (gate_closed_transition) {
+                float gate_score = consent_gate_score(&substrate_consent_gate);
+                bus_broadcast(RES_ACTION_CLOSE, gate_score);
+                const char *reason = substrate_consent_gate.last_reason;
+                if (cfg->trace) {
+                    printf("[consent-gate] close reason=%s score=%.3f\n",
+                           (reason && *reason) ? reason : "score",
+                           gate_score);
+                }
+            }
+            bool nan_guard_event = substrate_consent_gate.nan_guard && !substrate_nan_guard_active;
+            substrate_nan_guard_active = substrate_consent_gate.nan_guard;
+            if (nan_guard_event && !gate_closed_transition) {
+                float gate_score = consent_gate_score(&substrate_consent_gate);
+                bus_broadcast(RES_ACTION_CLOSE, gate_score);
+                const char *reason = substrate_consent_gate.last_reason;
+                if (cfg->trace) {
+                    printf("[consent-gate] nan_guard score=%.3f (%s)\n",
+                           gate_score,
+                           (reason && *reason) ? reason : "nan_guard");
+                }
+            }
             metrics.kiss = kiss_flag;
             if (cfg->dream_enabled) {
                 Metrics preview_metrics = metrics;
@@ -3279,6 +3411,31 @@ int main(int argc, char **argv)
     if (cfg.lip_test) {
         run_lip_resonance_test(&state, &cfg);
     }
+
+    consent_gate_init(&substrate_consent_gate);
+    consent_gate_set_thresholds(&substrate_consent_gate,
+                                clamp_unit(cfg.consent_gate_open_threshold),
+                                clamp_unit(cfg.consent_gate_close_threshold));
+    consent_gate_set_hysteresis(&substrate_consent_gate, cfg.consent_gate_hysteresis);
+    substrate_consent_gate.open_bias = cfg.consent_gate_bias;
+    if (cfg.consent_gate_warmup_cycles < 0) {
+        cfg.consent_gate_warmup_cycles = 0;
+    }
+    if (cfg.consent_gate_refractory_cycles < 0) {
+        cfg.consent_gate_refractory_cycles = 0;
+    }
+    if (cfg.consent_gate_warmup_cycles > 255) {
+        cfg.consent_gate_warmup_cycles = 255;
+    }
+    if (cfg.consent_gate_refractory_cycles > 255) {
+        cfg.consent_gate_refractory_cycles = 255;
+    }
+    substrate_consent_gate.warmup_cycles = (uint16_t)cfg.consent_gate_warmup_cycles;
+    substrate_consent_gate.warmup_remaining = substrate_consent_gate.warmup_cycles;
+    substrate_consent_gate.refractory_cycles = (uint16_t)cfg.consent_gate_refractory_cycles;
+    substrate_consent_gate.refractory_remaining = 0U;
+    substrate_consent_gate.open = false;
+    substrate_nan_guard_active = false;
 
     substrate_kiss_enabled = cfg.kiss_enabled;
     if (substrate_kiss_enabled) {
