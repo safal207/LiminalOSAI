@@ -11,7 +11,10 @@ typedef enum {
     DREAM_COUPLER_PHASE_WAKE
 } DreamCouplerPhase;
 
-typedef struct introspect_state {
+typedef struct introspect_state introspect_state;
+typedef struct introspect_metrics introspect_metrics;
+
+struct introspect_state {
     bool enabled;
     bool harmony_enabled;
     bool harmony_line_open;
@@ -24,22 +27,33 @@ typedef struct introspect_state {
     DreamCouplerPhase dream_phase;
     DreamCouplerPhase next_dream_phase;
     bool has_dream_preview;
-} State;
+    double pending_amp;
+    double pending_tempo;
+    double pending_consent;
+    double pending_influence;
+    double pending_dream;
+    bool pending_has_dream;
+};
 
-typedef struct introspect_metrics {
+struct introspect_metrics {
     float amp;
     float tempo;
     float consent;
     float influence;
+    float bond_coh;
+    float error_margin;
     float harmony;
     int kiss;
-} Metrics;
+};
 
-void introspect_state_init(State *state);
-void introspect_enable(State *state, bool enabled);
-void introspect_enable_harmony(State *state, bool enabled);
-void introspect_finalize(State *state);
-void introspect_tick(State *state, Metrics *metrics);
+typedef introspect_state State;
+typedef introspect_metrics Metrics;
+
+void introspect_state_init(introspect_state *state);
+void introspect_enable(introspect_state *state, bool enabled);
+void introspect_enable_harmony(introspect_state *state, bool enabled);
+void introspect_finalize(introspect_state *state);
+void introspect_tick(introspect_state *state, introspect_metrics *metrics);
 void introspect_configure_trs(bool enabled,
                               float alpha,
                               int warmup,

@@ -14,6 +14,8 @@
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
+#include <time.h>
+#include <errno.h>
 
 #if defined(_WIN32)
 #include <direct.h>
@@ -62,6 +64,32 @@ static ERB g_erb;
 static int g_erb_pre_value = 0;
 static int g_erb_post_value = 0;
 static float g_erb_spike_value = 0.0f;
+
+static void format_timestamp(char *buffer, size_t size)
+{
+    if (!buffer || size == 0U) {
+        return;
+    }
+
+    time_t now = time(NULL);
+    struct tm tm_snapshot;
+#if defined(_WIN32)
+    errno_t err = localtime_s(&tm_snapshot, &now);
+    if (err != 0) {
+        buffer[0] = '\0';
+        return;
+    }
+#else
+    if (!localtime_r(&now, &tm_snapshot)) {
+        buffer[0] = '\0';
+        return;
+    }
+#endif
+
+    if (strftime(buffer, size, "%Y-%m-%dT%H:%M:%SZ", &tm_snapshot) == 0U) {
+        buffer[0] = '\0';
+    }
+}
 
 static double sanitize_value(double value)
 {
@@ -490,6 +518,13 @@ void introspect_tick(State *state, Metrics *metrics)
     if (!dream_label) {
         dream_label = "REST";
     }
+
+    bool has_dream = state->dream_phase != DREAM_COUPLER_PHASE_REST;
+    double dream = 0.0;
+    if (DREAM_COUPLER_PHASE_WAKE != 0) {
+        dream = (double)state->dream_phase / (double)DREAM_COUPLER_PHASE_WAKE;
+    }
+    dream = clamp_unit_value(dream);
 
     double consent_raw = sanitize_value(metrics->consent);
     double influence_raw = sanitize_value(metrics->influence);

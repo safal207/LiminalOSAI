@@ -23,6 +23,15 @@
 #define MICRO_PATTERN_CAPACITY 12U
 #endif
 
+typedef struct {
+    int window_size;
+    float tension[MICRO_PATTERN_CAPACITY];
+    float warmth[MICRO_PATTERN_CAPACITY];
+    float harmony[MICRO_PATTERN_CAPACITY];
+    int index;
+    int count;
+} MicroPatternBuffer;
+
 static struct {
     bool initialized;
     bool enabled;
@@ -57,6 +66,13 @@ static struct {
     float last_alignment_hint;
     float last_resonance_hint;
     float last_target;
+    MicroPatternBuffer recognition_buffer;
+    int trend_window;
+    bool recognition_enabled;
+    bool anticipation_trace;
+    float anticipation_signal;
+    bool calm_predicted;
+    bool anxiety_predicted;
 } empathic_state;
 
 static double monotonic_seconds(void)
@@ -108,11 +124,11 @@ static float blend(float current, float target, float rate)
 static void recognition_reset_buffer(void)
 {
     memset(&empathic_state.recognition_buffer, 0, sizeof(empathic_state.recognition_buffer));
-    empathic_state.recognition_buffer.window_size = empathic_state.trend_window > 0 ? empathic_state.trend_window : RECOGNITION_WINDOW_DEFAULT;
-    if (empathic_state.recognition_buffer.window_size < RECOGNITION_WINDOW_MIN) {
-        empathic_state.recognition_buffer.window_size = RECOGNITION_WINDOW_MIN;
-    } else if (empathic_state.recognition_buffer.window_size > RECOGNITION_WINDOW_MAX) {
-        empathic_state.recognition_buffer.window_size = RECOGNITION_WINDOW_MAX;
+    empathic_state.recognition_buffer.window_size = empathic_state.trend_window > 0 ? empathic_state.trend_window : EMPATHIC_RECOGNITION_WINDOW_DEFAULT;
+    if (empathic_state.recognition_buffer.window_size < EMPATHIC_RECOGNITION_WINDOW_MIN) {
+        empathic_state.recognition_buffer.window_size = EMPATHIC_RECOGNITION_WINDOW_MIN;
+    } else if (empathic_state.recognition_buffer.window_size > EMPATHIC_RECOGNITION_WINDOW_MAX) {
+        empathic_state.recognition_buffer.window_size = EMPATHIC_RECOGNITION_WINDOW_MAX;
     }
     empathic_state.recognition_buffer.count = 0;
     empathic_state.recognition_buffer.index = 0;
@@ -125,11 +141,11 @@ static void recognition_push(float tension, float warmth, float harmony)
 {
     MicroPatternBuffer *buffer = &empathic_state.recognition_buffer;
     int window = buffer->window_size;
-    if (window < RECOGNITION_WINDOW_MIN) {
-        window = RECOGNITION_WINDOW_MIN;
+    if (window < EMPATHIC_RECOGNITION_WINDOW_MIN) {
+        window = EMPATHIC_RECOGNITION_WINDOW_MIN;
         buffer->window_size = window;
-    } else if (window > RECOGNITION_WINDOW_MAX) {
-        window = RECOGNITION_WINDOW_MAX;
+    } else if (window > EMPATHIC_RECOGNITION_WINDOW_MAX) {
+        window = EMPATHIC_RECOGNITION_WINDOW_MAX;
         buffer->window_size = window;
     }
 
@@ -146,7 +162,7 @@ static void recognition_push(float tension, float warmth, float harmony)
 static int recognition_start_index(const MicroPatternBuffer *buffer, int samples)
 {
     int index = buffer->index - samples;
-    int window = buffer->window_size > 0 ? buffer->window_size : RECOGNITION_WINDOW_DEFAULT;
+    int window = buffer->window_size > 0 ? buffer->window_size : EMPATHIC_RECOGNITION_WINDOW_DEFAULT;
     if (window <= 0) {
         return 0;
     }
@@ -159,8 +175,8 @@ static int recognition_start_index(const MicroPatternBuffer *buffer, int samples
 static float recognition_trend(const float *values, const MicroPatternBuffer *buffer)
 {
     int window = buffer->window_size;
-    if (window < RECOGNITION_WINDOW_MIN) {
-        window = RECOGNITION_WINDOW_MIN;
+    if (window < EMPATHIC_RECOGNITION_WINDOW_MIN) {
+        window = EMPATHIC_RECOGNITION_WINDOW_MIN;
     }
     int samples = buffer->count < window ? buffer->count : window;
     if (samples < 2) {
@@ -383,7 +399,7 @@ void empathic_init(EmpathicSource source, bool trace, float gain)
     empathic_state.last_timestamp = monotonic_seconds();
     empathic_state.recognition_enabled = false;
     empathic_state.anticipation_trace = false;
-    empathic_state.trend_window = RECOGNITION_WINDOW_DEFAULT;
+    empathic_state.trend_window = EMPATHIC_RECOGNITION_WINDOW_DEFAULT;
     recognition_reset_buffer();
     empathic_state.initialized = true;
 }
@@ -595,10 +611,10 @@ void empathic_recognition_trace(bool enable)
 
 void empathic_set_trend_window(int window)
 {
-    if (window < RECOGNITION_WINDOW_MIN) {
-        window = RECOGNITION_WINDOW_MIN;
-    } else if (window > RECOGNITION_WINDOW_MAX) {
-        window = RECOGNITION_WINDOW_MAX;
+    if (window < EMPATHIC_RECOGNITION_WINDOW_MIN) {
+        window = EMPATHIC_RECOGNITION_WINDOW_MIN;
+    } else if (window > EMPATHIC_RECOGNITION_WINDOW_MAX) {
+        window = EMPATHIC_RECOGNITION_WINDOW_MAX;
     }
     empathic_state.trend_window = window;
     recognition_reset_buffer();
