@@ -6,13 +6,13 @@ TARGET  := build/pulse_kernel
 SUBSTRATE_TARGET := build/liminal_core
 
 CORE_SRCS   := core/pulse_kernel.c core/trs_filter.c core/trs_adapt.c core/erb.c core/astro_sync.c core/consent_gate.c \
-               core/neural_resonance.c core/kiss_cascade.c core/vse.c
+               core/neural_resonance.c core/kiss_cascade.c core/vse.c core/flow_equilibrium.c
 AFFINITY_SRCS := affinity/core.c
 ANTICIPATION_SRCS := anticipation/v2.c
 INTROSPECT_SRCS := src/introspect.c src/harmony.c src/dream_coupler.c
 TUNE_SRCS := tune/autotune.c
 SUBSTRATE_SRCS := core/liminal_substrate.c core/trs_filter.c core/trs_adapt.c core/erb.c core/astro_sync.c core/consent_gate.c \
-                   core/dream_replay.c core/synaptic_bridge.c core/kiss_cascade.c core/vse.c empathic/field.c memory/emotion_memory.c \
+                   core/dream_replay.c core/synaptic_bridge.c core/kiss_cascade.c core/vse.c core/flow_equilibrium.c empathic/field.c memory/emotion_memory.c \
                    memory/soil.c bus/resonant.c council/inner.c coherence/field.c awareness/bridge.c $(AFFINITY_SRCS) $(ANTICIPATION_SRCS)
 MEM_SRCS    := memory/soil.c memory/emotion_memory.c
 BUS_SRCS    := bus/resonant.c
