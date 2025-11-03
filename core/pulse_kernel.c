@@ -41,6 +41,7 @@
 #include "astro_sync.h"
 #include "kiss.h"
 #include "consent_gate.h"
+#include "vse.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -161,6 +162,16 @@ typedef struct {
     float consent_gate_bias;
     int consent_gate_warmup_cycles;
     int consent_gate_refractory_cycles;
+    bool vse_enabled;
+    bool vse_trace;
+    float vse_temp;
+    float vse_intent;
+    float vse_importance;
+    float vse_allowance;
+    float vse_lambda_p;
+    float vse_lambda_x;
+    float vse_allowance_hold;
+    float vse_allowance_pulse;
     bool strict_order;
     bool dry_run;
 } kernel_options;
@@ -209,6 +220,9 @@ static size_t build_exhale_sequence(const kernel_options *opts, const char **ste
     bool include_introspect = strict || (opts && opts->introspect_enabled);
     bool include_harmony = strict || include_introspect || (opts && (opts->harmony_enabled || opts->dream_enabled));
     bool include_astro = strict || (opts && opts->astro_enabled);
+    bool include_kiss = strict || (opts && opts->kiss_enabled);
+    bool include_gate = true;
+    bool include_vse = strict || (opts && opts->vse_enabled);
     bool include_dream = opts && opts->dream_enabled;
 
     if (include_ant2 && count < capacity) {
@@ -235,6 +249,15 @@ static size_t build_exhale_sequence(const kernel_options *opts, const char **ste
     if (include_astro && count < capacity) {
         steps[count++] = "astro";
     }
+    if (include_kiss && count < capacity) {
+        steps[count++] = "kiss";
+    }
+    if (include_gate && count < capacity) {
+        steps[count++] = "gate";
+    }
+    if (include_vse && count < capacity) {
+        steps[count++] = "vse";
+    }
     if (include_dream && count < capacity) {
         steps[count++] = "dream";
     }
@@ -249,7 +272,7 @@ static void format_exhale_sequence(const kernel_options *opts, char *buffer, siz
     }
 
     buffer[0] = '\0';
-    const char *steps[8];
+    const char *steps[16];
     size_t count = build_exhale_sequence(opts, steps, sizeof(steps) / sizeof(steps[0]));
     if (count == 0) {
         return;
@@ -574,6 +597,7 @@ static float mirror_gain_tempo = 1.0f;
 static bool kiss_module_enabled = false;
 static ConsentGate consent_gate_state;
 static introspect_state g_introspect_state;
+static VSEState g_vse_state;
 typedef struct {
     AwarenessState awareness_snapshot;
     const CoherenceField *coherence_field;
@@ -1035,6 +1059,16 @@ static kernel_options parse_options(int argc, char **argv)
         .consent_gate_bias = 0.0f,
         .consent_gate_warmup_cycles = 8,
         .consent_gate_refractory_cycles = 6,
+        .vse_enabled = false,
+        .vse_trace = false,
+        .vse_temp = 1.0f,
+        .vse_intent = 0.6f,
+        .vse_importance = 0.4f,
+        .vse_allowance = 0.3f,
+        .vse_lambda_p = 0.2f,
+        .vse_lambda_x = 0.4f,
+        .vse_allowance_hold = 0.0f,
+        .vse_allowance_pulse = 0.0f,
         .strict_order = false,
         .dry_run = false
     };
@@ -1469,6 +1503,103 @@ static kernel_options parse_options(int argc, char **argv)
                     }
                     opts.consent_gate_refractory_cycles = (int)parsed;
                 }
+            }
+        } else if (strcmp(arg, "--vse") == 0) {
+            opts.vse_enabled = true;
+        } else if (strcmp(arg, "--vse-trace") == 0) {
+            opts.vse_enabled = true;
+            opts.vse_trace = true;
+        } else if (strncmp(arg, "--vse-temp=", 11) == 0) {
+            const char *value = arg + 11;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.vse_temp = clamp_range(parsed, 0.2f, 1.5f);
+                    opts.vse_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--vse-intent=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.vse_intent = clamp_unit(parsed);
+                    opts.vse_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--vse-importance=", 17) == 0) {
+            const char *value = arg + 17;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.vse_importance = clamp_unit(parsed);
+                    opts.vse_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--vse-allow=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.vse_allowance = clamp_unit(parsed);
+                    opts.vse_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--vse-lambda-p=", 15) == 0) {
+            const char *value = arg + 15;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.vse_lambda_p = clamp_range(parsed, 0.0f, 2.0f);
+                    opts.vse_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--vse-lambda-x=", 15) == 0) {
+            const char *value = arg + 15;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.vse_lambda_x = clamp_range(parsed, 0.0f, 2.0f);
+                    opts.vse_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--allow-hold=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.vse_allowance_hold = clamp_unit(parsed);
+                    opts.vse_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--allow=", 8) == 0) {
+            const char *value = arg + 8;
+            if (value && *value) {
+                if ((value[0] == 'n' || value[0] == 'N') &&
+                    (value[1] == 'o' || value[1] == 'O') &&
+                    (value[2] == 'w' || value[2] == 'W') &&
+                    value[3] == '\0') {
+                    opts.vse_allowance_pulse += 0.1f;
+                } else {
+                    char *end = NULL;
+                    float parsed = strtof(value, &end);
+                    if (end != value && isfinite(parsed)) {
+                        opts.vse_allowance_pulse += parsed;
+                    }
+                }
+                if (opts.vse_allowance_pulse > 1.0f) {
+                    opts.vse_allowance_pulse = 1.0f;
+                } else if (opts.vse_allowance_pulse < -1.0f) {
+                    opts.vse_allowance_pulse = -1.0f;
+                }
+                opts.vse_enabled = true;
             }
         } else if (strcmp(arg, "--trs") == 0) {
             opts.trs_enabled = true;
@@ -2655,6 +2786,78 @@ static void exhale(const kernel_options *opts)
         soil_trace gate_trace = soil_trace_make(ENERGY_REFLECT, imprint, (size_t)written);
         soil_write(&gate_trace);
     }
+    if (opts && opts->vse_enabled) {
+        VSECfg current_cfg = vse_current_cfg();
+        float drift_level = clamp_unit(fabsf(awareness_snapshot.drift));
+        float error_level = clamp_unit(cycle_metrics.error_margin);
+        float harmony_signal = clamp_unit(harmony_metric);
+        float astro_relax = astro_layer_enabled ? clamp_unit(astro_state.tone) : 0.0f;
+        float kiss_signal = kiss_flag ? 1.0f : 0.0f;
+        float gate_signal = gate_is_open ? 1.0f : 0.0f;
+
+        float target_intent = clamp_unit(0.55f * gate_signal + 0.25f * harmony_signal + 0.20f * kiss_signal);
+        float blended_intent = clamp_unit(0.6f * current_cfg.intent + 0.4f * target_intent);
+        vse_set_intent(blended_intent);
+
+        float base_importance = clamp_unit(0.55f * drift_level + 0.45f * error_level);
+        base_importance *= (1.0f - 0.25f * astro_relax);
+        float blended_importance = clamp_unit(0.7f * current_cfg.importance + 0.3f * base_importance);
+        vse_set_importance(blended_importance);
+
+        float allowance_hint = clamp_unit(current_cfg.allowance + 0.15f * astro_relax + 0.10f * (1.0f - drift_level));
+        float blended_allowance = clamp_unit(0.6f * current_cfg.allowance + 0.4f * allowance_hint);
+        vse_set_allowance(blended_allowance);
+        vse_set_temperature(opts->vse_temp);
+
+        float delta_signal = clamp_unit(fabsf(introspect_get_last_trs_delta()) * 2.0f);
+        float pendulum_signal = clamp_unit(0.5f * drift_level + 0.3f * error_level + 0.2f * delta_signal);
+
+        VNode options[3];
+        options[0].p = clamp_unit(0.45f + 0.2f * blended_intent);
+        options[0].value = clamp_unit((cycle_metrics.consent + cycle_metrics.influence + harmony_signal) / 3.0f);
+        options[0].cost = clamp_unit(0.6f * error_level + 0.2f * (1.0f - gate_signal));
+        options[0].pendulum = pendulum_signal;
+
+        options[1].p = 0.35f;
+        options[1].value = clamp_unit(0.4f + 0.3f * (1.0f - error_level) + 0.3f * harmony_signal);
+        options[1].cost = clamp_unit(0.2f + 0.3f * drift_level);
+        options[1].pendulum = clamp_unit(pendulum_signal * 0.6f);
+
+        options[2].p = 0.20f;
+        options[2].value = clamp_unit(0.3f + 0.4f * (1.0f - trust_metric));
+        options[2].cost = clamp_unit(0.3f + 0.2f * error_level + 0.1f * gate_signal);
+        options[2].pendulum = clamp_unit(0.3f + pendulum_signal * 0.7f);
+
+        vse_set_graph(options, 3);
+        int vse_choice = vse_pick(&g_vse_state);
+        if (vse_choice >= 0) {
+            float outcome = 0.0f;
+            switch (vse_choice) {
+            case 0:
+                outcome = gate_is_open ? 0.08f : -0.04f;
+                cycle_metrics.error_margin = clamp_unit(cycle_metrics.error_margin * (gate_is_open ? 0.92f : 1.05f));
+                cycle_metrics.tempo = clamp_range(cycle_metrics.tempo * (1.0f + 0.05f * blended_intent), 0.2f, 2.0f);
+                cycle_metrics.amp = clamp_unit(cycle_metrics.amp * (1.0f + 0.04f * blended_intent));
+                break;
+            case 1:
+                outcome = 0.03f;
+                cycle_metrics.amp = clamp_unit((cycle_metrics.amp + harmony_signal) * 0.5f);
+                cycle_metrics.error_margin = clamp_unit(cycle_metrics.error_margin * 0.95f);
+                break;
+            case 2:
+                outcome = -0.02f;
+                cycle_metrics.consent = clamp_unit(cycle_metrics.consent * 0.96f);
+                cycle_metrics.influence = clamp_unit(cycle_metrics.influence * 0.96f);
+                break;
+            default:
+                break;
+            }
+            harmony_metrics.amp = clamp_unit((harmony_metrics.amp + cycle_metrics.amp) * 0.5f);
+            harmony_metrics.tempo = clamp_range((harmony_metrics.tempo + cycle_metrics.tempo) * 0.5f, 0.2f, 2.0f);
+            harmony_metrics.harmony = clamp_unit((harmony_metrics.harmony + cycle_metrics.harmony) * 0.5f);
+            vse_feedback(&g_vse_state, outcome);
+        }
+    }
     cycle_metrics.kiss = kiss_flag;
 
     introspect_tick(&g_introspect_state, &cycle_metrics);
@@ -3053,6 +3256,27 @@ int main(int argc, char **argv)
         kiss_set_refractory((uint8_t)opts.kiss_refractory_cycles);
         kiss_set_alpha(opts.kiss_alpha);
     }
+    if (opts.vse_enabled) {
+        VSECfg vse_cfg = {
+            .intent = clamp_unit(opts.vse_intent),
+            .importance = clamp_unit(opts.vse_importance),
+            .allowance = clamp_unit(opts.vse_allowance),
+            .temp = clamp_range(opts.vse_temp, 0.2f, 1.5f)
+        };
+        g_vse_state.excess = 0.0f;
+        g_vse_state.bias = 0.0f;
+        vse_init(vse_cfg);
+        vse_set_lambda(opts.vse_lambda_p, opts.vse_lambda_x);
+        vse_set_allowance_hold(opts.vse_allowance_hold);
+        if (opts.vse_allowance_pulse != 0.0f) {
+            vse_schedule_allowance(opts.vse_allowance_pulse);
+        }
+        vse_enable_trace(opts.vse_trace ? 1 : 0);
+    } else {
+        g_vse_state.excess = 0.0f;
+        g_vse_state.bias = 0.0f;
+        vse_finalize();
+    }
     health_scan_init();
     if (opts.enable_health_scan) {
         health_scan_set_interval(opts.scan_interval);
@@ -3155,6 +3379,7 @@ int main(int argc, char **argv)
     metabolic_shutdown();
 
     introspect_finalize(&g_introspect_state);
+    vse_finalize();
 
     if (collective_memory_match_trace) {
         cm_trace_free(collective_memory_match_trace);
