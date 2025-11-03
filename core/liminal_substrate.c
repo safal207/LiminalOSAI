@@ -45,6 +45,7 @@
 #include "resonant.h"
 #include "kiss.h"
 #include "consent_gate.h"
+#include "flow_equilibrium.h"
 #include "vse.h"
 
 #ifndef M_PI
@@ -177,6 +178,9 @@ typedef struct {
    float consent_gate_bias;
    int consent_gate_warmup_cycles;
    int consent_gate_refractory_cycles;
+    bool fee_enabled;
+    float flow_alpha;
+    float flow_gamma;
     bool vse_enabled;
     bool vse_trace;
     float vse_temp;
@@ -242,6 +246,7 @@ static bool substrate_bridge_enabled = false;
 static bool substrate_bridge_trace = false;
 static SynapticBridge substrate_bridge;
 static FILE *substrate_bridge_stream = NULL;
+static FlowEquilibrium substrate_flow_equilibrium;
 static void ensure_logs_directory_path(void);
 typedef struct {
     int consecutive;
@@ -311,6 +316,7 @@ static size_t build_exhale_sequence(const substrate_config *cfg, const char **st
     bool include_astro = strict || cfg->astro_enabled;
     bool include_kiss = strict || cfg->kiss_enabled;
     bool include_gate = true;
+    bool include_fee = strict || cfg->fee_enabled;
     bool include_vse = strict || cfg->vse_enabled;
     bool include_dream = cfg->dream_enabled;
 
@@ -343,6 +349,9 @@ static size_t build_exhale_sequence(const substrate_config *cfg, const char **st
     }
     if (include_gate && count < capacity) {
         steps[count++] = "gate";
+    }
+    if (include_fee && count < capacity) {
+        steps[count++] = "fee";
     }
     if (include_vse && count < capacity) {
         steps[count++] = "vse";
@@ -1011,6 +1020,9 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.consent_gate_bias = 0.0f;
     cfg.consent_gate_warmup_cycles = 8;
     cfg.consent_gate_refractory_cycles = 6;
+    cfg.fee_enabled = false;
+    cfg.flow_alpha = 0.6f;
+    cfg.flow_gamma = 0.25f;
     cfg.vse_enabled = false;
     cfg.vse_trace = false;
     cfg.vse_temp = 1.0f;
@@ -1539,6 +1551,28 @@ static substrate_config parse_args(int argc, char **argv)
                         parsed = 255L;
                     }
                     cfg.consent_gate_refractory_cycles = (int)parsed;
+                }
+            }
+        } else if (strcmp(arg, "--fee") == 0) {
+            cfg.fee_enabled = true;
+        } else if (strncmp(arg, "--flow-alpha=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.flow_alpha = clamp_range(parsed, 0.0f, 1.0f);
+                    cfg.fee_enabled = true;
+                }
+            }
+        } else if (strncmp(arg, "--flow-gamma=", 13) == 0) {
+            const char *value = arg + 13;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.flow_gamma = clamp_range(parsed, 0.0f, 1.0f);
+                    cfg.fee_enabled = true;
                 }
             }
         } else if (strcmp(arg, "--vse") == 0) {
@@ -3099,6 +3133,34 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                 harmony_sync(&substrate_introspect_state, &harmony_metrics);
             }
 
+            VSECfg vse_snapshot;
+            bool have_vse_snapshot = false;
+            if (cfg->vse_enabled) {
+                vse_snapshot = vse_current_cfg();
+                have_vse_snapshot = true;
+            } else {
+                memset(&vse_snapshot, 0, sizeof(vse_snapshot));
+            }
+            FlowEquilibriumResult fee_result = { 1.0f, 0.0f, 0.0f, 0.0f };
+            bool fee_active = flow_equilibrium_is_enabled(&substrate_flow_equilibrium);
+            if (fee_active) {
+                float impulse_signal = clamp_unit(metrics.amp * metrics.influence);
+                float observation_signal = clamp_unit(state->sync_quality);
+                float choice_signal = have_vse_snapshot ? clamp_unit(vse_snapshot.intent)
+                                                        : clamp_unit(metrics.consent);
+                fee_result = flow_equilibrium_update(&substrate_flow_equilibrium,
+                                                     impulse_signal,
+                                                     observation_signal,
+                                                     choice_signal,
+                                                     state->cycles);
+                metrics.tempo = clamp_unit(metrics.tempo * fee_result.tempo_scale);
+                harmony_metrics.tempo = clamp_range(harmony_metrics.tempo * fee_result.tempo_scale, 0.2f, 2.0f);
+                metrics.amp = clamp_unit(metrics.amp + fee_result.impulse_boost);
+                harmony_metrics.amp = clamp_unit(harmony_metrics.amp + fee_result.impulse_boost * 0.5f);
+                metrics.error_margin = clamp_unit(metrics.error_margin * (1.0f - 0.25f * fee_result.observation_relief));
+                metrics.influence = clamp_unit(metrics.influence + fee_result.observation_relief * 0.05f);
+            }
+
             float trust_metric = clamp_unit(metrics.consent);
             float presence_metric = clamp_unit(metrics.influence);
             float awareness_scale = clamp_unit(state->sync_quality);
@@ -3147,7 +3209,7 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                 }
             }
             if (cfg->vse_enabled) {
-                VSECfg current_cfg = vse_current_cfg();
+                VSECfg current_cfg = have_vse_snapshot ? vse_snapshot : vse_current_cfg();
                 float drift_level = clamp_unit(fabsf(state->phase_offset - 0.5f) * 2.0f);
                 float error_level = clamp_unit(metrics.error_margin);
                 float harmony_signal = clamp_unit(harmony_metric);
@@ -3155,38 +3217,71 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                 float gate_signal = gate_is_open ? 1.0f : 0.0f;
 
                 float target_intent = clamp_unit(0.55f * gate_signal + 0.25f * harmony_signal + 0.20f * (kiss_flag ? 1.0f : 0.0f));
+                if (fee_active) {
+                    target_intent = clamp_unit(target_intent + fee_result.choice_delta);
+                }
                 float blended_intent = clamp_unit(0.6f * current_cfg.intent + 0.4f * target_intent);
                 vse_set_intent(blended_intent);
 
                 float base_importance = clamp_unit(0.50f * drift_level + 0.50f * error_level);
                 base_importance *= (1.0f - 0.25f * astro_relax);
+                if (fee_active) {
+                    base_importance = clamp_unit(base_importance * (1.0f - 0.2f * fee_result.observation_relief));
+                }
                 float blended_importance = clamp_unit(0.7f * current_cfg.importance + 0.3f * base_importance);
                 vse_set_importance(blended_importance);
 
                 float allowance_hint = clamp_unit(current_cfg.allowance + 0.15f * astro_relax + 0.10f * (1.0f - drift_level));
+                if (fee_active) {
+                    allowance_hint = clamp_unit(allowance_hint + fee_result.observation_relief * 0.1f);
+                }
                 float blended_allowance = clamp_unit(0.6f * current_cfg.allowance + 0.4f * allowance_hint);
                 vse_set_allowance(blended_allowance);
-                vse_set_temperature(cfg->vse_temp);
+
+                float temperature = cfg->vse_temp;
+                if (fee_active) {
+                    temperature = clamp_range(temperature * (1.0f + fee_result.choice_delta * 0.3f), 0.2f, 1.5f);
+                }
+                vse_set_temperature(temperature);
 
                 float rate_drift = clamp_unit(fabsf(state->breath_rate - SUBSTRATE_BASE_RATE));
                 float memory_tension = clamp_unit(fabsf(state->memory_trace - state->resonance));
                 float delta_signal = clamp_unit(fabsf(introspect_get_last_trs_delta()) * 2.0f);
                 float pendulum_signal = clamp_unit(0.4f * drift_level + 0.3f * error_level + 0.2f * memory_tension + 0.2f * delta_signal);
+                if (fee_active) {
+                    float relief = clamp_unit(1.0f - 0.15f * fee_result.observation_relief);
+                    pendulum_signal = clamp_unit(pendulum_signal * relief + fee_result.impulse_boost * 0.2f);
+                }
 
                 VNode options[3];
                 options[0].p = clamp_unit(0.45f + 0.2f * blended_intent);
+                if (fee_active) {
+                    options[0].p = clamp_unit(options[0].p + fee_result.choice_delta * 0.15f);
+                }
                 options[0].value = clamp_unit((metrics.consent + metrics.influence + harmony_signal) / 3.0f);
+                if (fee_active) {
+                    options[0].value = clamp_unit(options[0].value + fee_result.impulse_boost * 0.4f);
+                }
                 options[0].cost = clamp_unit(0.5f * error_level + 0.2f * rate_drift);
                 options[0].pendulum = pendulum_signal;
 
                 options[1].p = 0.35f;
                 options[1].value = clamp_unit(0.4f + 0.3f * (1.0f - error_level) + 0.2f * harmony_signal);
+                if (fee_active) {
+                    options[1].value = clamp_unit(options[1].value * (1.0f - 0.1f * fee_result.observation_relief));
+                }
                 options[1].cost = clamp_unit(0.2f + 0.3f * drift_level);
                 options[1].pendulum = clamp_unit(pendulum_signal * 0.6f);
 
                 options[2].p = 0.20f;
+                if (fee_active) {
+                    options[2].p = clamp_unit(options[2].p * (1.0f - 0.25f * fee_result.impulse_boost));
+                }
                 options[2].value = clamp_unit(0.3f + 0.4f * (1.0f - trust_metric));
                 options[2].cost = clamp_unit(0.3f + 0.2f * error_level + 0.1f * gate_signal);
+                if (fee_active) {
+                    options[2].cost = clamp_unit(options[2].cost * (1.0f + 0.3f * fee_result.observation_relief));
+                }
                 options[2].pendulum = clamp_unit(0.3f + pendulum_signal * 0.7f);
 
                 vse_set_graph(options, 3);
@@ -3212,6 +3307,10 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                         break;
                     default:
                         break;
+                    }
+                    if (fee_active) {
+                        outcome += fee_result.impulse_boost * 0.05f;
+                        outcome += fee_result.observation_relief * 0.04f;
                     }
                     harmony_metrics.amp = clamp_unit((harmony_metrics.amp + metrics.amp) * 0.5f);
                     harmony_metrics.tempo = clamp_range((harmony_metrics.tempo + metrics.tempo) * 0.5f, 0.2f, 2.0f);
@@ -3311,6 +3410,13 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                 };
                 dream_tick(&substrate_dream_replay, astro_snapshot, &dream_harmony, &dream_trs_snapshot);
                 float dream_gain = dream_feedback(&substrate_dream_replay);
+                if (fee_active) {
+                    float dream_adjust = 1.0f + fee_result.observation_relief * 0.12f;
+                    dream_adjust -= (1.0f - fee_result.tempo_scale) * 0.3f;
+                    dream_adjust += fee_result.choice_delta * 0.1f;
+                    dream_adjust = clamp_range(dream_adjust, 0.85f, 1.15f);
+                    dream_gain = clamp_range(dream_gain * dream_adjust, 0.75f, 1.25f);
+                }
                 substrate_dream_feedback = dream_gain;
                 if (substrate_astro_enabled) {
                     float projected = clamp_unit(substrate_dream_replay.memory_after * dream_gain);
@@ -3602,6 +3708,9 @@ int main(int argc, char **argv)
                                 warmup_cycles,
                                 refractory_cycles);
 
+    flow_equilibrium_init(&substrate_flow_equilibrium, cfg.flow_alpha, cfg.flow_gamma);
+    flow_equilibrium_enable(&substrate_flow_equilibrium, cfg.fee_enabled);
+
     substrate_kiss_enabled = cfg.kiss_enabled;
     if (substrate_kiss_enabled) {
         kiss_init();
@@ -3661,6 +3770,8 @@ int main(int argc, char **argv)
 
     substrate_astro_trace_close();
     substrate_dream_replay_trace_close();
+
+    flow_equilibrium_finalize(&substrate_flow_equilibrium);
 
     vse_finalize();
 
