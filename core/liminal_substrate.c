@@ -27,7 +27,9 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #endif
+#include "qel.h"
 #include "empathic.h"
 #include "emotion_memory.h"
 #include "council.h"
@@ -138,6 +140,9 @@ typedef struct {
     bool dry_run;
     bool introspect_enabled;
     bool harmony_enabled;
+    bool qel_enabled;
+    float qel_retro_gain;
+    uint32_t entangle_ctx;
     bool dream_enabled;
     bool dream_replay_enabled;
     bool astro_enabled;
@@ -247,6 +252,10 @@ static bool substrate_bridge_trace = false;
 static SynapticBridge substrate_bridge;
 static FILE *substrate_bridge_stream = NULL;
 static FlowEquilibrium substrate_flow_equilibrium;
+static qel_state *substrate_qel_state = NULL;
+static bool substrate_qel_enabled = false;
+static float substrate_qel_retro_gain = 0.0f;
+static uint32_t substrate_entangle_ctx = 0U;
 static void ensure_logs_directory_path(void);
 typedef struct {
     int consecutive;
@@ -274,6 +283,30 @@ static TuneConfig g_tune_profile;
 static TuneResult g_tune_last_result;
 static TuneResult g_tune_ranked_cache[8];
 static size_t g_tune_ranked_count = 0;
+
+static double substrate_now_seconds(void)
+{
+#if defined(_WIN32)
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER uli;
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    return (double)uli.QuadPart / 10000000.0;
+#else
+#if defined(CLOCK_REALTIME)
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+        return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+    }
+#endif
+    struct timeval tv;
+    if (gettimeofday(&tv, NULL) != 0) {
+        return (double)time(NULL);
+    }
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
+#endif
+}
 
 static float sanitize_positive(float value, float fallback)
 {
@@ -980,6 +1013,9 @@ static substrate_config parse_args(int argc, char **argv)
     cfg.dry_run = false;
     cfg.introspect_enabled = false;
     cfg.harmony_enabled = false;
+    cfg.qel_enabled = false;
+    cfg.qel_retro_gain = 0.0f;
+    cfg.entangle_ctx = 0U;
     cfg.dream_enabled = false;
     cfg.dream_replay_enabled = false;
     cfg.astro_enabled = false;
@@ -1394,6 +1430,26 @@ static substrate_config parse_args(int argc, char **argv)
             cfg.introspect_enabled = true;
         } else if (strcmp(arg, "--harmony") == 0) {
             cfg.harmony_enabled = true;
+        } else if (strcmp(arg, "--qel") == 0) {
+            cfg.qel_enabled = true;
+        } else if (strncmp(arg, "--qel-retro=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    cfg.qel_retro_gain = clamp_unit(parsed);
+                }
+            }
+        } else if (strncmp(arg, "--entangle-ctx=", 15) == 0) {
+            const char *value = arg + 15;
+            if (*value) {
+                char *end = NULL;
+                unsigned long parsed = strtoul(value, &end, 0);
+                if (end != value) {
+                    cfg.entangle_ctx = (uint32_t)parsed;
+                }
+            }
         } else if (strcmp(arg, "--trs") == 0) {
             cfg.trs_enabled = true;
         } else if (strcmp(arg, "--astro") == 0) {
@@ -3161,6 +3217,33 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
                 metrics.influence = clamp_unit(metrics.influence + fee_result.observation_relief * 0.05f);
             }
 
+            if (substrate_qel_enabled && substrate_qel_state) {
+                double now_s = substrate_now_seconds();
+                qel_obs_t obs = {
+                    .t = now_s,
+                    .amp = metrics.amp,
+                    .tempo = metrics.tempo,
+                    .consent = metrics.consent,
+                    .influence = metrics.influence,
+                    .harmony = harmony_metrics.harmony,
+                    .ctx = substrate_entangle_ctx
+                };
+                qel_mark_observation(substrate_qel_state, &obs);
+                if (substrate_qel_retro_gain > 0.0f) {
+                    qel_retro_t retro = {
+                        .t_new = now_s,
+                        .retro_gain = substrate_qel_retro_gain,
+                        .ctx_mask = substrate_entangle_ctx
+                    };
+                    qel_apply_retro(substrate_qel_state, &retro);
+                    qel_commit_revision(substrate_qel_state);
+                }
+                float qel_adjusted = qel_influence(substrate_qel_state,
+                                                   metrics.influence,
+                                                   substrate_entangle_ctx);
+                metrics.influence = clamp_unit(qel_adjusted);
+            }
+
             float trust_metric = clamp_unit(metrics.consent);
             float presence_metric = clamp_unit(metrics.influence);
             float awareness_scale = clamp_unit(state->sync_quality);
@@ -3591,6 +3674,18 @@ int main(int argc, char **argv)
     } else {
         substrate_astro_trace_enabled = false;
     }
+    substrate_entangle_ctx = cfg.entangle_ctx;
+    substrate_qel_retro_gain = clamp_unit(cfg.qel_retro_gain);
+    if (substrate_qel_state) {
+        qel_free(substrate_qel_state);
+        substrate_qel_state = NULL;
+    }
+    if (cfg.qel_enabled) {
+        substrate_qel_state = qel_init("logs", 4096);
+        substrate_qel_enabled = substrate_qel_state != NULL;
+    } else {
+        substrate_qel_enabled = false;
+    }
     if (cfg.tune_apply && g_tune_profile_loaded) {
         apply_tune_config(&g_tune_profile);
     }
@@ -3774,6 +3869,12 @@ int main(int argc, char **argv)
     flow_equilibrium_finalize(&substrate_flow_equilibrium);
 
     vse_finalize();
+
+    if (substrate_qel_state) {
+        qel_free(substrate_qel_state);
+        substrate_qel_state = NULL;
+        substrate_qel_enabled = false;
+    }
 
     return 0;
 }
