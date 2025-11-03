@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <errno.h>
+#include <sys/time.h>
 
 #include "soil.h"
 #include "resonant.h"
@@ -42,6 +43,7 @@
 #include "kiss.h"
 #include "consent_gate.h"
 #include "vse.h"
+#include "qel.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -132,6 +134,9 @@ typedef struct {
     float mirror_tempo_max;
     bool introspect_enabled;
     bool harmony_enabled;
+    bool qel_enabled;
+    float qel_retro_gain;
+    uint32_t entangle_ctx;
     bool astro_enabled;
     bool astro_trace;
     float astro_rate;
@@ -598,6 +603,19 @@ static bool kiss_module_enabled = false;
 static ConsentGate consent_gate_state;
 static introspect_state g_introspect_state;
 static VSEState g_vse_state;
+static qel_state *g_qel_state = NULL;
+static bool g_qel_enabled = false;
+static float g_qel_retro_gain = 0.0f;
+static uint32_t g_qel_ctx_mask = 0U;
+
+static double kernel_now_seconds(void)
+{
+    struct timeval tv;
+    if (gettimeofday(&tv, NULL) != 0) {
+        return (double)time(NULL);
+    }
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
+}
 typedef struct {
     AwarenessState awareness_snapshot;
     const CoherenceField *coherence_field;
@@ -1029,6 +1047,9 @@ static kernel_options parse_options(int argc, char **argv)
         .mirror_tempo_max = MIRROR_GAIN_TEMPO_MAX_DEFAULT,
         .introspect_enabled = false,
         .harmony_enabled = false,
+        .qel_enabled = false,
+        .qel_retro_gain = 0.0f,
+        .entangle_ctx = 0U,
         .astro_enabled = false,
         .astro_trace = false,
         .astro_rate = 0.010f,
@@ -1347,6 +1368,26 @@ static kernel_options parse_options(int argc, char **argv)
             opts.introspect_enabled = true;
         } else if (strcmp(arg, "--harmony") == 0) {
             opts.harmony_enabled = true;
+        } else if (strcmp(arg, "--qel") == 0) {
+            opts.qel_enabled = true;
+        } else if (strncmp(arg, "--qel-retro=", 12) == 0) {
+            const char *value = arg + 12;
+            if (*value) {
+                char *end = NULL;
+                float parsed = strtof(value, &end);
+                if (end != value && isfinite(parsed)) {
+                    opts.qel_retro_gain = clamp_unit(parsed);
+                }
+            }
+        } else if (strncmp(arg, "--entangle-ctx=", 15) == 0) {
+            const char *value = arg + 15;
+            if (*value) {
+                char *end = NULL;
+                unsigned long parsed = strtoul(value, &end, 0);
+                if (end != value) {
+                    opts.entangle_ctx = (uint32_t)parsed;
+                }
+            }
         } else if (strcmp(arg, "--astro") == 0) {
             opts.astro_enabled = true;
         } else if (strcmp(arg, "--astro-trace") == 0) {
@@ -2736,6 +2777,33 @@ static void exhale(const kernel_options *opts)
         harmony_sync(&g_introspect_state, &harmony_metrics);
     }
 
+    if (g_qel_enabled && g_qel_state) {
+        double now_s = kernel_now_seconds();
+        qel_obs_t obs = {
+            .t = now_s,
+            .amp = cycle_metrics.amp,
+            .tempo = cycle_metrics.tempo,
+            .consent = cycle_metrics.consent,
+            .influence = cycle_metrics.influence,
+            .harmony = harmony_metrics.harmony,
+            .ctx = g_qel_ctx_mask
+        };
+        qel_mark_observation(g_qel_state, &obs);
+        if (g_qel_retro_gain > 0.0f) {
+            qel_retro_t retro = {
+                .t_new = now_s,
+                .retro_gain = g_qel_retro_gain,
+                .ctx_mask = g_qel_ctx_mask
+            };
+            qel_apply_retro(g_qel_state, &retro);
+            qel_commit_revision(g_qel_state);
+        }
+        float adjusted = qel_influence(g_qel_state, cycle_metrics.influence, g_qel_ctx_mask);
+        cycle_metrics.influence = clamp_unit(adjusted);
+        cycle_influence = cycle_metrics.influence;
+        introspect_influence = cycle_metrics.influence;
+    }
+
     float harmony_metric = clamp_unit(harmony_metrics.harmony);
     if (kiss_module_enabled) {
         bool kiss_fired = kiss_update(trust_metric, presence_metric, harmony_metric, awareness_scale);
@@ -3156,6 +3224,19 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    g_qel_ctx_mask = opts.entangle_ctx;
+    g_qel_retro_gain = clamp_unit(opts.qel_retro_gain);
+    if (g_qel_state) {
+        qel_free(g_qel_state);
+        g_qel_state = NULL;
+    }
+    if (opts.qel_enabled) {
+        g_qel_state = qel_init("logs", 4096);
+        g_qel_enabled = g_qel_state != NULL;
+    } else {
+        g_qel_enabled = false;
+    }
+
     collective_active = opts.collective_enabled || opts.collective_trace;
     collective_trace_enabled = opts.collective_trace;
     collective_strategy = opts.ensemble_mode;
@@ -3387,6 +3468,12 @@ int main(int argc, char **argv)
     }
 
     astro_trace_close();
+
+    if (g_qel_state) {
+        qel_free(g_qel_state);
+        g_qel_state = NULL;
+        g_qel_enabled = false;
+    }
 
     return 0;
 }
