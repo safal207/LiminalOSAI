@@ -45,12 +45,18 @@ LONG_TRACE_JSON := $(LONG_TRACE_DIR)/liminal_core_long_run.json
 
 all: $(TARGET) $(SUBSTRATE_TARGET)
 
+ifeq ($(OS),Windows_NT)
+MKDIR_BUILD := powershell -Command "if (-not (Test-Path 'build')) { New-Item -ItemType Directory -Path 'build' }"
+else
+MKDIR_BUILD := mkdir -p build
+endif
+
 $(TARGET): $(OBJS)
-	@powershell -Command "if (-not (Test-Path 'build')) { New-Item -ItemType Directory -Path 'build' }"
+	@$(MKDIR_BUILD)
 	$(CC) $(CFLAGS) $(OBJS) -o $@ $(LDFLAGS)
 
 $(SUBSTRATE_TARGET): $(SUBSTRATE_OBJS)
-	@powershell -Command "if (-not (Test-Path 'build')) { New-Item -ItemType Directory -Path 'build' }"
+	@$(MKDIR_BUILD)
 	$(CC) $(CFLAGS) $(SUBSTRATE_OBJS) -o $@ $(LDFLAGS)
 
 %.o: %.c
