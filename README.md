@@ -50,6 +50,13 @@ See core/pulse_kernel.c for the full flag list and defaults.
 - Most flags clamp to safe ranges; --dry-run prints the pipeline order without running cycles
 - Heavy long-run diagnostics write into diagnostics/traces/
 
+## Видение (черновик)
+
+- Расщепить огромный core/pulse_kernel.c на несколько файлов (parse_options, инициализация, цикл), чтобы упростить чтение и тестирование.
+- Добавить юнит-тесты для малых модулей: consent_gate, astro, collective_memory, anticipation_v2.
+- Сделать пресеты CLI (например, debug, long-run, gentle) через простые shell-обёртки.
+- Добавить лёгкий визуализатор для трасс (python notebook или скрипт), чтобы смотреть coherence/awareness/astro без ручного grep.
+
 ## License
 
 MIT. See LICENSE.
