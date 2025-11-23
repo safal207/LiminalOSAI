@@ -221,14 +221,22 @@ static void cm_ensure_parent_dirs(const char *path)
         if (buffer[idx] == '/') {
             tmp[idx + 1] = '\0';
             if (tmp[0] != '\0') {
+#ifdef _WIN32
+                mkdir(tmp);
+#else
                 mkdir(tmp, 0777);
+#endif
             }
         }
         ++idx;
     }
     tmp[idx] = '\0';
     if (tmp[0] != '\0') {
+#ifdef _WIN32
+        mkdir(tmp);
+#else
         mkdir(tmp, 0777);
+#endif
     }
 }
 

@@ -15,6 +15,9 @@
 #include <sys/types.h>
 #include <errno.h>
 #include <sys/time.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "soil.h"
 #include "resonant.h"
@@ -840,11 +843,19 @@ static float collective_effective_coherence(const RGraph *graph)
 
 static FILE *collective_log_open(void)
 {
+#ifdef _WIN32
+    if (mkdir("logs") != 0) {
+        if (errno != EEXIST) {
+            return NULL;
+        }
+    }
+#else
     if (mkdir("logs", 0777) != 0) {
         if (errno != EEXIST) {
             return NULL;
         }
     }
+#endif
     return fopen("logs/collective_trace.log", "a");
 }
 
@@ -2076,7 +2087,15 @@ static void pulse_delay(void)
     }
 
     struct timespec req = { .tv_sec = seconds, .tv_nsec = nanoseconds };
+#ifdef _WIN32
+    DWORD delay_ms = (DWORD)(tuned_delay * 1000.0);
+    if (delay_ms == 0 && tuned_delay > 0.0) {
+        delay_ms = 1;
+    }
+    Sleep(delay_ms);
+#else
     nanosleep(&req, NULL);
+#endif
 }
 
 static void inhale(void)

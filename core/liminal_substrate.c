@@ -2813,7 +2813,11 @@ static int lip_listen_local(uint16_t port)
     struct sockaddr_in6 addr6;
     memset(&addr6, 0, sizeof(addr6));
     addr6.sin6_family = AF_INET6;
+#ifdef _WIN32
+    memset(&addr6.sin6_addr, 0, sizeof(addr6.sin6_addr));
+#else
     addr6.sin6_addr = in6addr_any;
+#endif
     addr6.sin6_port = htons(port);
     if (bind(sock_fd, (struct sockaddr *)&addr6, sizeof(addr6)) != 0) {
         close_socket(sock_fd);
@@ -2842,7 +2846,11 @@ static int lip_listen_local(uint16_t port)
 static int lip_accept_peer(int listen_fd)
 {
     struct sockaddr_storage addr;
+#ifdef _WIN32
+    int addr_len = sizeof(addr);
+#else
     socklen_t addr_len = sizeof(addr);
+#endif
     int client_fd = (int)accept(listen_fd, (struct sockaddr *)&addr, &addr_len);
     return client_fd;
 }

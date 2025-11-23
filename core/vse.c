@@ -86,11 +86,19 @@ ensure_logs_directory(void)
             return;
         }
     }
+#ifdef _WIN32
+    if (mkdir("logs") != 0) {
+        if (errno != EEXIST) {
+            return;
+        }
+    }
+#else
     if (mkdir("logs", 0755) != 0) {
         if (errno != EEXIST) {
             return;
         }
     }
+#endif
 }
 
 static void

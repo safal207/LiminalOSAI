@@ -29,7 +29,11 @@ static float last_stability = -1.0f;
 static uint64_t reflection_timestamp_now(void)
 {
     struct timespec ts;
-#if defined(CLOCK_REALTIME)
+#ifdef _WIN32
+    time_t now = time(NULL);
+    ts.tv_sec = now;
+    ts.tv_nsec = 0;
+#elif defined(CLOCK_REALTIME)
     clock_gettime(CLOCK_REALTIME, &ts);
 #else
     ts.tv_sec = time(NULL);

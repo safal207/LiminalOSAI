@@ -57,7 +57,11 @@ static float clamp_unit(float value)
 static uint64_t current_timestamp(void)
 {
     struct timespec ts;
-#if defined(CLOCK_REALTIME)
+#ifdef _WIN32
+    time_t now = time(NULL);
+    ts.tv_sec = now;
+    ts.tv_nsec = 0;
+#elif defined(CLOCK_REALTIME)
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
         ts.tv_sec = time(NULL);
         ts.tv_nsec = 0;

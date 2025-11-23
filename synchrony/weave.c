@@ -9,6 +9,9 @@
 #include <strings.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #define WEAVE_MAX_PHASES 16
 #define WEAVE_MIN_PHASES 4
@@ -311,7 +314,13 @@ void weave_measure_sync(void)
 void weave_next_phase(void)
 {
     struct timespec now;
+#ifdef _WIN32
+    time_t now_time = time(NULL);
+    now.tv_sec = now_time;
+    now.tv_nsec = 0;
+#else
     clock_gettime(CLOCK_MONOTONIC, &now);
+#endif
     update_metrics(&now);
     weave_measure_sync();
 
@@ -345,8 +354,12 @@ void weave_next_phase(void)
         sec += nsec / 1000000000L;
         nsec %= 1000000000L;
     }
+#ifdef _WIN32
+    Sleep((DWORD)(delay_ms));
+#else
     struct timespec req = { .tv_sec = sec, .tv_nsec = nsec };
     nanosleep(&req, NULL);
+#endif
 }
 
 bool weave_should_emit_echo(void)

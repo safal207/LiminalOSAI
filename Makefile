@@ -2,6 +2,9 @@ CC      := gcc
 INCLUDES += -Iinclude
 CFLAGS  := -std=c11 -Wall -Wextra -pedantic -Os $(INCLUDES)
 LDFLAGS := -lm
+ifeq ($(OS),Windows_NT)
+LDFLAGS += -lws2_32
+endif
 TARGET  := build/pulse_kernel
 SUBSTRATE_TARGET := build/liminal_core
 
@@ -43,18 +46,24 @@ LONG_TRACE_JSON := $(LONG_TRACE_DIR)/liminal_core_long_run.json
 all: $(TARGET) $(SUBSTRATE_TARGET)
 
 $(TARGET): $(OBJS)
-	@mkdir -p $(dir $@)
+	@powershell -Command "if (-not (Test-Path 'build')) { New-Item -ItemType Directory -Path 'build' }"
 	$(CC) $(CFLAGS) $(OBJS) -o $@ $(LDFLAGS)
 
 $(SUBSTRATE_TARGET): $(SUBSTRATE_OBJS)
-	@mkdir -p $(dir $@)
+	@powershell -Command "if (-not (Test-Path 'build')) { New-Item -ItemType Directory -Path 'build' }"
 	$(CC) $(CFLAGS) $(SUBSTRATE_OBJS) -o $@ $(LDFLAGS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
+ifeq ($(OS),Windows_NT)
+	@if exist $(TARGET) del /Q $(TARGET) 2>nul
+	@if exist $(SUBSTRATE_TARGET) del /Q $(SUBSTRATE_TARGET) 2>nul
+	@for %%f in ($(ALL_OBJS)) do @if exist %%f del /Q %%f 2>nul
+else
 	rm -f $(ALL_OBJS) $(TARGET) $(SUBSTRATE_TARGET)
+endif
 
 .PHONY: all clean rebirth report report-metabolic long-run-diagnostics
 
