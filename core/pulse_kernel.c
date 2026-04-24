@@ -3186,6 +3186,64 @@ static void print_recent_traces(void)
     }
 }
 
+static void run_kernel_pulse_loop(const kernel_options *opts)
+{
+    uint64_t pulses = 0;
+    while (!opts->limit || pulses < opts->limit) {
+        inhale();
+        reflect(opts);
+        exhale(opts);
+        pulse_delay();
+        if (opts->enable_health_scan) {
+            const CoherenceField *field = coherence_state();
+            AwarenessState awareness_snapshot = awareness_state();
+            double delay_seconds = coherence_last_delay();
+            float coherence_value = 0.0f;
+            if (field) {
+                coherence_value = field->coherence;
+            }
+            if (opts->empathic_enabled) {
+                coherence_value = empathic_coherence_value(coherence_value);
+            }
+            health_scan_step(pulses + 1,
+                             coherence_value,
+                             (float)delay_seconds,
+                             awareness_snapshot.drift);
+        }
+        ++pulses;
+    }
+}
+
+static void finalize_kernel_runtime(const kernel_options *opts)
+{
+    if (opts->show_trace) {
+        print_recent_traces();
+    }
+
+    if (opts->show_reflections) {
+        reflect_dump(10);
+    }
+
+    emotion_memory_finalize();
+    metabolic_shutdown();
+
+    introspect_finalize(&g_introspect_state);
+    vse_finalize();
+
+    if (collective_memory_match_trace) {
+        cm_trace_free(collective_memory_match_trace);
+        collective_memory_match_trace = NULL;
+    }
+
+    astro_trace_close();
+
+    if (g_qel_state) {
+        qel_free(g_qel_state);
+        g_qel_state = NULL;
+        g_qel_enabled = false;
+    }
+}
+
 int main(int argc, char **argv)
 {
     kernel_options opts = parse_options(argc, argv);
@@ -3443,57 +3501,8 @@ int main(int argc, char **argv)
         ant2_init(&ant2_state, opts.ant2_gain);
         ant2_set_trace(opts.ant2_trace);
     }
-    uint64_t pulses = 0;
-    while (!opts.limit || pulses < opts.limit) {
-        inhale();
-        reflect(&opts);
-        exhale(&opts);
-        pulse_delay();
-        if (opts.enable_health_scan) {
-            const CoherenceField *field = coherence_state();
-            AwarenessState awareness_snapshot = awareness_state();
-            double delay_seconds = coherence_last_delay();
-            float coherence_value = 0.0f;
-        if (field) {
-            coherence_value = field->coherence;
-        }
-        if (opts.empathic_enabled) {
-            coherence_value = empathic_coherence_value(coherence_value);
-        }
-        health_scan_step(pulses + 1,
-                         coherence_value,
-                         (float)delay_seconds,
-                         awareness_snapshot.drift);
-        }
-        ++pulses;
-    }
-
-    if (opts.show_trace) {
-        print_recent_traces();
-    }
-
-    if (opts.show_reflections) {
-        reflect_dump(10);
-    }
-
-    emotion_memory_finalize();
-    metabolic_shutdown();
-
-    introspect_finalize(&g_introspect_state);
-    vse_finalize();
-
-    if (collective_memory_match_trace) {
-        cm_trace_free(collective_memory_match_trace);
-        collective_memory_match_trace = NULL;
-    }
-
-    astro_trace_close();
-
-    if (g_qel_state) {
-        qel_free(g_qel_state);
-        g_qel_state = NULL;
-        g_qel_enabled = false;
-    }
+    run_kernel_pulse_loop(&opts);
+    finalize_kernel_runtime(&opts);
 
     return 0;
 }
