@@ -511,6 +511,7 @@ EmpathicResponse empathic_step(float base_target, float alignment_hint, float re
     empathic_state.coherence_bias = clamp_range(harmony_delta, -0.15f, 0.15f);
 
     update_prediction_trend(dt);
+    recognition_update();
 
     response.field = empathic_state.field;
     response.resonance = empathic_state.resonance;

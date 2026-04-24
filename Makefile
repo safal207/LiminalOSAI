@@ -71,7 +71,22 @@ else
 	rm -f $(ALL_OBJS) $(TARGET) $(SUBSTRATE_TARGET)
 endif
 
-.PHONY: all clean rebirth report report-metabolic long-run-diagnostics
+.PHONY: all clean check test rebirth report report-metabolic long-run-diagnostics
+
+check: $(TARGET) $(SUBSTRATE_TARGET)
+	@echo "🧪 Running smoke checks..."
+	@$(TARGET) --dry-run --limit=2
+	@$(SUBSTRATE_TARGET) --substrate --limit=2 --trace >/dev/null
+
+test:
+	@mkdir -p build/tests
+	$(CC) $(CFLAGS) tests/test_consent_gate.c core/consent_gate.c -o build/tests/test_consent_gate $(LDFLAGS)
+	$(CC) $(CFLAGS) tests/test_collective_memory.c collective/memory.c -o build/tests/test_collective_memory $(LDFLAGS)
+	$(CC) $(CFLAGS) tests/test_anticipation_v2.c anticipation/v2.c -o build/tests/test_anticipation_v2 $(LDFLAGS)
+	@echo "🧪 Running unit tests..."
+	@build/tests/test_consent_gate
+	@build/tests/test_collective_memory
+	@build/tests/test_anticipation_v2
 
 # --- Phoenix self-report integration ---
 

@@ -8,6 +8,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "string_utils.h"
+
 #ifndef EMOTION_MEMORY_PATH_MAX
 #define EMOTION_MEMORY_PATH_MAX 256
 #endif
@@ -416,7 +418,7 @@ void emotion_memory_configure(bool enable,
         strncpy(g_memory.storage_path, path, sizeof(g_memory.storage_path) - 1U);
         g_memory.storage_path[sizeof(g_memory.storage_path) - 1U] = '\0';
     } else {
-        strcpy(g_memory.storage_path, "emotion_soil.jsonl");
+        liminal_strlcpy(g_memory.storage_path, sizeof(g_memory.storage_path), "emotion_soil.jsonl");
     }
 
     if (!enable) {

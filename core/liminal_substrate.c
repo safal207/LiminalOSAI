@@ -3585,6 +3585,37 @@ static void substrate_loop(liminal_state *state, const substrate_config *cfg)
     }
 }
 
+static void finalize_substrate_runtime(const substrate_config *cfg, const liminal_state *state)
+{
+    if (cfg->human_bridge && state->human_affinity_active) {
+        printf("[bridge] human affinity synchronized. breath=%.3f phase=%.2f\n",
+               state->breath_rate,
+               fmodf(state->breath_position + state->phase_offset, 1.0f));
+    }
+    if (cfg->trace) {
+        printf("[shutdown] cycles=%u resonance=%.3f memory=%.3f vitality=%.3f\n",
+               state->cycles,
+               state->resonance,
+               state->memory_trace,
+               state->vitality);
+    }
+
+    introspect_finalize(&substrate_introspect_state);
+    emotion_memory_finalize();
+
+    substrate_astro_trace_close();
+    substrate_dream_replay_trace_close();
+
+    flow_equilibrium_finalize(&substrate_flow_equilibrium);
+    vse_finalize();
+
+    if (substrate_qel_state) {
+        qel_free(substrate_qel_state);
+        substrate_qel_state = NULL;
+        substrate_qel_enabled = false;
+    }
+}
+
 int main(int argc, char **argv)
 {
     substrate_config cfg = parse_args(argc, argv);
@@ -3596,7 +3627,6 @@ int main(int argc, char **argv)
     }
 
     introspect_state_init(&substrate_introspect_state);
-    bool introspect_harmony = cfg.harmony_enabled || cfg.dream_enabled;
     introspect_enable(&substrate_introspect_state, cfg.introspect_enabled);
     introspect_enable_harmony(
         &substrate_introspect_state,
@@ -3854,35 +3884,7 @@ int main(int argc, char **argv)
 
     substrate_loop(&state, &cfg);
 
-    if (cfg.human_bridge && state.human_affinity_active) {
-        printf("[bridge] human affinity synchronized. breath=%.3f phase=%.2f\n",
-               state.breath_rate,
-               fmodf(state.breath_position + state.phase_offset, 1.0f));
-    }
-    if (cfg.trace) {
-        printf("[shutdown] cycles=%u resonance=%.3f memory=%.3f vitality=%.3f\n",
-               state.cycles,
-               state.resonance,
-               state.memory_trace,
-               state.vitality);
-    }
-
-    introspect_finalize(&substrate_introspect_state);
-
-    emotion_memory_finalize();
-
-    substrate_astro_trace_close();
-    substrate_dream_replay_trace_close();
-
-    flow_equilibrium_finalize(&substrate_flow_equilibrium);
-
-    vse_finalize();
-
-    if (substrate_qel_state) {
-        qel_free(substrate_qel_state);
-        substrate_qel_state = NULL;
-        substrate_qel_enabled = false;
-    }
+    finalize_substrate_runtime(&cfg, &state);
 
     return 0;
 }
