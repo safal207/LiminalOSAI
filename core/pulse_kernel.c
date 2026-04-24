@@ -47,6 +47,7 @@
 #include "consent_gate.h"
 #include "vse.h"
 #include "qel.h"
+#include "string_utils.h"
 
 #define ENERGY_INHALE   3U
 #define ENERGY_REFLECT  5U
@@ -2273,24 +2274,24 @@ awareness_coherence_feedback(const kernel_options *opts,
 
     char note[64];
     if (active_count == 0) {
-        strcpy(note, "listening for symbols");
+        liminal_strlcpy(note, sizeof(note), "listening for symbols");
     } else if (human_bridge_active && human_alignment >= 0.85f) {
-        strcpy(note, "mirroring human rhythm");
+        liminal_strlcpy(note, sizeof(note), "mirroring human rhythm");
     } else if (human_bridge_active && human_alignment >= 0.70f) {
-        strcpy(note, "echoing human pulse");
+        liminal_strlcpy(note, sizeof(note), "echoing human pulse");
     } else if (stability >= 0.85f) {
-        strcpy(note, "breathing in sync");
+        liminal_strlcpy(note, sizeof(note), "breathing in sync");
     } else if (stability >= 0.60f) {
-        strcpy(note, "rhythm steadying");
+        liminal_strlcpy(note, sizeof(note), "rhythm steadying");
     } else {
-        strcpy(note, "seeking balance");
+        liminal_strlcpy(note, sizeof(note), "seeking balance");
     }
 
     if (empathic_layer_active) {
         if (empathic_anxiety_prediction()) {
-            strcpy(note, "anticipating turbulence");
+            liminal_strlcpy(note, sizeof(note), "anticipating turbulence");
         } else if (empathic_calm_prediction()) {
-            strcpy(note, "anticipating calm expansion");
+            liminal_strlcpy(note, sizeof(note), "anticipating calm expansion");
         }
     }
 

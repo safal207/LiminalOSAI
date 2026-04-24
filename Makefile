@@ -71,7 +71,12 @@ else
 	rm -f $(ALL_OBJS) $(TARGET) $(SUBSTRATE_TARGET)
 endif
 
-.PHONY: all clean rebirth report report-metabolic long-run-diagnostics
+.PHONY: all clean check rebirth report report-metabolic long-run-diagnostics
+
+check: $(TARGET) $(SUBSTRATE_TARGET)
+	@echo "🧪 Running smoke checks..."
+	@$(TARGET) --dry-run --limit=2
+	@$(SUBSTRATE_TARGET) --substrate --limit=2 --trace >/dev/null
 
 # --- Phoenix self-report integration ---
 
