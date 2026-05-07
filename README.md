@@ -5,6 +5,11 @@ Experimental C11 sandbox combining many small cognitive-leaning subsystems (awar
 - build/pulse_kernel: main orchestrator
 - build/liminal_core: substrate runner for long diagnostics
 
+## Reviewer note
+
+- [Experimental Scope](docs/EXPERIMENTAL_SCOPE.md) — clarifies that LiminalOSAI is an experimental cognitive-runtime sandbox, not a production OS, AGI claim, safety enforcement layer, or mature agent runtime.
+- Validation: `make`, `make check`, `make test`
+
 ## Build
 
 - Dependencies: gcc, make, python3
