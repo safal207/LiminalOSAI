@@ -1,0 +1,85 @@
+name: LiminalOSAI Evidence Advisor
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/evidence-advisor-ci.yml
+      - Makefile
+      - tools/liminal_evidence_advisor.py
+      - tests/test_liminal_evidence_advisor.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: liminalos-evidence-advisor-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build, check, and test exact head
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          git rev-parse HEAD | tee reports/head-sha.txt
+          make 2>&1 | tee reports/build.log
+          make check 2>&1 | tee reports/check.log
+          make test 2>&1 | tee reports/test.log
+
+      - name: Run bounded advisor fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > reports/input.json <<'JSON'
+          {
+            "dns_baseline_addresses": ["192.0.2.1"],
+            "dns_garden_addresses": ["192.0.2.1"],
+            "garden_events": ["RUN_CREATED", "SEED_LOADED", "NS_CREATED", "MOUNT_DONE", "CAPS_DROPPED", "SECCOMP_ENABLED", "PROCESS_START", "PROCESS_EXIT"],
+            "probe_present": true,
+            "safe_readonly_probe": true,
+            "live_garden_probe_confirmed": true,
+            "probe_summary": {"confirmed_defect": false}
+          }
+          JSON
+          ./build/pulse_kernel --dry-run --limit=2 --trace --coherence --reflect --introspect > reports/runtime.log
+          python3 tools/liminal_evidence_advisor.py \
+            --evidence reports/input.json \
+            --runtime-log reports/runtime.log \
+            --output-dir reports/advisory \
+            | tee reports/advisor.stdout.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          packet=json.loads(Path('reports/advisory/liminalos-advice.json').read_text())
+          assert packet['classification']=='NO_DEFECT_OBSERVED'
+          assert packet['evidence_ingested'] is True
+          assert packet['liminal_runtime']['pipeline_complete'] is True
+          assert packet['authority']['product_verdict_override'] is False
+          assert packet['authority']['execution'] is False
+          assert packet['authority']['external_submission'] is False
+          assert packet['authority']['merge'] is False
+          PY
+
+      - name: Hash and upload evidence
+        if: always()
+        shell: bash
+        run: |
+          find reports -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > reports/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: liminalos-evidence-advisor-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14
