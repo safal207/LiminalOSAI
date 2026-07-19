@@ -87,9 +87,9 @@ test:
 	@build/tests/test_consent_gate
 	@build/tests/test_collective_memory
 	@build/tests/test_anticipation_v2
+	@python3 -m unittest tests/test_liminal_evidence_advisor.py -v
 
 # --- Phoenix self-report integration ---
-
 rebirth: $(TARGET)
 	@echo "🌀 Initiating Phoenix Rebirth..."
 	@$(TARGET) --limit=30 --trace --reflect --awareness --rebirth || true
@@ -107,4 +107,3 @@ long-run-diagnostics: $(SUBSTRATE_TARGET)
 	@bash -o pipefail -c '$(SUBSTRATE_TARGET) --substrate --limit=60 --trace --symbols --reflect --awareness --anticipation --dreamsync --sync 2>&1 | tee $(LONG_TRACE_LOG)'
 	@python3 diagnostics/liminal_trace_report.py --input $(LONG_TRACE_LOG) --output $(LONG_TRACE_SUMMARY) --json $(LONG_TRACE_JSON)
 	@echo "📄 Saved summary → $(LONG_TRACE_SUMMARY)"
-
