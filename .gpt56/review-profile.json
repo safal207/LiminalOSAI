@@ -1,0 +1,26 @@
+{
+  "schema_version": "gpt56-review-profile-v1",
+  "repository": "safal207/LiminalOSAI",
+  "profile_id": "agent-coordination",
+  "required_roles": [
+    "causal_architect",
+    "temporal_provenance",
+    "adversarial_semantics",
+    "authority_safety",
+    "ci_reliability"
+  ],
+  "required_claim_kinds": ["fact", "observation", "hypothesis"],
+  "focus": [
+    "Verify that agent plans, observations, judgments, authorizations, executions, and confirmations remain distinct states.",
+    "Bind every delegated task and returned artifact to the exact request, actor, repository state, and validity window.",
+    "Attack hidden authority escalation, circular delegation, silent provider substitution, stale context, and false completion claims.",
+    "Require explicit stop conditions, human escalation paths, dissent, and recovery when evidence or authority is unresolved.",
+    "Keep CI and model outputs advisory unless a separately verified human authorization and execution contract exists."
+  ],
+  "authority": {
+    "can_execute": false,
+    "can_approve": false,
+    "can_merge": false,
+    "can_deploy": false
+  }
+}
