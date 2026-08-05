@@ -25,10 +25,18 @@ _NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 
 
 class TracePoint:
-    def __init__(self, cycle: int, **metrics: Optional[float]) -> None:
+    def __init__(self, cycle: int, source: str, **metrics: Optional[float]) -> None:
         self.cycle = cycle
+        self.source = source
         for name in METRIC_NAMES:
             setattr(self, name, metrics.get(name))
+
+    def merge_missing(self, other: "TracePoint") -> None:
+        for name in METRIC_NAMES:
+            if getattr(self, name) is None:
+                value = getattr(other, name)
+                if value is not None:
+                    setattr(self, name, value)
 
     def as_dict(self) -> dict[str, object]:
         result: dict[str, object] = {"cycle": self.cycle}
@@ -80,7 +88,7 @@ def parse_trace_line(line: str) -> Optional[TracePoint]:
         if metrics["vitality"] is None:
             metrics["vitality"] = _finite_number(payload.get("dream_sync"))
         if any(value is not None for value in metrics.values()):
-            return TracePoint(cycle_value, **metrics)
+            return TracePoint(cycle_value, "json", **metrics)
 
     cycle_match = re.search(r"\bcycle\b\s*[:=]?\s*(\d+)", line, re.IGNORECASE)
     if not cycle_match:
@@ -98,16 +106,33 @@ def parse_trace_line(line: str) -> Optional[TracePoint]:
     }
     if not any(value is not None for value in metrics.values()):
         return None
-    return TracePoint(int(cycle_match.group(1)), **metrics)
+    return TracePoint(int(cycle_match.group(1)), "legacy", **metrics)
 
 
 def parse_trace_lines(lines: Iterable[str]) -> list[TracePoint]:
-    points: list[TracePoint] = []
+    by_cycle: dict[int, TracePoint] = {}
+    cycle_order: list[int] = []
+
     for line in lines:
         point = parse_trace_line(line.strip())
-        if point is not None:
-            points.append(point)
-    return points
+        if point is None:
+            continue
+
+        existing = by_cycle.get(point.cycle)
+        if existing is None:
+            by_cycle[point.cycle] = point
+            cycle_order.append(point.cycle)
+            continue
+
+        if existing.source == "json" and point.source != "json":
+            continue
+        if point.source == "json" and existing.source != "json":
+            by_cycle[point.cycle] = point
+            continue
+
+        existing.merge_missing(point)
+
+    return [by_cycle[cycle] for cycle in cycle_order]
 
 
 def parse_trace_file(path: Path) -> list[TracePoint]:
