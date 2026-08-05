@@ -42,11 +42,20 @@ class PulseKernelCliCharacterizationTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         return [line.rstrip() for line in result.stdout.splitlines() if line.strip()]
 
+    def line_with_prefix(self, lines: list[str], prefix: str) -> str:
+        matches = [line for line in lines if line.startswith(prefix)]
+        self.assertEqual(matches, matches[:1], f"duplicate {prefix!r} lines: {matches}")
+        self.assertEqual(len(matches), 1, f"missing {prefix!r} line in {lines}")
+        return matches[0]
+
     def test_default_dry_run_contract(self) -> None:
         lines = self.assert_success(self.run_kernel())
         self.assertEqual(
             lines,
             [
+                "trs config: enabled=no alpha=0.300 warmup=5",
+                "trs adapt: enabled=no alpha-range=[0.100, 0.600] "
+                "target-delta=0.0150 kp=0.400 ki=0.050 kd=0.100",
                 "liminal_core dry run",
                 f"pipeline: awareness{ARROW}gate",
                 "mirror clamps: amp=[0.50, 1.20] tempo=[0.80, 1.20]",
@@ -58,20 +67,21 @@ class PulseKernelCliCharacterizationTests(unittest.TestCase):
             self.run_kernel("--mirror", "--introspect", "--dream")
         )
         self.assertEqual(
-            lines[1],
+            self.line_with_prefix(lines, "pipeline: "),
             f"pipeline: awareness{ARROW}mirror{ARROW}introspect"
             f"{ARROW}harmony{ARROW}gate{ARROW}dream",
         )
 
     def test_strict_order_currently_enables_every_non_dream_stage(self) -> None:
         lines = self.assert_success(self.run_kernel("--strict-order"))
+        pipeline = self.line_with_prefix(lines, "pipeline: ")
         self.assertEqual(
-            lines[1],
+            pipeline,
             f"pipeline: ant2{ARROW}awareness{ARROW}collective{ARROW}affinity"
             f"{ARROW}mirror{ARROW}introspect{ARROW}harmony{ARROW}astro"
             f"{ARROW}kiss{ARROW}gate{ARROW}vse",
         )
-        self.assertNotIn(f"{ARROW}dream", lines[1])
+        self.assertNotIn(f"{ARROW}dream", pipeline)
 
     def test_explicit_mirror_bounds_are_reported(self) -> None:
         lines = self.assert_success(
@@ -83,7 +93,7 @@ class PulseKernelCliCharacterizationTests(unittest.TestCase):
             )
         )
         self.assertEqual(
-            lines[2],
+            self.line_with_prefix(lines, "mirror clamps: "),
             "mirror clamps: amp=[0.60, 1.10] tempo=[0.90, 1.05]",
         )
 
@@ -97,7 +107,7 @@ class PulseKernelCliCharacterizationTests(unittest.TestCase):
             )
         )
         self.assertEqual(
-            lines[2],
+            self.line_with_prefix(lines, "mirror clamps: "),
             "mirror clamps: amp=[0.70, 1.40] tempo=[0.85, 1.30]",
         )
 
@@ -111,7 +121,7 @@ class PulseKernelCliCharacterizationTests(unittest.TestCase):
             )
         )
         self.assertEqual(
-            lines[2],
+            self.line_with_prefix(lines, "mirror clamps: "),
             "mirror clamps: amp=[0.50, 1.20] tempo=[0.80, 1.20]",
         )
 
@@ -124,8 +134,9 @@ class PulseKernelCliCharacterizationTests(unittest.TestCase):
         lines = self.assert_success(
             self.run_kernel("--mirror", "--mirror", "--dream", "--dream")
         )
-        self.assertEqual(lines[1].count("mirror"), 1)
-        self.assertEqual(lines[1].count("dream"), 1)
+        pipeline = self.line_with_prefix(lines, "pipeline: ")
+        self.assertEqual(pipeline.count("mirror"), 1)
+        self.assertEqual(pipeline.count("dream"), 1)
 
 
 if __name__ == "__main__":
