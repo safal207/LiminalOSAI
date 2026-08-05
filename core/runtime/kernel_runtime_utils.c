@@ -37,6 +37,27 @@ bool kernel_parse_finite_float(const char *text, float *value_out)
     return true;
 }
 
+bool kernel_parse_i64(const char *text, int64_t *value_out)
+{
+    if (!text || !*text || !value_out) {
+        return false;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    long long parsed = strtoll(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != '\0') {
+        return false;
+    }
+
+    if (parsed < INT64_MIN || parsed > INT64_MAX) {
+        return false;
+    }
+
+    *value_out = (int64_t)parsed;
+    return true;
+}
+
 bool kernel_parse_u64(const char *text, uint64_t *value_out)
 {
     if (!text || !*text || !value_out || *text == '-') {
