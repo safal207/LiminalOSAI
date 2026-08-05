@@ -1,3 +1,4 @@
+#include "kernel_context.h"
 #include "kernel_runtime_utils.h"
 
 #include <stddef.h>
@@ -138,17 +139,29 @@ static bool kernel_validate_numeric_argument(const char *argument)
 
 int main(int argc, char **argv)
 {
-    if (argc < 0 || (argc > 0 && !argv)) {
+    kernel_context context;
+    if (!kernel_context_init(&context, argc, argv)) {
         fputs("pulse_kernel: invalid process arguments\n", stderr);
-        return 2;
+        return kernel_context_exit_code(&context);
     }
 
-    for (int index = 1; index < argc; ++index) {
-        if (!kernel_reject_known_silent_noop(argv[index]) ||
-            !kernel_validate_numeric_argument(argv[index])) {
-            return 2;
+    const char *argument = NULL;
+    while (kernel_context_next_argument(&context, &argument)) {
+        if (!kernel_reject_known_silent_noop(argument) ||
+            !kernel_validate_numeric_argument(argument)) {
+            kernel_context_reject(&context, 2);
+            return kernel_context_exit_code(&context);
+        }
+
+        if (!kernel_context_accept_argument(&context)) {
+            kernel_context_reject(&context, 2);
+            return kernel_context_exit_code(&context);
         }
     }
 
-    return pulse_kernel_core_main(argc, argv);
+    if (!kernel_context_is_ready(&context)) {
+        return kernel_context_exit_code(&context);
+    }
+
+    return kernel_context_run(&context, pulse_kernel_core_main);
 }
