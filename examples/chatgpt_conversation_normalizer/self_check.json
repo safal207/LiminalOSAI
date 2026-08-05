@@ -1,0 +1,62 @@
+{
+  "schema_version": "chatgpt-conversation-bundle-v0.2",
+  "request": {
+    "id": "conversation-normalizer-self-check-001",
+    "text": "Explain whether the repository contains the ChatGPT Liminal Adapter and record the authorized merge that introduced it",
+    "high_stakes": false,
+    "requires_current_information": true
+  },
+  "draft": {
+    "response": "The repository contains the deterministic ChatGPT Liminal Adapter v0.1, introduced through an authorized pull-request merge with an explicit recovery path.",
+    "no_signal": false,
+    "intent_alignment": 0.99,
+    "claims": [
+      {
+        "id": "claim-adapter-present",
+        "text": "The repository contains the deterministic ChatGPT Liminal Adapter v0.1.",
+        "kind": "fact",
+        "confidence": 0.99,
+        "requires_current_information": true,
+        "evidence_handles": [
+          "adapter-source"
+        ]
+      },
+      {
+        "id": "claim-merge-recorded",
+        "text": "The adapter was introduced through pull request 96.",
+        "kind": "fact",
+        "confidence": 0.99,
+        "requires_current_information": true,
+        "evidence_handles": [
+          "merge-pr-96"
+        ]
+      }
+    ],
+    "proposed_actions": [],
+    "contradictions": []
+  },
+  "sources": [
+    {
+      "handle": "adapter-source",
+      "verified": true,
+      "freshness": "current",
+      "source_kind": "repository",
+      "locator": "tools/chatgpt_liminal_adapter.py@main"
+    }
+  ],
+  "tool_events": [
+    {
+      "id": "merge-pr-96",
+      "tool": "GitHub",
+      "operation": "merge pull request 96",
+      "status": "success",
+      "effect": "write",
+      "evidence_eligible": true,
+      "freshness": "current",
+      "locator": "https://github.com/safal207/LiminalOSAI/pull/96#merged",
+      "reversible": false,
+      "user_authorized": true,
+      "recovery_plan": "Revert merge commit 098a814dc9ac42e5902dad5140e02329076a0d53"
+    }
+  ]
+}
