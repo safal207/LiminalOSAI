@@ -71,7 +71,7 @@ else
 	rm -f $(ALL_OBJS) $(TARGET) $(SUBSTRATE_TARGET)
 endif
 
-.PHONY: all clean check test rebirth report report-metabolic long-run-diagnostics
+.PHONY: all clean check test test-repo verify-core rebirth report report-metabolic long-run-diagnostics
 
 check: $(TARGET) $(SUBSTRATE_TARGET)
 	@echo "🧪 Running smoke checks..."
@@ -90,6 +90,12 @@ test:
 	@build/tests/test_anticipation_v2
 	@build/tests/test_kernel_runtime
 	@python3 -m unittest tests/test_liminal_evidence_advisor.py tests/test_trace_visualizer.py -v
+
+test-repo:
+	@python3 -m unittest tests/test_repo_hygiene.py -v
+
+verify-core:
+	@bash scripts/verify_core.sh
 
 # --- Phoenix self-report integration ---
 rebirth: $(TARGET)
