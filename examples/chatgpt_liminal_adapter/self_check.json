@@ -1,0 +1,65 @@
+{
+  "schema_version": "chatgpt-liminal-input-v0.1",
+  "request": {
+    "id": "self-check-001",
+    "intent": "Explain how LiminalOSAI can strengthen an AI assistant without overstating the project's capabilities",
+    "high_stakes": false,
+    "requires_current_information": true
+  },
+  "draft": {
+    "response": "LiminalOSAI can act as an external deterministic evidence and action gate, but it cannot modify model weights or become a production safety boundary by itself.",
+    "no_signal": false,
+    "intent_alignment": 0.98,
+    "claims": [
+      {
+        "id": "claim-adapter",
+        "text": "The repository contains a deterministic advisory adapter with explicit no-authority boundaries.",
+        "kind": "fact",
+        "confidence": 0.99,
+        "requires_current_information": true,
+        "evidence_refs": [
+          "repo-adapter"
+        ]
+      },
+      {
+        "id": "claim-limits",
+        "text": "The project does not claim to be a production OS, AGI, or production safety enforcement layer.",
+        "kind": "fact",
+        "confidence": 0.99,
+        "requires_current_information": true,
+        "evidence_refs": [
+          "repo-scope"
+        ]
+      },
+      {
+        "id": "claim-inference",
+        "text": "A deterministic external gate can improve longitudinal reliability without changing the underlying model weights.",
+        "kind": "reasoning",
+        "confidence": 0.85,
+        "requires_current_information": false,
+        "evidence_refs": [
+          "repo-adapter",
+          "repo-scope"
+        ]
+      }
+    ],
+    "actions": [],
+    "contradictions": []
+  },
+  "evidence": [
+    {
+      "id": "repo-adapter",
+      "verified": true,
+      "freshness": "current",
+      "source_kind": "repository",
+      "locator": "tools/chatgpt_liminal_adapter.py@HEAD"
+    },
+    {
+      "id": "repo-scope",
+      "verified": true,
+      "freshness": "current",
+      "source_kind": "repository",
+      "locator": "docs/EXPERIMENTAL_SCOPE.md@HEAD"
+    }
+  ]
+}
