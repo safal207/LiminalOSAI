@@ -1,5 +1,6 @@
 #include "kernel_context.h"
 #include "kernel_runtime_utils.h"
+#include "kernel_sequence_cli.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -160,6 +161,13 @@ int main(int argc, char **argv)
     }
 
     if (!kernel_context_is_ready(&context)) {
+        return kernel_context_exit_code(&context);
+    }
+
+    kernel_sequence_options sequence_options;
+    if (!kernel_sequence_options_from_argv(argc, argv, &sequence_options) ||
+        !kernel_context_plan_sequence(&context, &sequence_options)) {
+        kernel_context_reject(&context, 2);
         return kernel_context_exit_code(&context);
     }
 
