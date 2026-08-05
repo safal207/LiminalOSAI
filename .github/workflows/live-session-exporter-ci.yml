@@ -1,0 +1,211 @@
+name: ChatGPT Live Session Exporter
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/live-session-exporter-ci.yml
+      - Makefile
+      - docs/CHATGPT_LIVE_SESSION_EXPORTER.md
+      - examples/chatgpt_live_session_exporter/**
+      - tools/chatgpt_live_session_exporter.py
+      - tools/chatgpt_conversation_normalizer.py
+      - tools/chatgpt_liminal_adapter.py
+      - tests/test_chatgpt_live_session_exporter.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chatgpt-live-session-exporter-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/live-session
+          git rev-parse HEAD | tee reports/live-session/head-sha.txt
+
+      - name: Run exporter unit and integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_chatgpt_live_session_exporter.py -v \
+            2>&1 | tee reports/live-session/unit-tests.log
+
+      - name: Run live session self-check end to end
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/chatgpt_live_session_exporter.py \
+            --input examples/chatgpt_live_session_exporter/self_check.json \
+            --output-dir reports/live-session/exported \
+            | tee reports/live-session/exporter.stdout.json
+
+          python3 tools/chatgpt_conversation_normalizer.py \
+            --input reports/live-session/exported/chatgpt-conversation-bundle.json \
+            --output-dir reports/live-session/normalized \
+            | tee reports/live-session/normalizer.stdout.json
+
+          python3 tools/chatgpt_liminal_adapter.py \
+            --input reports/live-session/normalized/chatgpt-liminal-input.json \
+            --output-dir reports/live-session/advice \
+            | tee reports/live-session/adapter.stdout.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          bundle = json.loads(
+              Path('reports/live-session/exported/chatgpt-conversation-bundle.json').read_text()
+          )
+          export_manifest = json.loads(
+              Path('reports/live-session/exported/live-session-export.json').read_text()
+          )
+          advice = json.loads(
+              Path('reports/live-session/advice/chatgpt-liminal-advice.json').read_text()
+          )
+
+          assert bundle['schema_version'] == 'chatgpt-conversation-bundle-v0.2'
+          assert bundle['tool_events'][0]['user_authorized'] is True
+          assert bundle['draft']['claims'][0]['evidence_handles'] == ['normalizer-source']
+          assert bundle['draft']['claims'][1]['evidence_handles'] == ['merge-pr-97']
+          assert export_manifest['authorization_edges'] == [
+              {
+                  'authorization_event_id': 'user-go',
+                  'target_event_id': 'merge-pr-97',
+              }
+          ]
+          assert export_manifest['unresolved_evidence_event_ids'] == []
+          assert export_manifest['authority']['authorization_inference'] is False
+          assert export_manifest['authority']['execution'] is False
+          assert advice['decision'] == 'ALLOW'
+          assert advice['authority']['delivery'] is False
+          assert advice['authority']['merge'] is False
+          PY
+
+      - name: Verify unresolved event evidence reaches VERIFY
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          packet = json.loads(
+              Path('examples/chatgpt_live_session_exporter/self_check.json').read_text()
+          )
+          claim = next(
+              event for event in packet['events']
+              if event['id'] == 'claim-normalizer-present'
+          )
+          claim['evidence_event_ids'] = ['missing-source-event']
+          Path('reports/live-session/unresolved.json').write_text(
+              json.dumps(packet, indent=2) + '\n'
+          )
+          PY
+
+          python3 tools/chatgpt_live_session_exporter.py \
+            --input reports/live-session/unresolved.json \
+            --output-dir reports/live-session/unresolved-export \
+            > reports/live-session/unresolved-export.stdout.json
+
+          python3 tools/chatgpt_conversation_normalizer.py \
+            --input reports/live-session/unresolved-export/chatgpt-conversation-bundle.json \
+            --output-dir reports/live-session/unresolved-normalized \
+            > reports/live-session/unresolved-normalizer.stdout.json
+
+          python3 tools/chatgpt_liminal_adapter.py \
+            --input reports/live-session/unresolved-normalized/chatgpt-liminal-input.json \
+            --output-dir reports/live-session/unresolved-advice \
+            > reports/live-session/unresolved-adapter.stdout.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(
+              Path('reports/live-session/unresolved-export/live-session-export.json').read_text()
+          )
+          advice = json.loads(
+              Path('reports/live-session/unresolved-advice/chatgpt-liminal-advice.json').read_text()
+          )
+          assert manifest['unresolved_evidence_event_ids'] == ['missing-source-event']
+          assert advice['decision'] == 'VERIFY'
+          PY
+
+      - name: Verify late authorization fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          packet = json.loads(
+              Path('examples/chatgpt_live_session_exporter/self_check.json').read_text()
+          )
+          authorization = next(
+              event for event in packet['events'] if event['id'] == 'user-go'
+          )
+          authorization['sequence'] = 8
+          Path('reports/live-session/late-authorization.json').write_text(
+              json.dumps(packet, indent=2) + '\n'
+          )
+          PY
+
+          set +e
+          python3 tools/chatgpt_live_session_exporter.py \
+            --input reports/live-session/late-authorization.json \
+            --output-dir reports/live-session/late-output \
+            > reports/live-session/late.stdout.txt \
+            2> reports/live-session/late.stderr.txt
+          status=$?
+          set -e
+          test "$status" -eq 2
+          test ! -e reports/live-session/late-output/chatgpt-conversation-bundle.json
+
+      - name: Verify malformed schema fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '{"schema_version":"wrong"}\n' \
+            > reports/live-session/invalid.json
+          set +e
+          python3 tools/chatgpt_live_session_exporter.py \
+            --input reports/live-session/invalid.json \
+            --output-dir reports/live-session/invalid-output \
+            > reports/live-session/invalid.stdout.txt \
+            2> reports/live-session/invalid.stderr.txt
+          status=$?
+          set -e
+          test "$status" -eq 2
+          test ! -e reports/live-session/invalid-output/chatgpt-conversation-bundle.json
+
+      - name: Hash and upload evidence
+        if: always()
+        shell: bash
+        run: |
+          find reports/live-session -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > reports/live-session/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chatgpt-live-session-exporter-${{ github.run_id }}
+          path: reports/live-session/
+          if-no-files-found: error
+          retention-days: 14

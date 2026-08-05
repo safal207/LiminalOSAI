@@ -1,0 +1,86 @@
+{
+  "schema_version": "chatgpt-live-session-v0.3",
+  "session": {
+    "id": "live-session-exporter-self-check-001",
+    "request_event_id": "user-request",
+    "draft_event_id": "assistant-final-draft",
+    "high_stakes": false,
+    "requires_current_information": true,
+    "capture_complete": true
+  },
+  "events": [
+    {
+      "id": "user-request",
+      "sequence": 1,
+      "type": "user_message",
+      "text": "Explain whether the repository contains the Conversation Normalizer and record the authorized merge that introduced it"
+    },
+    {
+      "id": "user-go",
+      "sequence": 2,
+      "type": "user_authorization",
+      "text": "Go",
+      "authorized_event_ids": [
+        "merge-pr-97"
+      ]
+    },
+    {
+      "id": "source-normalizer",
+      "sequence": 3,
+      "type": "source",
+      "handle": "normalizer-source",
+      "verified": true,
+      "freshness": "current",
+      "source_kind": "repository",
+      "locator": "tools/chatgpt_conversation_normalizer.py@main"
+    },
+    {
+      "id": "merge-pr-97",
+      "sequence": 4,
+      "type": "tool_event",
+      "tool": "GitHub",
+      "operation": "merge pull request 97",
+      "status": "success",
+      "effect": "write",
+      "evidence_eligible": true,
+      "freshness": "current",
+      "locator": "pull/97#merged",
+      "reversible": false,
+      "recovery_plan": "Revert merge commit 0178e53ac825ad75a7be43779615d4ce81e3e42a"
+    },
+    {
+      "id": "assistant-final-draft",
+      "sequence": 5,
+      "type": "assistant_draft",
+      "response": "The repository contains the deterministic Conversation Normalizer v0.2, introduced through an explicitly authorized pull-request merge with a recovery path.",
+      "no_signal": false,
+      "intent_alignment": 0.99
+    },
+    {
+      "id": "claim-normalizer-present",
+      "sequence": 6,
+      "type": "claim",
+      "draft_event_id": "assistant-final-draft",
+      "text": "The repository contains the Conversation Normalizer v0.2.",
+      "kind": "fact",
+      "confidence": 0.99,
+      "requires_current_information": true,
+      "evidence_event_ids": [
+        "source-normalizer"
+      ]
+    },
+    {
+      "id": "claim-pr-merged",
+      "sequence": 7,
+      "type": "claim",
+      "draft_event_id": "assistant-final-draft",
+      "text": "Pull request 97 was merged successfully.",
+      "kind": "fact",
+      "confidence": 0.99,
+      "requires_current_information": true,
+      "evidence_event_ids": [
+        "merge-pr-97"
+      ]
+    }
+  ]
+}
