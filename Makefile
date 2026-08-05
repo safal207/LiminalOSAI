@@ -96,7 +96,7 @@ test: $(TARGET)
 	@build/tests/test_anticipation_v2
 	@build/tests/test_kernel_runtime
 	@build/tests/test_kernel_context
-	@python3 -m unittest tests/test_liminal_evidence_advisor.py tests/test_chatgpt_liminal_adapter.py tests/test_trace_visualizer.py tests/test_pulse_kernel_cli.py -v
+	@python3 -m unittest tests/test_liminal_evidence_advisor.py tests/test_chatgpt_liminal_adapter.py tests/test_chatgpt_conversation_normalizer.py tests/test_trace_visualizer.py tests/test_pulse_kernel_cli.py -v
 
 test-repo:
 	@python3 -m unittest tests/test_repo_hygiene.py -v
