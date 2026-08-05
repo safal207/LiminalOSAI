@@ -83,11 +83,13 @@ test:
 	$(CC) $(CFLAGS) tests/test_consent_gate.c core/consent_gate.c -o build/tests/test_consent_gate $(LDFLAGS)
 	$(CC) $(CFLAGS) tests/test_collective_memory.c collective/memory.c -o build/tests/test_collective_memory $(LDFLAGS)
 	$(CC) $(CFLAGS) tests/test_anticipation_v2.c anticipation/v2.c -o build/tests/test_anticipation_v2 $(LDFLAGS)
+	$(CC) $(CFLAGS) -Icore/runtime tests/test_kernel_runtime.c core/runtime/kernel_runtime_utils.c core/runtime/kernel_sequence.c -o build/tests/test_kernel_runtime $(LDFLAGS)
 	@echo "🧪 Running unit tests..."
 	@build/tests/test_consent_gate
 	@build/tests/test_collective_memory
 	@build/tests/test_anticipation_v2
-	@python3 -m unittest tests/test_liminal_evidence_advisor.py -v
+	@build/tests/test_kernel_runtime
+	@python3 -m unittest tests/test_liminal_evidence_advisor.py tests/test_trace_visualizer.py -v
 
 # --- Phoenix self-report integration ---
 rebirth: $(TARGET)

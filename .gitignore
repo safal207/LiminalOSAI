@@ -1,5 +1,48 @@
+# Generated build outputs
 /build/
 *.o
+*.obj
+*.a
+*.so
+*.dll
+*.dylib
+*.exe
+*.out
+
+# Runtime diagnostics and logs
 diagnostics/traces/
+logs/
+*.log
+*.tmp
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage/
+htmlcov/
+.venv/
+venv/
+
+# Environment and editor state
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.7z
