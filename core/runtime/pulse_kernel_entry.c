@@ -92,6 +92,23 @@ static bool kernel_cli_value_is_valid(const char *value, kernel_cli_value_kind k
     return false;
 }
 
+static bool kernel_reject_known_silent_noop(const char *argument)
+{
+    if (!argument) {
+        return false;
+    }
+
+    if (kernel_match_prefix(argument, "--cm-snapshot-interval=") ||
+        kernel_match_prefix(argument, "--phase-shift-")) {
+        fprintf(stderr,
+                "pulse_kernel: option is unavailable until production parser migration: '%s'\n",
+                argument);
+        return false;
+    }
+
+    return true;
+}
+
 static bool kernel_validate_numeric_argument(const char *argument)
 {
     if (!argument) {
@@ -127,7 +144,8 @@ int main(int argc, char **argv)
     }
 
     for (int index = 1; index < argc; ++index) {
-        if (!kernel_validate_numeric_argument(argv[index])) {
+        if (!kernel_reject_known_silent_noop(argv[index]) ||
+            !kernel_validate_numeric_argument(argv[index])) {
             return 2;
         }
     }
