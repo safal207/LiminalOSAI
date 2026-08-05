@@ -1,0 +1,102 @@
+name: ChatGPT Liminal Adapter
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/chatgpt-liminal-adapter-ci.yml
+      - Makefile
+      - docs/CHATGPT_LIMINAL_ADAPTER.md
+      - examples/chatgpt_liminal_adapter/**
+      - tools/chatgpt_liminal_adapter.py
+      - tests/test_chatgpt_liminal_adapter.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chatgpt-liminal-adapter-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/chatgpt-liminal
+          git rev-parse HEAD | tee reports/chatgpt-liminal/head-sha.txt
+
+      - name: Run adapter unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_chatgpt_liminal_adapter.py -v \
+            2>&1 | tee reports/chatgpt-liminal/unit-tests.log
+
+      - name: Run repository self-check packet
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/chatgpt_liminal_adapter.py \
+            --input examples/chatgpt_liminal_adapter/self_check.json \
+            --output-dir reports/chatgpt-liminal/self-check \
+            | tee reports/chatgpt-liminal/self-check.stdout.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          packet = json.loads(
+              Path('reports/chatgpt-liminal/self-check/chatgpt-liminal-advice.json').read_text()
+          )
+          assert packet['decision'] == 'ALLOW'
+          assert packet['checks']['intent_aligned'] is True
+          assert packet['checks']['claim_evidence_complete'] is True
+          assert packet['checks']['current_information_verified'] is True
+          assert packet['authority']['approval'] is False
+          assert packet['authority']['execution'] is False
+          assert packet['authority']['delivery'] is False
+          assert packet['authority']['merge'] is False
+          assert packet['authority']['model_weight_update'] is False
+          PY
+
+      - name: Verify malformed input fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '{"schema_version":"wrong"}\n' > reports/chatgpt-liminal/invalid.json
+          set +e
+          python3 tools/chatgpt_liminal_adapter.py \
+            --input reports/chatgpt-liminal/invalid.json \
+            --output-dir reports/chatgpt-liminal/invalid-output \
+            > reports/chatgpt-liminal/invalid.stdout.txt \
+            2> reports/chatgpt-liminal/invalid.stderr.txt
+          status=$?
+          set -e
+          test "$status" -eq 2
+          test ! -e reports/chatgpt-liminal/invalid-output/chatgpt-liminal-advice.json
+
+      - name: Hash and upload evidence
+        if: always()
+        shell: bash
+        run: |
+          find reports/chatgpt-liminal -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > reports/chatgpt-liminal/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chatgpt-liminal-adapter-${{ github.run_id }}
+          path: reports/chatgpt-liminal/
+          if-no-files-found: error
+          retention-days: 14
