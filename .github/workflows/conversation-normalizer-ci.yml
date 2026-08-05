@@ -1,0 +1,161 @@
+name: ChatGPT Conversation Normalizer
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/conversation-normalizer-ci.yml
+      - Makefile
+      - docs/CHATGPT_CONVERSATION_NORMALIZER.md
+      - examples/chatgpt_conversation_normalizer/**
+      - tools/chatgpt_conversation_normalizer.py
+      - tools/chatgpt_liminal_adapter.py
+      - tests/test_chatgpt_conversation_normalizer.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chatgpt-conversation-normalizer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/conversation-normalizer
+          git rev-parse HEAD | tee reports/conversation-normalizer/head-sha.txt
+
+      - name: Run normalizer contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_chatgpt_conversation_normalizer.py -v \
+            2>&1 | tee reports/conversation-normalizer/unit-tests.log
+
+      - name: Run conversation self-check end to end
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/chatgpt_conversation_normalizer.py \
+            --input examples/chatgpt_conversation_normalizer/self_check.json \
+            --output-dir reports/conversation-normalizer/normalized \
+            | tee reports/conversation-normalizer/normalizer.stdout.json
+
+          python3 tools/chatgpt_liminal_adapter.py \
+            --input reports/conversation-normalizer/normalized/chatgpt-liminal-input.json \
+            --output-dir reports/conversation-normalizer/advice \
+            | tee reports/conversation-normalizer/adapter.stdout.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          normalized = json.loads(
+              Path('reports/conversation-normalizer/normalized/chatgpt-liminal-input.json').read_text()
+          )
+          manifest = json.loads(
+              Path('reports/conversation-normalizer/normalized/conversation-normalization.json').read_text()
+          )
+          advice = json.loads(
+              Path('reports/conversation-normalizer/advice/chatgpt-liminal-advice.json').read_text()
+          )
+
+          assert normalized['schema_version'] == 'chatgpt-liminal-input-v0.1'
+          assert normalized['draft']['claims'][0]['evidence_refs'] == ['source:adapter-source']
+          assert normalized['draft']['claims'][1]['evidence_refs'] == ['tool:merge-pr-96']
+          assert normalized['draft']['actions'][0]['mode'] == 'performed'
+          assert normalized['draft']['actions'][0]['user_authorized'] is True
+          assert normalized['draft']['actions'][0]['recovery_plan']
+          assert manifest['unresolved_evidence_handles'] == []
+          assert manifest['authority']['execution'] is False
+          assert manifest['authority']['hidden_memory_write'] is False
+          assert advice['decision'] == 'ALLOW'
+          assert advice['authority']['delivery'] is False
+          assert advice['authority']['merge'] is False
+          PY
+
+      - name: Verify unresolved evidence reaches VERIFY
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          packet = json.loads(
+              Path('examples/chatgpt_conversation_normalizer/self_check.json').read_text()
+          )
+          packet['draft']['claims'][0]['evidence_handles'] = ['unknown-source']
+          Path('reports/conversation-normalizer/unresolved.json').write_text(
+              json.dumps(packet, indent=2) + '\n'
+          )
+          PY
+
+          python3 tools/chatgpt_conversation_normalizer.py \
+            --input reports/conversation-normalizer/unresolved.json \
+            --output-dir reports/conversation-normalizer/unresolved-normalized \
+            > reports/conversation-normalizer/unresolved-normalizer.stdout.json
+
+          python3 tools/chatgpt_liminal_adapter.py \
+            --input reports/conversation-normalizer/unresolved-normalized/chatgpt-liminal-input.json \
+            --output-dir reports/conversation-normalizer/unresolved-advice \
+            > reports/conversation-normalizer/unresolved-adapter.stdout.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          advice = json.loads(
+              Path('reports/conversation-normalizer/unresolved-advice/chatgpt-liminal-advice.json').read_text()
+          )
+          manifest = json.loads(
+              Path('reports/conversation-normalizer/unresolved-normalized/conversation-normalization.json').read_text()
+          )
+          assert advice['decision'] == 'VERIFY'
+          assert manifest['unresolved_evidence_handles'] == ['unknown-source']
+          PY
+
+      - name: Verify malformed input fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '{"schema_version":"wrong"}\n' \
+            > reports/conversation-normalizer/invalid.json
+          set +e
+          python3 tools/chatgpt_conversation_normalizer.py \
+            --input reports/conversation-normalizer/invalid.json \
+            --output-dir reports/conversation-normalizer/invalid-output \
+            > reports/conversation-normalizer/invalid.stdout.txt \
+            2> reports/conversation-normalizer/invalid.stderr.txt
+          status=$?
+          set -e
+          test "$status" -eq 2
+          test ! -e reports/conversation-normalizer/invalid-output/chatgpt-liminal-input.json
+
+      - name: Hash and upload evidence
+        if: always()
+        shell: bash
+        run: |
+          find reports/conversation-normalizer -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > reports/conversation-normalizer/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chatgpt-conversation-normalizer-${{ github.run_id }}
+          path: reports/conversation-normalizer/
+          if-no-files-found: error
+          retention-days: 14
