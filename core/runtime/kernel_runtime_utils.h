@@ -10,6 +10,7 @@ const char *kernel_match_prefix(const char *argument, const char *prefix);
 
 /* Strict parsers: consume the full string and reject overflow, NaN, and infinity. */
 bool kernel_parse_finite_float(const char *text, float *value_out);
+bool kernel_parse_i64(const char *text, int64_t *value_out);
 bool kernel_parse_u64(const char *text, uint64_t *value_out);
 bool kernel_parse_positive_u32(const char *text, uint32_t *value_out);
 

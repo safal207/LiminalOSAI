@@ -10,11 +10,7 @@ ARROW = "→"
 
 
 class PulseKernelCliCharacterizationTests(unittest.TestCase):
-    """Black-box baseline for the production parser and dry-run reporter.
-
-    These tests intentionally describe the behavior of the real executable,
-    including behavior that a later parser-hardening PR may change explicitly.
-    """
+    """Black-box contract tests for the production pulse-kernel entrypoint."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -41,6 +37,16 @@ class PulseKernelCliCharacterizationTests(unittest.TestCase):
         )
         self.assertEqual(result.stderr, "")
         return [line.rstrip() for line in result.stdout.splitlines() if line.strip()]
+
+    def assert_rejected(
+        self,
+        result: subprocess.CompletedProcess[str],
+        argument: str,
+    ) -> None:
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("invalid numeric value", result.stderr)
+        self.assertIn(argument, result.stderr)
 
     def line_with_prefix(self, lines: list[str], prefix: str) -> str:
         matches = [line for line in lines if line.startswith(prefix)]
@@ -111,19 +117,43 @@ class PulseKernelCliCharacterizationTests(unittest.TestCase):
             "mirror clamps: amp=[0.70, 1.40] tempo=[0.85, 1.30]",
         )
 
-    def test_non_finite_mirror_values_keep_defaults(self) -> None:
-        lines = self.assert_success(
-            self.run_kernel(
-                "--amp-min=nan",
-                "--amp-max=inf",
-                "--tempo-min=-inf",
-                "--tempo-max=nan",
-            )
-        )
-        self.assertEqual(
-            self.line_with_prefix(lines, "mirror clamps: "),
-            "mirror clamps: amp=[0.50, 1.20] tempo=[0.80, 1.20]",
-        )
+    def test_non_finite_mirror_value_is_rejected_before_runtime_side_effects(self) -> None:
+        argument = "--amp-min=nan"
+        self.assert_rejected(self.run_kernel(argument), argument)
+
+    def test_negative_limit_is_rejected(self) -> None:
+        argument = "--limit=-1"
+        self.assert_rejected(self.run_kernel(argument), argument)
+
+    def test_overflowing_limit_is_rejected(self) -> None:
+        argument = "--limit=18446744073709551616"
+        self.assert_rejected(self.run_kernel(argument), argument)
+
+    def test_trailing_numeric_garbage_is_rejected(self) -> None:
+        for argument in (
+            "--limit=2cycles",
+            "--scan-interval=5x",
+            "--target=0.5garbage",
+            "--gate-open=0.7oops",
+            "--trs-alpha=0.3tail",
+        ):
+            with self.subTest(argument=argument):
+                self.assert_rejected(self.run_kernel(argument), argument)
+
+    def test_non_finite_core_float_is_rejected(self) -> None:
+        for argument in ("--target=nan", "--group-target=inf", "--gate-bias=-inf"):
+            with self.subTest(argument=argument):
+                self.assert_rejected(self.run_kernel(argument), argument)
+
+    def test_scan_interval_must_be_positive_u32(self) -> None:
+        for argument in ("--scan-interval=0", "--scan-interval=4294967296"):
+            with self.subTest(argument=argument):
+                self.assert_rejected(self.run_kernel(argument), argument)
+
+    def test_valid_zero_limit_preserves_dry_run_contract(self) -> None:
+        baseline = self.assert_success(self.run_kernel())
+        zero_limit = self.assert_success(self.run_kernel("--limit=0"))
+        self.assertEqual(zero_limit, baseline)
 
     def test_unknown_option_is_currently_ignored(self) -> None:
         baseline = self.assert_success(self.run_kernel())
