@@ -48,6 +48,17 @@ class PulseKernelCliCharacterizationTests(unittest.TestCase):
         self.assertIn("invalid numeric value", result.stderr)
         self.assertIn(argument, result.stderr)
 
+    def assert_unavailable(
+        self,
+        result: subprocess.CompletedProcess[str],
+        argument: str,
+    ) -> None:
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("option is unavailable", result.stderr)
+        self.assertIn("production parser migration", result.stderr)
+        self.assertIn(argument, result.stderr)
+
     def line_with_prefix(self, lines: list[str], prefix: str) -> str:
         matches = [line for line in lines if line.startswith(prefix)]
         self.assertEqual(matches, matches[:1], f"duplicate {prefix!r} lines: {matches}")
@@ -149,6 +160,14 @@ class PulseKernelCliCharacterizationTests(unittest.TestCase):
         for argument in ("--scan-interval=0", "--scan-interval=4294967296"):
             with self.subTest(argument=argument):
                 self.assert_rejected(self.run_kernel(argument), argument)
+
+    def test_known_silent_noop_options_are_explicitly_unavailable(self) -> None:
+        for argument in (
+            "--cm-snapshot-interval=7",
+            "--phase-shift-awarenessdeg=90",
+        ):
+            with self.subTest(argument=argument):
+                self.assert_unavailable(self.run_kernel(argument), argument)
 
     def test_valid_zero_limit_preserves_dry_run_contract(self) -> None:
         baseline = self.assert_success(self.run_kernel())
