@@ -30,8 +30,17 @@ static void test_finite_float_parser(void)
 
 static void test_integer_parsers(void)
 {
+    int64_t signed_value = 0;
     uint64_t wide = 0;
     uint32_t positive = 0;
+
+    assert(kernel_parse_i64("-9223372036854775808", &signed_value));
+    assert(signed_value == INT64_MIN);
+    assert(kernel_parse_i64("9223372036854775807", &signed_value));
+    assert(signed_value == INT64_MAX);
+    assert(!kernel_parse_i64("9223372036854775808", &signed_value));
+    assert(!kernel_parse_i64("-12x", &signed_value));
+
     assert(kernel_parse_u64("0", &wide) && wide == 0);
     assert(kernel_parse_u64("18446744073709551615", &wide));
     assert(!kernel_parse_u64("-1", &wide));
