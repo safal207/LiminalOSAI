@@ -31,15 +31,23 @@ typedef struct {
     bool kiss;
     bool vse;
     bool dream;
+    bool strict_order;
 } kernel_sequence_options;
 
-/* Awareness and gate are mandatory. Harmony is added for introspect or dream. */
+/*
+ * Awareness and gate are mandatory. Harmony is added for introspect or dream.
+ * strict_order preserves the current production contract by including every
+ * non-dream optional stage; dream remains explicitly opt-in.
+ */
 size_t kernel_plan_sequence(const kernel_sequence_options *options,
                             kernel_stage *stages,
                             size_t capacity);
 
 const char *kernel_stage_name(kernel_stage stage);
 bool kernel_sequence_is_canonical(const kernel_stage *stages, size_t count);
+bool kernel_sequence_contains(const kernel_stage *stages,
+                              size_t count,
+                              kernel_stage stage);
 void kernel_format_sequence(const kernel_stage *stages,
                             size_t count,
                             char *buffer,
