@@ -6,6 +6,7 @@
 
 #include "kernel_runtime_utils.h"
 #include "kernel_sequence.h"
+#include "kernel_sequence_cli.h"
 
 static void test_prefix_matching(void)
 {
@@ -139,6 +140,65 @@ static void test_dependency_and_order(void)
     assert(strstr(formatted, "gate -> vse -> dream") != NULL);
 }
 
+static void test_strict_order_contract(void)
+{
+    kernel_sequence_options options = {.strict_order = true};
+    kernel_stage stages[KERNEL_STAGE_COUNT];
+    size_t count = kernel_plan_sequence(&options, stages, KERNEL_STAGE_COUNT);
+
+    assert(count == KERNEL_STAGE_COUNT - 1U);
+    assert(kernel_sequence_is_canonical(stages, count));
+    assert(kernel_sequence_contains(stages, count, KERNEL_STAGE_ANTICIPATION));
+    assert(kernel_sequence_contains(stages, count, KERNEL_STAGE_VSE));
+    assert(!kernel_sequence_contains(stages, count, KERNEL_STAGE_DREAM));
+}
+
+static void test_sequence_cli_mapping(void)
+{
+    char *argv[] = {
+        "pulse_kernel",
+        "--ant2-gain=0.4",
+        "--collective-trace",
+        "--affinity",
+        "--mirror",
+        "--introspect",
+        "--astro-trace",
+        "--kiss",
+        "--vse-temp=0.8",
+        "--dreamsync"
+    };
+    kernel_sequence_options options;
+    assert(kernel_sequence_options_from_argv(10, argv, &options));
+    assert(options.anticipation);
+    assert(options.collective);
+    assert(options.affinity);
+    assert(options.mirror);
+    assert(options.introspect);
+    assert(options.astro);
+    assert(options.kiss);
+    assert(options.vse);
+    assert(options.dream);
+    assert(!options.strict_order);
+
+    kernel_stage stages[KERNEL_STAGE_COUNT];
+    size_t count = kernel_plan_sequence(&options, stages, KERNEL_STAGE_COUNT);
+    assert(count == KERNEL_STAGE_COUNT);
+    assert(kernel_sequence_is_canonical(stages, count));
+}
+
+static void test_sequence_cli_strict_and_invalid_input(void)
+{
+    char *strict_argv[] = {"pulse_kernel", "--strict-order"};
+    kernel_sequence_options options;
+    assert(kernel_sequence_options_from_argv(2, strict_argv, &options));
+    assert(options.strict_order);
+
+    char *invalid_argv[] = {"pulse_kernel", NULL};
+    assert(!kernel_sequence_options_from_argv(2, invalid_argv, &options));
+    assert(!kernel_sequence_options_from_argv(1, NULL, &options));
+    assert(!kernel_sequence_options_from_argv(0, NULL, NULL));
+}
+
 static void test_capacity_is_respected(void)
 {
     kernel_sequence_options options = {
@@ -170,6 +230,9 @@ int main(void)
     test_numeric_safety();
     test_minimal_sequence();
     test_dependency_and_order();
+    test_strict_order_contract();
+    test_sequence_cli_mapping();
+    test_sequence_cli_strict_and_invalid_input();
     test_capacity_is_respected();
     test_canonical_validator();
     puts("kernel runtime contract tests: PASS");

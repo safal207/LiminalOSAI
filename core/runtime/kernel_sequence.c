@@ -25,35 +25,36 @@ size_t kernel_plan_sequence(const kernel_sequence_options *options,
 
     kernel_sequence_options disabled = {0};
     const kernel_sequence_options *opts = options ? options : &disabled;
+    const bool strict = opts->strict_order;
     size_t count = 0;
 
-    if (opts->anticipation) {
+    if (strict || opts->anticipation) {
         append_stage(KERNEL_STAGE_ANTICIPATION, stages, capacity, &count);
     }
     append_stage(KERNEL_STAGE_AWARENESS, stages, capacity, &count);
-    if (opts->collective) {
+    if (strict || opts->collective) {
         append_stage(KERNEL_STAGE_COLLECTIVE, stages, capacity, &count);
     }
-    if (opts->affinity) {
+    if (strict || opts->affinity) {
         append_stage(KERNEL_STAGE_AFFINITY, stages, capacity, &count);
     }
-    if (opts->mirror) {
+    if (strict || opts->mirror) {
         append_stage(KERNEL_STAGE_MIRROR, stages, capacity, &count);
     }
-    if (opts->introspect) {
+    if (strict || opts->introspect) {
         append_stage(KERNEL_STAGE_INTROSPECT, stages, capacity, &count);
     }
-    if (opts->harmony || opts->introspect || opts->dream) {
+    if (strict || opts->harmony || opts->introspect || opts->dream) {
         append_stage(KERNEL_STAGE_HARMONY, stages, capacity, &count);
     }
-    if (opts->astro) {
+    if (strict || opts->astro) {
         append_stage(KERNEL_STAGE_ASTRO, stages, capacity, &count);
     }
-    if (opts->kiss) {
+    if (strict || opts->kiss) {
         append_stage(KERNEL_STAGE_KISS, stages, capacity, &count);
     }
     append_stage(KERNEL_STAGE_GATE, stages, capacity, &count);
-    if (opts->vse) {
+    if (strict || opts->vse) {
         append_stage(KERNEL_STAGE_VSE, stages, capacity, &count);
     }
     if (opts->dream) {
@@ -101,6 +102,22 @@ bool kernel_sequence_is_canonical(const kernel_stage *stages, size_t count)
         previous = current;
     }
     return true;
+}
+
+bool kernel_sequence_contains(const kernel_stage *stages,
+                              size_t count,
+                              kernel_stage stage)
+{
+    if (!stages || stage < 0 || stage >= KERNEL_STAGE_COUNT) {
+        return false;
+    }
+
+    for (size_t index = 0; index < count; ++index) {
+        if (stages[index] == stage) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void kernel_format_sequence(const kernel_stage *stages,

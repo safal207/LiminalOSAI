@@ -24,6 +24,12 @@ static void reset_runner(void)
     observed_argv = NULL;
 }
 
+static bool plan_minimal_sequence(kernel_context *context)
+{
+    kernel_sequence_options options = {0};
+    return kernel_context_plan_sequence(context, &options);
+}
+
 static void test_invalid_process_arguments(void)
 {
     kernel_context context;
@@ -72,7 +78,7 @@ static void test_rejection_blocks_runner(void)
     assert(!runner_called);
 }
 
-static void test_runner_receives_original_process_arguments(void)
+static void test_runner_requires_plan(void)
 {
     char *argv[] = {"pulse_kernel"};
     kernel_context context;
@@ -83,6 +89,29 @@ static void test_runner_receives_original_process_arguments(void)
     assert(!kernel_context_next_argument(&context, &argument));
     assert(kernel_context_is_ready(&context));
 
+    assert(kernel_context_run(&context, recording_runner) == 2);
+    assert(!runner_called);
+}
+
+static void test_runner_receives_original_process_arguments(void)
+{
+    char *argv[] = {"pulse_kernel"};
+    kernel_context context;
+    const char *argument = NULL;
+
+    reset_runner();
+    assert(kernel_context_init(&context, 1, argv));
+    assert(!kernel_context_next_argument(&context, &argument));
+    assert(kernel_context_is_ready(&context));
+    assert(plan_minimal_sequence(&context));
+
+    size_t sequence_count = 0U;
+    const kernel_stage *sequence = kernel_context_sequence(&context, &sequence_count);
+    assert(sequence != NULL);
+    assert(sequence_count == 2U);
+    assert(sequence[0] == KERNEL_STAGE_AWARENESS);
+    assert(sequence[1] == KERNEL_STAGE_GATE);
+
     assert(kernel_context_run(&context, recording_runner) == 17);
     assert(runner_called);
     assert(observed_argc == 1);
@@ -91,6 +120,29 @@ static void test_runner_receives_original_process_arguments(void)
     assert(kernel_context_exit_code(&context) == 17);
 
     assert(kernel_context_run(&context, recording_runner) == 2);
+}
+
+static void test_strict_sequence_is_frozen(void)
+{
+    char *argv[] = {"pulse_kernel", "--strict-order"};
+    kernel_context context;
+    const char *argument = NULL;
+    kernel_sequence_options options = {.strict_order = true};
+
+    assert(kernel_context_init(&context, 2, argv));
+    assert(kernel_context_next_argument(&context, &argument));
+    assert(kernel_context_accept_argument(&context));
+    assert(kernel_context_is_ready(&context));
+    assert(kernel_context_plan_sequence(&context, &options));
+    assert(!kernel_context_plan_sequence(&context, &options));
+
+    size_t count = 0U;
+    const kernel_stage *sequence = kernel_context_sequence(&context, &count);
+    assert(sequence != NULL);
+    assert(count == KERNEL_STAGE_COUNT - 1U);
+    assert(kernel_sequence_contains(sequence, count, KERNEL_STAGE_ANTICIPATION));
+    assert(kernel_sequence_contains(sequence, count, KERNEL_STAGE_VSE));
+    assert(!kernel_sequence_contains(sequence, count, KERNEL_STAGE_DREAM));
 }
 
 static void test_null_argument_is_rejected(void)
@@ -110,7 +162,9 @@ int main(void)
     test_invalid_process_arguments();
     test_argument_iteration_and_readiness();
     test_rejection_blocks_runner();
+    test_runner_requires_plan();
     test_runner_receives_original_process_arguments();
+    test_strict_sequence_is_frozen();
     test_null_argument_is_rejected();
     puts("kernel context tests: PASS");
     return 0;

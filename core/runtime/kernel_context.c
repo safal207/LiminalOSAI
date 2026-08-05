@@ -16,6 +16,8 @@ bool kernel_context_init(kernel_context *context, int argc, char **argv)
     context->next_argument = 1U;
     context->validated_arguments = 0U;
     context->current_argument = NULL;
+    context->sequence_count = 0U;
+    context->sequence_planned = false;
     context->exit_code = 2;
     context->state = KERNEL_CONTEXT_NEW;
 
@@ -82,6 +84,8 @@ void kernel_context_reject(kernel_context *context, int exit_code)
     }
 
     context->current_argument = NULL;
+    context->sequence_count = 0U;
+    context->sequence_planned = false;
     context->exit_code = normalized_failure_code(exit_code);
     context->state = KERNEL_CONTEXT_REJECTED;
 }
@@ -101,13 +105,54 @@ int kernel_context_exit_code(const kernel_context *context)
     return context ? context->exit_code : 2;
 }
 
+bool kernel_context_plan_sequence(kernel_context *context,
+                                  const kernel_sequence_options *options)
+{
+    if (!context || context->state != KERNEL_CONTEXT_READY ||
+        context->sequence_planned) {
+        return false;
+    }
+
+    size_t count = kernel_plan_sequence(options,
+                                        context->sequence,
+                                        KERNEL_STAGE_COUNT);
+    bool valid = count >= 2U &&
+                 kernel_sequence_is_canonical(context->sequence, count) &&
+                 kernel_sequence_contains(context->sequence,
+                                          count,
+                                          KERNEL_STAGE_AWARENESS) &&
+                 kernel_sequence_contains(context->sequence,
+                                          count,
+                                          KERNEL_STAGE_GATE);
+    if (!valid) {
+        kernel_context_reject(context, 2);
+        return false;
+    }
+
+    context->sequence_count = count;
+    context->sequence_planned = true;
+    return true;
+}
+
+const kernel_stage *kernel_context_sequence(const kernel_context *context,
+                                            size_t *count_out)
+{
+    if (count_out) {
+        *count_out = context && context->sequence_planned
+                         ? context->sequence_count
+                         : 0U;
+    }
+    return context && context->sequence_planned ? context->sequence : NULL;
+}
+
 int kernel_context_run(kernel_context *context, kernel_context_runner runner)
 {
     if (!context || !runner) {
         return 2;
     }
 
-    if (context->state != KERNEL_CONTEXT_READY) {
+    if (context->state != KERNEL_CONTEXT_READY ||
+        !context->sequence_planned) {
         return context->state == KERNEL_CONTEXT_REJECTED
                    ? context->exit_code
                    : 2;

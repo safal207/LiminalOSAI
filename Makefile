@@ -8,7 +8,8 @@ endif
 TARGET  := build/pulse_kernel
 SUBSTRATE_TARGET := build/liminal_core
 
-CORE_SRCS   := core/pulse_kernel.c core/runtime/pulse_kernel_entry.c core/runtime/kernel_context.c core/runtime/kernel_runtime_utils.c \
+CORE_SRCS   := core/pulse_kernel.c core/runtime/pulse_kernel_entry.c core/runtime/kernel_context.c \
+               core/runtime/kernel_runtime_utils.c core/runtime/kernel_sequence.c core/runtime/kernel_sequence_cli.c \
                core/trs_filter.c core/trs_adapt.c core/erb.c core/astro_sync.c core/consent_gate.c \
                core/neural_resonance.c core/kiss_cascade.c core/vse.c core/flow_equilibrium.c core/qel.c
 AFFINITY_SRCS := affinity/core.c
@@ -87,8 +88,8 @@ test: $(TARGET)
 	$(CC) $(CFLAGS) tests/test_consent_gate.c core/consent_gate.c -o build/tests/test_consent_gate $(LDFLAGS)
 	$(CC) $(CFLAGS) tests/test_collective_memory.c collective/memory.c -o build/tests/test_collective_memory $(LDFLAGS)
 	$(CC) $(CFLAGS) tests/test_anticipation_v2.c anticipation/v2.c -o build/tests/test_anticipation_v2 $(LDFLAGS)
-	$(CC) $(CFLAGS) -Icore/runtime tests/test_kernel_runtime.c core/runtime/kernel_runtime_utils.c core/runtime/kernel_sequence.c -o build/tests/test_kernel_runtime $(LDFLAGS)
-	$(CC) $(CFLAGS) -Icore/runtime tests/test_kernel_context.c core/runtime/kernel_context.c -o build/tests/test_kernel_context $(LDFLAGS)
+	$(CC) $(CFLAGS) -Icore/runtime tests/test_kernel_runtime.c core/runtime/kernel_runtime_utils.c core/runtime/kernel_sequence.c core/runtime/kernel_sequence_cli.c -o build/tests/test_kernel_runtime $(LDFLAGS)
+	$(CC) $(CFLAGS) -Icore/runtime tests/test_kernel_context.c core/runtime/kernel_context.c core/runtime/kernel_sequence.c -o build/tests/test_kernel_context $(LDFLAGS)
 	@echo "🧪 Running unit tests..."
 	@build/tests/test_consent_gate
 	@build/tests/test_collective_memory
