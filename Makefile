@@ -78,7 +78,7 @@ check: $(TARGET) $(SUBSTRATE_TARGET)
 	@$(TARGET) --dry-run --limit=2
 	@$(SUBSTRATE_TARGET) --substrate --limit=2 --trace >/dev/null
 
-test:
+test: $(TARGET)
 	@mkdir -p build/tests
 	$(CC) $(CFLAGS) tests/test_consent_gate.c core/consent_gate.c -o build/tests/test_consent_gate $(LDFLAGS)
 	$(CC) $(CFLAGS) tests/test_collective_memory.c collective/memory.c -o build/tests/test_collective_memory $(LDFLAGS)
@@ -89,7 +89,7 @@ test:
 	@build/tests/test_collective_memory
 	@build/tests/test_anticipation_v2
 	@build/tests/test_kernel_runtime
-	@python3 -m unittest tests/test_liminal_evidence_advisor.py tests/test_trace_visualizer.py -v
+	@python3 -m unittest tests/test_liminal_evidence_advisor.py tests/test_trace_visualizer.py tests/test_pulse_kernel_cli.py -v
 
 test-repo:
 	@python3 -m unittest tests/test_repo_hygiene.py -v
