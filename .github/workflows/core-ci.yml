@@ -1,0 +1,71 @@
+name: LiminalOSAI Core CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/core-ci.yml
+      - .gitignore
+      - Makefile
+      - '**/*.c'
+      - '**/*.h'
+      - scripts/**
+      - tests/**
+      - docs/KERNEL_REFACTOR_PROTOCOL.md
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: liminalos-core-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.compiler }} strict build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Run repository and C validation
+        env:
+          CC: ${{ matrix.compiler }}
+        run: bash scripts/verify_core.sh
+
+  sanitizers:
+    name: ASan and UBSan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Build and test with sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          SAN_CFLAGS='-std=c11 -Wall -Wextra -Werror -Wno-error=stringop-truncation -pedantic -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -Iinclude'
+          SAN_LDFLAGS='-lm -fsanitize=address,undefined'
+
+          make clean
+          make CC=gcc CFLAGS="$SAN_CFLAGS" LDFLAGS="$SAN_LDFLAGS"
+          make CC=gcc CFLAGS="$SAN_CFLAGS" LDFLAGS="$SAN_LDFLAGS" check
+          make CC=gcc CFLAGS="$SAN_CFLAGS" LDFLAGS="$SAN_LDFLAGS" test
+          python3 -m unittest tests/test_repo_hygiene.py -v
