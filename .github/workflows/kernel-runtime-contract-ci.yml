@@ -1,0 +1,56 @@
+name: Kernel Runtime Contract
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/kernel-runtime-contract-ci.yml
+      - .gitignore
+      - Makefile
+      - core/runtime/**
+      - tests/test_kernel_runtime.c
+      - tests/test_trace_visualizer.py
+      - tools/trace_visualizer.py
+      - docs/KERNEL_RUNTIME_CONTRACT.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-runtime-contract-${{ github.ref }}-${{ matrix.compiler }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: ${{ matrix.compiler }} validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head
+        run: git rev-parse HEAD
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          make clean
+          make CC=${{ matrix.compiler }}
+
+      - name: Smoke checks
+        run: |
+          set -euo pipefail
+          make CC=${{ matrix.compiler }} check
+
+      - name: Unit and contract tests
+        run: |
+          set -euo pipefail
+          make CC=${{ matrix.compiler }} test
