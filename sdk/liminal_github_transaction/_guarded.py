@@ -7,8 +7,20 @@ from typing import Any
 
 from sdk.liminal_github_runtime import ConnectedGitHubRuntime
 
-from ._contracts import TransactionError, TransactionPlan
-from ._orchestrator import GitHubTransactionOrchestrator as _BaseOrchestrator
+from ._contracts import (
+    TransactionError,
+    TransactionPlan,
+    TransactionStep,
+    identifier,
+    repository_name,
+    sha256,
+    string,
+)
+from ._journal import TransactionJournal
+from ._orchestrator import (
+    GitHubTransactionOrchestrator as _BaseOrchestrator,
+    _atomic_write_json,
+)
 
 
 class GitHubTransactionOrchestrator(_BaseOrchestrator):
@@ -34,6 +46,65 @@ class GitHubTransactionOrchestrator(_BaseOrchestrator):
                     "checkpoint head and expectation state=success"
                 )
 
+    @staticmethod
+    def _normalized_plan(
+        *,
+        transaction_id: str,
+        runtime_config_path: str,
+        runtime_config_sha256: str,
+        repository_full_name: str,
+        steps: list[dict[str, Any]],
+    ) -> TransactionPlan:
+        tx_id = identifier(transaction_id, "transaction_plan.transaction_id")
+        runtime_path = string(
+            runtime_config_path, "transaction_plan.runtime_config_path"
+        )
+        runtime_sha = sha256(
+            runtime_config_sha256,
+            "transaction_plan.runtime_config_sha256",
+        )
+        repository = repository_name(
+            repository_full_name,
+            "transaction_plan.repository_full_name",
+        )
+        if not steps or len(steps) > 64:
+            raise TransactionError(
+                "transaction_plan.steps must contain 1..64 steps"
+            )
+
+        prior: dict[str, TransactionStep] = {}
+        known_exports: dict[str, set[str]] = {}
+        call_ids: set[str] = set()
+        normalized_steps: list[TransactionStep] = []
+        for index, step_value in enumerate(steps):
+            step = TransactionStep.from_value(
+                step_value,
+                index=index,
+                repository_full_name=repository,
+                prior_steps=prior,
+                known_exports=known_exports,
+            )
+            if step.step_id in prior:
+                raise TransactionError(
+                    f"transaction_plan contains duplicate step_id: {step.step_id}"
+                )
+            if step.call_id in call_ids:
+                raise TransactionError(
+                    f"transaction_plan contains duplicate call_id: {step.call_id}"
+                )
+            prior[step.step_id] = step
+            known_exports[step.step_id] = set(step.exports)
+            call_ids.add(step.call_id)
+            normalized_steps.append(step)
+
+        return TransactionPlan(
+            transaction_id=tx_id,
+            runtime_config_path=runtime_path,
+            runtime_config_sha256=runtime_sha,
+            repository_full_name=repository,
+            steps=tuple(normalized_steps),
+        )
+
     @classmethod
     def create(
         cls,
@@ -45,9 +116,12 @@ class GitHubTransactionOrchestrator(_BaseOrchestrator):
         repository_full_name: str,
         steps: list[dict[str, Any]],
     ) -> "GitHubTransactionOrchestrator":
+        target = Path(plan_path)
+        if target.exists():
+            raise TransactionError(f"transaction plan already exists: {target}")
         runtime = ConnectedGitHubRuntime(runtime_config_path)
         runtime_summary = runtime.verify(allow_pending=True)
-        candidate = TransactionPlan.build(
+        candidate = cls._normalized_plan(
             transaction_id=transaction_id,
             runtime_config_path=str(runtime_config_path),
             runtime_config_sha256=runtime_summary["config_sha256"],
@@ -55,14 +129,9 @@ class GitHubTransactionOrchestrator(_BaseOrchestrator):
             steps=steps,
         )
         cls._validate_semantic_plan(candidate)
-        return super().create(
-            plan_path,
-            journal_path,
-            runtime_config_path=runtime_config_path,
-            transaction_id=transaction_id,
-            repository_full_name=repository_full_name,
-            steps=steps,
-        )
+        _atomic_write_json(target, candidate.as_document())
+        TransactionJournal.create(journal_path, candidate)
+        return cls(target, journal_path)
 
     @property
     def plan(self) -> TransactionPlan:
