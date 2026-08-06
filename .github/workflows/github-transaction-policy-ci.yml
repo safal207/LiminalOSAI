@@ -1,0 +1,191 @@
+name: ChatGPT GitHub Transaction Policy
+
+on:
+  pull_request:
+    paths:
+      - "sdk/liminal_github_policy/**"
+      - "tests/test_chatgpt_github_transaction_policy.py"
+      - "examples/chatgpt_github_transaction_policy/**"
+      - "tools/chatgpt_github_transaction_policy.py"
+      - "docs/CHATGPT_GITHUB_TRANSACTION_POLICY.md"
+      - ".github/workflows/github-transaction-policy-ci.yml"
+      - "Makefile"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/github-policy
+          git rev-parse HEAD | tee reports/github-policy/head-sha.txt
+
+      - name: Run policy engine contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_chatgpt_github_transaction_policy.py -v \
+            2>&1 | tee reports/github-policy/unit-tests.log
+
+      - name: Run governed transaction to Liminal decision self-check
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf reports/github-policy/self-check
+          python3 examples/chatgpt_github_transaction_policy/self_check.py \
+            --output-dir reports/github-policy/self-check \
+            | tee reports/github-policy/self-check.log
+          test "$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+          value = json.loads(Path('reports/github-policy/self-check/policy-verification.json').read_text())
+          print(value['approval']['status'])
+          PY
+          )" = "ready"
+          test "$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+          value = json.loads(Path('reports/github-policy/self-check/policy-verification.json').read_text())
+          print(value['transaction']['journal']['status'])
+          PY
+          )" = "completed"
+
+          python3 tools/chatgpt_live_session_exporter.py \
+            --input reports/github-policy/self-check/live-session.json \
+            --output-dir reports/github-policy/exported \
+            | tee reports/github-policy/exporter.stdout.json
+
+          python3 tools/chatgpt_conversation_normalizer.py \
+            --input reports/github-policy/exported/chatgpt-conversation-bundle.json \
+            --output-dir reports/github-policy/normalized \
+            | tee reports/github-policy/normalizer.stdout.json
+
+          python3 tools/chatgpt_liminal_adapter.py \
+            --input reports/github-policy/normalized/chatgpt-liminal-input.json \
+            --output-dir reports/github-policy/advice \
+            | tee reports/github-policy/adapter.stdout.json
+
+          test "$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+          print(json.loads(Path('reports/github-policy/advice/chatgpt-liminal-advice.json').read_text())['decision'])
+          PY
+          )" = "ALLOW"
+
+      - name: Verify policy tampering fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a reports/github-policy/self-check reports/github-policy/tamper-policy
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('reports/github-policy/tamper-policy/policy.json')
+          value = json.loads(path.read_text())
+          value['max_steps'] += 1
+          path.write_text(json.dumps(value))
+          PY
+          set +e
+          python3 tools/chatgpt_github_transaction_policy.py verify \
+            --policy reports/github-policy/tamper-policy/policy.json \
+            --snapshot reports/github-policy/tamper-policy/policy-snapshot.json \
+            --approval-ledger reports/github-policy/tamper-policy/approval-ledger.json \
+            --transaction-plan reports/github-policy/tamper-policy/transaction-plan.json \
+            --transaction-journal reports/github-policy/tamper-policy/transaction-journal.json
+          code=$?
+          set -e
+          test "$code" -eq 2
+
+      - name: Verify approval ledger tampering fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a reports/github-policy/self-check reports/github-policy/tamper-ledger
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('reports/github-policy/tamper-ledger/approval-ledger.json')
+          value = json.loads(path.read_text())
+          value['entries'][0]['event']['principal_id'] = 'attacker'
+          path.write_text(json.dumps(value))
+          PY
+          set +e
+          python3 tools/chatgpt_github_transaction_policy.py verify \
+            --policy reports/github-policy/tamper-ledger/policy.json \
+            --snapshot reports/github-policy/tamper-ledger/policy-snapshot.json \
+            --approval-ledger reports/github-policy/tamper-ledger/approval-ledger.json \
+            --transaction-plan reports/github-policy/tamper-ledger/transaction-plan.json \
+            --transaction-journal reports/github-policy/tamper-ledger/transaction-journal.json
+          code=$?
+          set -e
+          test "$code" -eq 2
+
+      - name: Verify approvals do not contain reviewed file content
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -F "safe governed fixture" reports/github-policy/self-check/approval-ledger.json
+
+      - name: Verify policy approval does not replace write authorization
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import tempfile
+          from pathlib import Path
+          from sdk.liminal_github_bridge import GitHubAgentBridge
+          from sdk.liminal_github_runtime import ConnectedGitHubRuntime
+          from sdk.liminal_github_transaction import GitHubTransactionOrchestrator
+          from sdk.liminal_github_policy import GitHubTransactionPolicyEngine
+
+          repo = 'safal207/LiminalOSAI'
+          root = Path(tempfile.mkdtemp())
+          GitHubAgentBridge.create(root/'bridge.json', host_trace_path=root/'trace.json', recorder_path=root/'recorder.json', session_id='no-auto-auth', high_stakes=False, requires_current_information=True, allowed_repositories=[repo])
+          ConnectedGitHubRuntime.create(root/'runtime.json', bridge_config_path=root/'bridge.json')
+          GitHubTransactionOrchestrator.create(root/'plan.json', root/'journal.json', runtime_config_path=root/'runtime.json', transaction_id='no-auto-auth', repository_full_name=repo, steps=[{
+              'step_id':'branch','call_id':'branch-call','action':'create_branch',
+              'arguments':{'repository_full_name':repo,'branch_name':'agent/no-auto-auth','base_ref':'main'},
+              'exports':{},'expect':{}
+          }])
+          engine = GitHubTransactionPolicyEngine.create(root/'policy.json',root/'snapshot.json',root/'approvals.json',transaction_plan_path=root/'plan.json',transaction_journal_path=root/'journal.json',policy_id='p',allowed_repositories=[repo])
+          requirement = engine.snapshot.requirements[0]
+          engine.record_approval(approval_id='a1',principal_id='operator-1',role='operator',decision='approve',requirement_id=requirement.requirement_id)
+          class Connector:
+              calls=[]
+              def invoke(self, tool, arguments):
+                  self.calls.append((tool,arguments)); return {'branch':'agent/no-auto-auth'}
+          connector=Connector()
+          try:
+              engine.run_next(connector)
+          except Exception as exc:
+              assert 'explicit prior authorization' in str(exc)
+          else:
+              raise AssertionError('write authorization was bypassed')
+          assert connector.calls == []
+          PY
+
+      - name: Hash and upload evidence
+        if: always()
+        shell: bash
+        run: |
+          find reports/github-policy -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z | xargs -0 sha256sum \
+            > reports/github-policy/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chatgpt-github-policy-${{ github.run_id }}
+          path: reports/github-policy/
+          if-no-files-found: error
+          retention-days: 14
