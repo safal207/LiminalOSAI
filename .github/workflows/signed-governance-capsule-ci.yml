@@ -1,0 +1,176 @@
+name: ChatGPT Signed Governance Capsule
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/signed-governance-capsule-ci.yml
+      - Makefile
+      - docs/CHATGPT_SIGNED_GOVERNANCE_CAPSULE.md
+      - examples/chatgpt_signed_governance_capsule/**
+      - sdk/liminal_governance_capsule/**
+      - sdk/liminal_github_policy/**
+      - sdk/liminal_github_transaction/**
+      - tools/chatgpt_governance_capsule.py
+      - tests/test_chatgpt_signed_governance_capsule.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chatgpt-signed-governance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head and OpenSSL version
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/signed-governance
+          git rev-parse HEAD | tee reports/signed-governance/head-sha.txt
+          openssl version | tee reports/signed-governance/openssl-version.txt
+
+      - name: Run capsule contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_chatgpt_signed_governance_capsule.py -v \
+            2>&1 | tee reports/signed-governance/unit-tests.log
+
+      - name: Run signed governed transaction self-check
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf reports/signed-governance/self-check
+          python3 examples/chatgpt_signed_governance_capsule/self_check.py \
+            --output-dir reports/signed-governance/self-check \
+            | tee reports/signed-governance/self-check.log
+
+          python3 tools/chatgpt_governance_capsule.py verify-engine \
+            --capsule reports/signed-governance/self-check/governance-capsule.json \
+            --trust-store reports/signed-governance/self-check/governance-trust-store.json \
+            --policy reports/signed-governance/self-check/policy.json \
+            --snapshot reports/signed-governance/self-check/policy-snapshot.json \
+            --approval-ledger reports/signed-governance/self-check/approval-ledger.json \
+            --transaction-plan reports/signed-governance/self-check/transaction-plan.json \
+            --transaction-journal reports/signed-governance/self-check/transaction-journal.json \
+            --audience github-transaction-executor \
+            --at-unix 1800000000 \
+            --output reports/signed-governance/capsule-verification.json
+
+          test "$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+          value = json.loads(Path('reports/signed-governance/capsule-verification.json').read_text())
+          print(value['status'])
+          PY
+          )" = "valid"
+          test "$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+          value = json.loads(Path('reports/signed-governance/self-check/policy-verification.json').read_text())
+          print(value['transaction']['journal']['status'])
+          PY
+          )" = "completed"
+
+          python3 tools/chatgpt_live_session_exporter.py \
+            --input reports/signed-governance/self-check/live-session.json \
+            --output-dir reports/signed-governance/exported
+          python3 tools/chatgpt_conversation_normalizer.py \
+            --input reports/signed-governance/exported/chatgpt-conversation-bundle.json \
+            --output-dir reports/signed-governance/normalized
+          python3 tools/chatgpt_liminal_adapter.py \
+            --input reports/signed-governance/normalized/chatgpt-liminal-input.json \
+            --output-dir reports/signed-governance/advice
+          test "$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+          print(json.loads(Path('reports/signed-governance/advice/chatgpt-liminal-advice.json').read_text())['decision'])
+          PY
+          )" = "ALLOW"
+
+      - name: Verify capsule tampering fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp reports/signed-governance/self-check/governance-capsule.json reports/signed-governance/tampered-capsule.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('reports/signed-governance/tampered-capsule.json')
+          value = json.loads(path.read_text())
+          value['claims']['audience'] = 'attacker'
+          path.write_text(json.dumps(value))
+          PY
+          set +e
+          python3 tools/chatgpt_governance_capsule.py verify \
+            --capsule reports/signed-governance/tampered-capsule.json \
+            --trust-store reports/signed-governance/self-check/governance-trust-store.json \
+            --at-unix 1800000000
+          code=$?
+          set -e
+          test "$code" -eq 2
+
+      - name: Verify trust-store tampering fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp reports/signed-governance/self-check/governance-trust-store.json reports/signed-governance/tampered-trust.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('reports/signed-governance/tampered-trust.json')
+          value = json.loads(path.read_text())
+          value['max_ttl_seconds'] -= 1
+          path.write_text(json.dumps(value))
+          PY
+          set +e
+          python3 tools/chatgpt_governance_capsule.py verify \
+            --capsule reports/signed-governance/self-check/governance-capsule.json \
+            --trust-store reports/signed-governance/tampered-trust.json \
+            --at-unix 1800000000
+          code=$?
+          set -e
+          test "$code" -eq 2
+
+      - name: Verify expiry and private-key exclusion
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          python3 tools/chatgpt_governance_capsule.py verify \
+            --capsule reports/signed-governance/self-check/governance-capsule.json \
+            --trust-store reports/signed-governance/self-check/governance-trust-store.json \
+            --at-unix 1800000901
+          code=$?
+          set -e
+          test "$code" -eq 2
+          ! grep -R -F -- "BEGIN PRIVATE KEY" reports/signed-governance
+          ! grep -R -F -- "signed governed fixture" \
+            reports/signed-governance/self-check/governance-capsule.json \
+            reports/signed-governance/self-check/governance-trust-store.json
+
+      - name: Hash and upload evidence
+        if: always()
+        shell: bash
+        run: |
+          find reports/signed-governance -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z | xargs -0 sha256sum \
+            > reports/signed-governance/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chatgpt-signed-governance-${{ github.run_id }}
+          path: reports/signed-governance/
+          if-no-files-found: error
+          retention-days: 14
