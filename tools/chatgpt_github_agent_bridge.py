@@ -9,7 +9,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from sdk.liminal_github_bridge import (
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from sdk.liminal_github_bridge import (  # noqa: E402
     GitHubAgentBridge,
     GitHubBridgeError,
     GitHubOperation,
