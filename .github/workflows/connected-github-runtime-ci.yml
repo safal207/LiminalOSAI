@@ -1,0 +1,294 @@
+name: ChatGPT Connected GitHub Runtime
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/connected-github-runtime-ci.yml
+      - Makefile
+      - docs/CHATGPT_CONNECTED_GITHUB_RUNTIME.md
+      - examples/chatgpt_connected_github_runtime/**
+      - sdk/liminal_github_runtime/**
+      - sdk/liminal_github_bridge/**
+      - sdk/liminal_host_adapter/**
+      - sdk/liminal_session_recorder/**
+      - tools/chatgpt_connected_github_runtime.py
+      - tools/chatgpt_live_session_exporter.py
+      - tools/chatgpt_conversation_normalizer.py
+      - tools/chatgpt_liminal_adapter.py
+      - tests/test_chatgpt_connected_github_runtime.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chatgpt-connected-github-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/connected-github-runtime
+          git rev-parse HEAD | tee reports/connected-github-runtime/head-sha.txt
+
+      - name: Run connected runtime contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_chatgpt_connected_github_runtime.py -v \
+            2>&1 | tee reports/connected-github-runtime/unit-tests.log
+
+      - name: Run connected runtime to Liminal decision self-check
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 examples/chatgpt_connected_github_runtime/self_check.py \
+            --output-dir reports/connected-github-runtime/self-check \
+            | tee reports/connected-github-runtime/self-check.stdout.json
+
+          python3 tools/chatgpt_connected_github_runtime.py verify \
+            --runtime-config reports/connected-github-runtime/self-check/connected-runtime-config.json \
+            | tee reports/connected-github-runtime/verify.stdout.json
+
+          python3 tools/chatgpt_live_session_exporter.py \
+            --input reports/connected-github-runtime/self-check/live-session.json \
+            --output-dir reports/connected-github-runtime/exported \
+            | tee reports/connected-github-runtime/exporter.stdout.json
+
+          python3 tools/chatgpt_conversation_normalizer.py \
+            --input reports/connected-github-runtime/exported/chatgpt-conversation-bundle.json \
+            --output-dir reports/connected-github-runtime/normalized \
+            | tee reports/connected-github-runtime/normalizer.stdout.json
+
+          python3 tools/chatgpt_liminal_adapter.py \
+            --input reports/connected-github-runtime/normalized/chatgpt-liminal-input.json \
+            --output-dir reports/connected-github-runtime/advice \
+            | tee reports/connected-github-runtime/adapter.stdout.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path('reports/connected-github-runtime')
+          config = json.loads((root / 'self-check/connected-runtime-config.json').read_text())
+          receipt = json.loads((root / 'self-check/connected-github-receipt.json').read_text())
+          calls = json.loads((root / 'self-check/fixture-invocations.json').read_text())
+          journal = json.loads((root / 'self-check/session-journal.json').read_text())
+          advice = json.loads((root / 'advice/chatgpt-liminal-advice.json').read_text())
+
+          tool_events = [
+              entry['event'] for entry in journal['entries']
+              if entry['event']['type'] == 'tool_event'
+          ]
+          assert config['connector_name'] == 'GitHub'
+          assert len(config['supported_actions']) == 16
+          assert len(config['registry_sha256']) == 64
+          assert config['authority']['arbitrary_tool_dispatch'] is False
+          assert calls == [{
+              'repository_full_name': 'safal207/LiminalOSAI',
+              'branch_name': 'agent/v07-self-check',
+              'base_ref': 'main',
+          }]
+          assert receipt['connector_tool'] == 'create_branch'
+          assert receipt['status'] == 'success'
+          assert len(receipt['raw_response_sha256']) == 64
+          assert len(receipt['normalized_payload_sha256']) == 64
+          assert len(receipt['bridge_receipt_sha256']) == 64
+          assert receipt['recorder_event_id'] == 'github-create-branch-1'
+          assert len(tool_events) == 1
+          assert tool_events[0]['status'] == 'success'
+          assert advice['decision'] == 'ALLOW'
+          assert advice['authority']['execution'] is False
+          PY
+
+      - name: Verify runtime config tampering fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp reports/connected-github-runtime/self-check/connected-runtime-config.json \
+            reports/connected-github-runtime/tampered-runtime.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('reports/connected-github-runtime/tampered-runtime.json')
+          value = json.loads(path.read_text())
+          value['supported_actions'].append('delete_repository')
+          path.write_text(json.dumps(value, indent=2) + '\n')
+          PY
+          set +e
+          python3 tools/chatgpt_connected_github_runtime.py verify \
+            --runtime-config reports/connected-github-runtime/tampered-runtime.json \
+            > reports/connected-github-runtime/tampered.stdout.txt \
+            2> reports/connected-github-runtime/tampered.stderr.txt
+          status=$?
+          set -e
+          test "$status" -eq 2
+
+      - name: Verify unauthorized writes stop before connector
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from sdk.liminal_github_bridge import GitHubAgentBridge, GitHubOperation
+          from sdk.liminal_github_runtime import ConnectedGitHubRuntime, GitHubRuntimeError
+
+          class Invoker:
+              def __init__(self):
+                  self.calls = 0
+              def invoke(self, tool_name, arguments):
+                  self.calls += 1
+                  return {'branch': arguments['branch_name']}
+
+          root = Path('reports/connected-github-runtime/unauthorized')
+          root.mkdir(parents=True, exist_ok=True)
+          GitHubAgentBridge.create(
+              root / 'bridge.json',
+              host_trace_path=root / 'trace.json',
+              recorder_path=root / 'journal.json',
+              session_id='unauthorized',
+              high_stakes=False,
+              requires_current_information=False,
+              allowed_repositories=['safal207/LiminalOSAI'],
+          )
+          runtime = ConnectedGitHubRuntime.create(
+              root / 'runtime.json',
+              bridge_config_path=root / 'bridge.json',
+          )
+          operation = GitHubOperation(
+              call_id='write-without-auth',
+              action='create_branch',
+              arguments={
+                  'repository_full_name': 'safal207/LiminalOSAI',
+                  'branch_name': 'agent/forbidden',
+                  'base_ref': 'main',
+              },
+          )
+          invoker = Invoker()
+          try:
+              runtime.execute(operation, invoker)
+          except GitHubRuntimeError as exc:
+              assert 'requires explicit prior authorization' in str(exc)
+          else:
+              raise AssertionError('unauthorized write reached connector')
+          assert invoker.calls == 0
+          assert runtime.bridge.host.verify(allow_pending=True)['started_calls'] == 0
+          PY
+
+      - name: Verify missing namespace tool stops before host start
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from sdk.liminal_github_bridge import GitHubAgentBridge, GitHubOperation
+          from sdk.liminal_github_runtime import (
+              ConnectedGitHubRuntime,
+              ConnectorNamespaceInvoker,
+              GitHubRuntimeError,
+          )
+
+          root = Path('reports/connected-github-runtime/missing-tool')
+          root.mkdir(parents=True, exist_ok=True)
+          GitHubAgentBridge.create(
+              root / 'bridge.json',
+              host_trace_path=root / 'trace.json',
+              recorder_path=root / 'journal.json',
+              session_id='missing-tool',
+              high_stakes=False,
+              requires_current_information=False,
+              allowed_repositories=['safal207/LiminalOSAI'],
+          )
+          runtime = ConnectedGitHubRuntime.create(
+              root / 'runtime.json',
+              bridge_config_path=root / 'bridge.json',
+          )
+          operation = GitHubOperation(
+              call_id='read-1',
+              action='get_repo',
+              arguments={'repository_full_name': 'safal207/LiminalOSAI'},
+          )
+          try:
+              runtime.execute(operation, ConnectorNamespaceInvoker(object()))
+          except GitHubRuntimeError as exc:
+              assert 'lacks callable tool' in str(exc)
+          else:
+              raise AssertionError('missing namespace method was accepted')
+          assert runtime.bridge.host.verify(allow_pending=True)['started_calls'] == 0
+          PY
+
+      - name: Verify merge false is recorded as failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from sdk.liminal_github_bridge import GitHubAgentBridge, GitHubOperation
+          from sdk.liminal_github_runtime import ConnectedGitHubRuntime
+
+          class Invoker:
+              def invoke(self, tool_name, arguments):
+                  return {'sha': 'b' * 40, 'merged': False, 'message': 'head changed'}
+
+          root = Path('reports/connected-github-runtime/merge-false')
+          root.mkdir(parents=True, exist_ok=True)
+          GitHubAgentBridge.create(
+              root / 'bridge.json',
+              host_trace_path=root / 'trace.json',
+              recorder_path=root / 'journal.json',
+              session_id='merge-false',
+              high_stakes=False,
+              requires_current_information=True,
+              allowed_repositories=['safal207/LiminalOSAI'],
+          )
+          runtime = ConnectedGitHubRuntime.create(
+              root / 'runtime.json',
+              bridge_config_path=root / 'bridge.json',
+          )
+          operation = GitHubOperation(
+              call_id='merge-1',
+              action='merge_pull_request',
+              arguments={
+                  'repository_full_name': 'safal207/LiminalOSAI',
+                  'pr_number': 101,
+                  'expected_head_sha': 'a' * 40,
+              },
+          )
+          runtime.authorize_operation(
+              event_id='auth-1',
+              text='Authorize exactly merge-1',
+              operation=operation,
+          )
+          receipt = runtime.execute(operation, Invoker())
+          assert receipt.status == 'failure'
+          event = runtime.bridge.host.recorder.read()['entries'][-1]['event']
+          assert event['status'] == 'failure'
+          PY
+
+      - name: Hash and upload evidence
+        if: always()
+        shell: bash
+        run: |
+          find reports/connected-github-runtime -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > reports/connected-github-runtime/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chatgpt-connected-github-runtime-${{ github.run_id }}
+          path: reports/connected-github-runtime/
+          if-no-files-found: error
+          retention-days: 14
