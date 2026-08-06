@@ -1,0 +1,253 @@
+name: ChatGPT GitHub Agent Bridge
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/github-agent-bridge-ci.yml
+      - Makefile
+      - docs/CHATGPT_GITHUB_AGENT_BRIDGE.md
+      - examples/chatgpt_github_agent_bridge/**
+      - sdk/liminal_github_bridge/**
+      - sdk/liminal_host_adapter/**
+      - sdk/liminal_session_recorder/**
+      - tools/chatgpt_github_agent_bridge.py
+      - tools/chatgpt_live_session_exporter.py
+      - tools/chatgpt_conversation_normalizer.py
+      - tools/chatgpt_liminal_adapter.py
+      - tests/test_chatgpt_github_agent_bridge.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chatgpt-github-agent-bridge-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/github-bridge
+          git rev-parse HEAD | tee reports/github-bridge/head-sha.txt
+
+      - name: Run GitHub bridge contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_chatgpt_github_agent_bridge.py -v \
+            2>&1 | tee reports/github-bridge/unit-tests.log
+
+      - name: Run GitHub bridge to Liminal decision self-check
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 examples/chatgpt_github_agent_bridge/self_check.py \
+            --output-dir reports/github-bridge/self-check \
+            | tee reports/github-bridge/self-check.stdout.json
+
+          python3 tools/chatgpt_github_agent_bridge.py verify \
+            --config reports/github-bridge/self-check/github-bridge-config.json \
+            | tee reports/github-bridge/verify.stdout.json
+
+          python3 tools/chatgpt_live_session_exporter.py \
+            --input reports/github-bridge/self-check/live-session.json \
+            --output-dir reports/github-bridge/exported \
+            | tee reports/github-bridge/exporter.stdout.json
+
+          python3 tools/chatgpt_conversation_normalizer.py \
+            --input reports/github-bridge/exported/chatgpt-conversation-bundle.json \
+            --output-dir reports/github-bridge/normalized \
+            | tee reports/github-bridge/normalizer.stdout.json
+
+          python3 tools/chatgpt_liminal_adapter.py \
+            --input reports/github-bridge/normalized/chatgpt-liminal-input.json \
+            --output-dir reports/github-bridge/advice \
+            | tee reports/github-bridge/adapter.stdout.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          config = json.loads(
+              Path('reports/github-bridge/self-check/github-bridge-config.json').read_text()
+          )
+          journal = json.loads(
+              Path('reports/github-bridge/self-check/session-journal.json').read_text()
+          )
+          host_trace = json.loads(
+              Path('reports/github-bridge/self-check/host-trace.json').read_text()
+          )
+          receipt = json.loads(
+              Path('reports/github-bridge/self-check/github-execution-receipt.json').read_text()
+          )
+          advice = json.loads(
+              Path('reports/github-bridge/advice/chatgpt-liminal-advice.json').read_text()
+          )
+          tool_events = [
+              entry['event'] for entry in journal['entries']
+              if entry['event']['type'] == 'tool_event'
+          ]
+          starts = [
+              entry['record'] for entry in host_trace['entries']
+              if entry['record']['type'] == 'tool_call_started'
+          ]
+          assert config['allowed_repositories'] == ['safal207/LiminalOSAI']
+          assert config['authority']['github_execution_ownership'] is False
+          assert config['authority']['merge_authority'] is False
+          assert len(tool_events) == 1
+          assert tool_events[0]['id'] == 'github-create-branch-1'
+          assert tool_events[0]['status'] == 'success'
+          assert starts[0]['authorization_event_ids'] == ['auth-1']
+          assert 'request_sha256=' in starts[0]['operation']
+          assert receipt['request_sha256'] in starts[0]['operation']
+          assert receipt['recorder_event_id'] == tool_events[0]['id']
+          assert advice['decision'] == 'ALLOW'
+          assert advice['authority']['execution'] is False
+          PY
+
+      - name: Verify config tampering fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp reports/github-bridge/self-check/github-bridge-config.json \
+            reports/github-bridge/tampered-config.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('reports/github-bridge/tampered-config.json')
+          value = json.loads(path.read_text())
+          value['allowed_repositories'] = ['attacker/repository']
+          path.write_text(json.dumps(value, indent=2) + '\n')
+          PY
+          set +e
+          python3 tools/chatgpt_github_agent_bridge.py verify \
+            --config reports/github-bridge/tampered-config.json \
+            > reports/github-bridge/tampered.stdout.txt \
+            2> reports/github-bridge/tampered.stderr.txt
+          status=$?
+          set -e
+          test "$status" -eq 2
+
+      - name: Verify unauthorized writes stop before executor
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from sdk.liminal_github_bridge import (
+              GitHubAgentBridge,
+              GitHubBridgeError,
+              GitHubExecutorResult,
+              GitHubOperation,
+          )
+
+          root = Path('reports/github-bridge/unauthorized')
+          root.mkdir(parents=True, exist_ok=True)
+          bridge = GitHubAgentBridge.create(
+              root / 'config.json',
+              host_trace_path=root / 'host.json',
+              recorder_path=root / 'journal.json',
+              session_id='unauthorized-github-write',
+              high_stakes=False,
+              requires_current_information=False,
+              allowed_repositories=['safal207/LiminalOSAI'],
+          )
+          operation = GitHubOperation(
+              call_id='branch-without-auth',
+              action='create_branch',
+              arguments={
+                  'repository_full_name': 'safal207/LiminalOSAI',
+                  'branch_name': 'agent/unauthorized',
+                  'base_ref': 'main',
+              },
+          )
+          invoked = False
+          def executor(action, arguments):
+              global invoked
+              invoked = True
+              return GitHubExecutorResult.success(
+                  locator='refs/heads/agent/unauthorized', payload={}
+              )
+          try:
+              bridge.execute(operation, executor)
+          except GitHubBridgeError as exc:
+              assert 'authorization' in str(exc)
+          else:
+              raise AssertionError('unauthorized write reached the executor')
+          assert invoked is False
+          verification = bridge.verify(allow_pending=True)
+          assert verification['host']['started_calls'] == 0
+          (root / 'result.json').write_text(json.dumps(verification, indent=2) + '\n')
+          PY
+
+      - name: Verify protected branch and force update rejection
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from sdk.liminal_github_bridge import GitHubAgentBridge, GitHubBridgeError, GitHubOperation
+
+          bridge = GitHubAgentBridge(
+              Path('reports/github-bridge/self-check/github-bridge-config.json')
+          )
+          blocked = [
+              GitHubOperation(
+                  call_id='direct-main-write',
+                  action='create_file',
+                  arguments={
+                      'repository_full_name': 'safal207/LiminalOSAI',
+                      'path': 'unsafe.txt',
+                      'content': 'x',
+                      'message': 'unsafe',
+                      'branch': 'main',
+                  },
+              ),
+              GitHubOperation(
+                  call_id='force-ref',
+                  action='update_ref',
+                  arguments={
+                      'repository_full_name': 'safal207/LiminalOSAI',
+                      'branch_name': 'agent/x',
+                      'sha': 'a' * 40,
+                      'force': True,
+                  },
+              ),
+          ]
+          for operation in blocked:
+              try:
+                  bridge.validate_operation(operation)
+              except GitHubBridgeError:
+                  pass
+              else:
+                  raise AssertionError(f'operation was not blocked: {operation.call_id}')
+          PY
+
+      - name: Hash and upload evidence
+        if: always()
+        shell: bash
+        run: |
+          find reports/github-bridge -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > reports/github-bridge/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chatgpt-github-agent-bridge-${{ github.run_id }}
+          path: reports/github-bridge/
+          if-no-files-found: error
+          retention-days: 14
