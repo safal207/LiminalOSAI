@@ -1,0 +1,63 @@
+"""Public API for Signed Governance Capsule v1.0."""
+
+from ._capsule import (
+    GovernanceCapsuleSession,
+    issue_capsule,
+    load_capsule,
+    load_trust_store,
+    verify_capsule,
+    verify_capsule_against_engine,
+)
+from ._contracts import (
+    ALGORITHM,
+    AUTHORITY,
+    CAPSULE_SCHEMA,
+    DEFAULT_CLOCK_SKEW_SECONDS,
+    DOMAIN_SEPARATOR,
+    MAX_CAPSULE_TTL_SECONDS,
+    TRUST_STORE_SCHEMA,
+    VERIFICATION_SCHEMA,
+    CapsuleClaims,
+    CapsuleError,
+    GovernanceSubject,
+    GovernanceTrustStore,
+    SignedGovernanceCapsule,
+    TrustedKey,
+)
+from ._crypto import (
+    base64url_decode,
+    base64url_encode,
+    derive_public_key,
+    generate_ed25519_keypair,
+    sign_ed25519,
+    verify_ed25519,
+)
+
+__all__ = [
+    "ALGORITHM",
+    "AUTHORITY",
+    "CAPSULE_SCHEMA",
+    "DEFAULT_CLOCK_SKEW_SECONDS",
+    "DOMAIN_SEPARATOR",
+    "MAX_CAPSULE_TTL_SECONDS",
+    "TRUST_STORE_SCHEMA",
+    "VERIFICATION_SCHEMA",
+    "CapsuleClaims",
+    "CapsuleError",
+    "GovernanceCapsuleSession",
+    "GovernanceSubject",
+    "GovernanceTrustStore",
+    "SignedGovernanceCapsule",
+    "TrustedKey",
+    "base64url_decode",
+    "base64url_encode",
+    "derive_public_key",
+    "generate_ed25519_keypair",
+    "issue_capsule",
+    "load_capsule",
+    "load_trust_store",
+    "sign_ed25519",
+    "verify_capsule",
+    "verify_capsule_against_engine",
+    "verify_ed25519",
+]
