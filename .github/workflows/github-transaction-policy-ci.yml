@@ -59,13 +59,26 @@ jobs:
           print(value['transaction']['journal']['status'])
           PY
           )" = "completed"
-          python3 tools/chatgpt_liminal_adapter.py \
+
+          python3 tools/chatgpt_live_session_exporter.py \
             --input reports/github-policy/self-check/live-session.json \
-            --output reports/github-policy/decision.json
+            --output-dir reports/github-policy/exported \
+            | tee reports/github-policy/exporter.stdout.json
+
+          python3 tools/chatgpt_conversation_normalizer.py \
+            --input reports/github-policy/exported/chatgpt-conversation-bundle.json \
+            --output-dir reports/github-policy/normalized \
+            | tee reports/github-policy/normalizer.stdout.json
+
+          python3 tools/chatgpt_liminal_adapter.py \
+            --input reports/github-policy/normalized/chatgpt-liminal-input.json \
+            --output-dir reports/github-policy/advice \
+            | tee reports/github-policy/adapter.stdout.json
+
           test "$(python3 - <<'PY'
           import json
           from pathlib import Path
-          print(json.loads(Path('reports/github-policy/decision.json').read_text())['decision'])
+          print(json.loads(Path('reports/github-policy/advice/chatgpt-liminal-advice.json').read_text())['decision'])
           PY
           )" = "ALLOW"
 
