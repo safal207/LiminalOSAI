@@ -1,0 +1,197 @@
+name: ChatGPT Host Integration Adapter
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/host-integration-adapter-ci.yml
+      - Makefile
+      - docs/CHATGPT_HOST_INTEGRATION_ADAPTER.md
+      - examples/chatgpt_host_adapter/**
+      - sdk/liminal_host_adapter/**
+      - sdk/liminal_session_recorder/**
+      - tools/chatgpt_host_adapter.py
+      - tools/chatgpt_live_session_exporter.py
+      - tools/chatgpt_conversation_normalizer.py
+      - tools/chatgpt_liminal_adapter.py
+      - tests/test_chatgpt_host_adapter.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chatgpt-host-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/host-adapter
+          git rev-parse HEAD | tee reports/host-adapter/head-sha.txt
+
+      - name: Run host adapter contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_chatgpt_host_adapter.py -v \
+            2>&1 | tee reports/host-adapter/unit-tests.log
+
+      - name: Run host adapter to Liminal decision self-check
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 examples/chatgpt_host_adapter/self_check.py \
+            --output-dir reports/host-adapter/self-check \
+            | tee reports/host-adapter/self-check.stdout.json
+
+          python3 tools/chatgpt_host_adapter.py verify \
+            --trace reports/host-adapter/self-check/host-trace.json \
+            | tee reports/host-adapter/verify.stdout.json
+
+          python3 tools/chatgpt_live_session_exporter.py \
+            --input reports/host-adapter/self-check/live-session.json \
+            --output-dir reports/host-adapter/exported \
+            | tee reports/host-adapter/exporter.stdout.json
+
+          python3 tools/chatgpt_conversation_normalizer.py \
+            --input reports/host-adapter/exported/chatgpt-conversation-bundle.json \
+            --output-dir reports/host-adapter/normalized \
+            | tee reports/host-adapter/normalizer.stdout.json
+
+          python3 tools/chatgpt_liminal_adapter.py \
+            --input reports/host-adapter/normalized/chatgpt-liminal-input.json \
+            --output-dir reports/host-adapter/advice \
+            | tee reports/host-adapter/adapter.stdout.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          trace = json.loads(
+              Path('reports/host-adapter/self-check/host-trace.json').read_text()
+          )
+          journal = json.loads(
+              Path('reports/host-adapter/self-check/session-journal.json').read_text()
+          )
+          advice = json.loads(
+              Path('reports/host-adapter/advice/chatgpt-liminal-advice.json').read_text()
+          )
+          starts = [
+              entry['record'] for entry in trace['entries']
+              if entry['record']['type'] == 'tool_call_started'
+          ]
+          finishes = [
+              entry['record'] for entry in trace['entries']
+              if entry['record']['type'] == 'tool_call_finished'
+          ]
+          tool_events = [
+              entry['event'] for entry in journal['entries']
+              if entry['event']['type'] == 'tool_event'
+          ]
+          assert len(starts) == 1
+          assert len(finishes) == 1
+          assert len(tool_events) == 1
+          assert starts[0]['authorization_event_ids'] == ['authorization-1']
+          assert starts[0]['recorder_head_before'] == journal['entries'][1]['entry_sha256']
+          assert finishes[0]['recorder_head_after'] == journal['entries'][2]['entry_sha256']
+          assert tool_events[0]['status'] == 'success'
+          assert advice['decision'] == 'ALLOW'
+          assert advice['authority']['execution'] is False
+          assert trace['authority']['tool_execution_ownership'] is False
+          assert trace['authority']['tool_result_fabrication'] is False
+          PY
+
+      - name: Verify trace tampering fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp reports/host-adapter/self-check/host-trace.json \
+            reports/host-adapter/tampered-trace.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('reports/host-adapter/tampered-trace.json')
+          trace = json.loads(path.read_text())
+          trace['entries'][0]['record']['operation'] = 'tampered operation'
+          path.write_text(json.dumps(trace, indent=2) + '\n')
+          PY
+          set +e
+          python3 tools/chatgpt_host_adapter.py verify \
+            --trace reports/host-adapter/tampered-trace.json \
+            > reports/host-adapter/tampered.stdout.txt \
+            2> reports/host-adapter/tampered.stderr.txt
+          status=$?
+          set -e
+          test "$status" -eq 2
+
+      - name: Verify unauthorized writes stop before host execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from sdk.liminal_host_adapter import (
+              HostAdapterError,
+              HostIntegrationAdapter,
+              ToolCallSpec,
+          )
+
+          root = Path('reports/host-adapter/unauthorized')
+          root.mkdir(parents=True, exist_ok=True)
+          adapter = HostIntegrationAdapter.create(
+              root / 'trace.json',
+              recorder_path=root / 'journal.json',
+              session_id='unauthorized-write',
+              high_stakes=False,
+              requires_current_information=False,
+          )
+          spec = ToolCallSpec(
+              call_id='write-without-auth',
+              tool='FixtureTool',
+              operation='write forbidden fixture',
+              effect='write',
+              evidence_eligible=True,
+              freshness='stable',
+              reversible=True,
+              recovery_plan='Delete fixture',
+          )
+          try:
+              adapter.start_tool_call(spec)
+          except HostAdapterError as exc:
+              assert 'requires explicit prior authorization' in str(exc)
+          else:
+              raise AssertionError('unauthorized write was allowed to start')
+          verification = adapter.verify(allow_pending=True)
+          assert verification['started_calls'] == 0
+          assert adapter.recorder.read()['entries'] == []
+          (root / 'result.json').write_text(json.dumps(verification, indent=2) + '\n')
+          PY
+
+      - name: Hash and upload evidence
+        if: always()
+        shell: bash
+        run: |
+          find reports/host-adapter -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > reports/host-adapter/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chatgpt-host-integration-${{ github.run_id }}
+          path: reports/host-adapter/
+          if-no-files-found: error
+          retention-days: 14
