@@ -1,0 +1,198 @@
+name: ChatGPT GitHub Transaction Orchestrator
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/github-transaction-orchestrator-ci.yml
+      - Makefile
+      - docs/CHATGPT_GITHUB_TRANSACTION_ORCHESTRATOR.md
+      - examples/chatgpt_github_transaction_orchestrator/**
+      - sdk/liminal_github_transaction/**
+      - sdk/liminal_github_runtime/**
+      - sdk/liminal_github_bridge/**
+      - sdk/liminal_host_adapter/**
+      - sdk/liminal_session_recorder/**
+      - tools/chatgpt_github_transaction_orchestrator.py
+      - tools/chatgpt_live_session_exporter.py
+      - tools/chatgpt_conversation_normalizer.py
+      - tools/chatgpt_liminal_adapter.py
+      - tests/test_chatgpt_github_transaction_orchestrator.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chatgpt-github-transaction-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/github-transaction
+          git rev-parse HEAD | tee reports/github-transaction/head-sha.txt
+
+      - name: Run transaction orchestrator contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest \
+            tests/test_chatgpt_github_transaction_orchestrator.py -v \
+            2>&1 | tee reports/github-transaction/unit-tests.log
+
+      - name: Run transaction to Liminal decision self-check
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 examples/chatgpt_github_transaction_orchestrator/self_check.py \
+            --output-dir reports/github-transaction/self-check \
+            | tee reports/github-transaction/self-check.stdout.json
+
+          python3 tools/chatgpt_github_transaction_orchestrator.py verify \
+            --plan reports/github-transaction/self-check/transaction-plan.json \
+            --journal reports/github-transaction/self-check/transaction-journal.json \
+            | tee reports/github-transaction/verify.stdout.json
+
+          python3 tools/chatgpt_live_session_exporter.py \
+            --input reports/github-transaction/self-check/live-session.json \
+            --output-dir reports/github-transaction/exported \
+            | tee reports/github-transaction/exporter.stdout.json
+
+          python3 tools/chatgpt_conversation_normalizer.py \
+            --input reports/github-transaction/exported/chatgpt-conversation-bundle.json \
+            --output-dir reports/github-transaction/normalized \
+            | tee reports/github-transaction/normalizer.stdout.json
+
+          python3 tools/chatgpt_liminal_adapter.py \
+            --input reports/github-transaction/normalized/chatgpt-liminal-input.json \
+            --output-dir reports/github-transaction/advice \
+            | tee reports/github-transaction/adapter.stdout.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path('reports/github-transaction/self-check')
+          transaction = json.loads(
+              (root / 'transaction-verification.json').read_text()
+          )
+          journal = json.loads((root / 'transaction-journal.json').read_text())
+          calls = json.loads((root / 'connector-calls.json').read_text())
+          recovery = json.loads((root / 'recovery-report.json').read_text())
+          advice = json.loads(
+              Path(
+                  'reports/github-transaction/advice/'
+                  'chatgpt-liminal-advice.json'
+              ).read_text()
+          )
+
+          assert transaction['journal']['status'] == 'completed'
+          assert transaction['step_count'] == 5
+          assert [item['tool_name'] for item in calls] == [
+              'create_branch',
+              'create_file',
+              'create_pull_request',
+              'get_commit_combined_status',
+              'merge_pull_request',
+          ]
+          assert calls[3]['arguments']['commit_sha'] == 'b' * 40
+          assert calls[4]['arguments']['expected_head_sha'] == 'b' * 40
+          assert calls[4]['arguments']['pr_number'] == 108
+          events = [entry['event'] for entry in journal['entries']]
+          assert len([x for x in events if x['type'] == 'step_started']) == 5
+          assert len([x for x in events if x['type'] == 'step_finished']) == 5
+          assert events[-1]['type'] == 'transaction_completed'
+          assert events[-1]['final_checkpoint_sha256'] == \
+              journal['entries'][-2]['entry_sha256']
+          assert recovery['automatic_rollback'] is False
+          assert recovery['automatic_pending_write_replay'] is False
+          assert advice['decision'] == 'ALLOW'
+          assert advice['authority']['execution'] is False
+          assert transaction['authority']['merge_authority'] is False
+          PY
+
+      - name: Verify plan tampering fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp reports/github-transaction/self-check/transaction-plan.json \
+            reports/github-transaction/tampered-plan.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('reports/github-transaction/tampered-plan.json')
+          plan = json.loads(path.read_text())
+          plan['steps'][0]['arguments']['branch_name'] = 'agent/tampered'
+          path.write_text(json.dumps(plan, indent=2) + '\n')
+          PY
+          set +e
+          python3 tools/chatgpt_github_transaction_orchestrator.py verify \
+            --plan reports/github-transaction/tampered-plan.json \
+            --journal reports/github-transaction/self-check/transaction-journal.json \
+            > reports/github-transaction/tampered-plan.stdout.txt \
+            2> reports/github-transaction/tampered-plan.stderr.txt
+          status=$?
+          set -e
+          test "$status" -eq 2
+
+      - name: Verify journal tampering fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp reports/github-transaction/self-check/transaction-journal.json \
+            reports/github-transaction/tampered-journal.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('reports/github-transaction/tampered-journal.json')
+          journal = json.loads(path.read_text())
+          journal['entries'][1]['event']['action'] = 'fetch_file'
+          path.write_text(json.dumps(journal, indent=2) + '\n')
+          PY
+          set +e
+          python3 tools/chatgpt_github_transaction_orchestrator.py verify \
+            --plan reports/github-transaction/self-check/transaction-plan.json \
+            --journal reports/github-transaction/tampered-journal.json \
+            > reports/github-transaction/tampered-journal.stdout.txt \
+            2> reports/github-transaction/tampered-journal.stderr.txt
+          status=$?
+          set -e
+          test "$status" -eq 2
+
+      - name: Verify journal excludes reviewed file content
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -F 'safe fixture' \
+            reports/github-transaction/self-check/transaction-journal.json
+          grep -F 'safe fixture' \
+            reports/github-transaction/self-check/transaction-plan.json \
+            >/dev/null
+
+      - name: Hash and upload evidence
+        if: always()
+        shell: bash
+        run: |
+          find reports/github-transaction -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > reports/github-transaction/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chatgpt-github-transaction-${{ github.run_id }}
+          path: reports/github-transaction/
+          if-no-files-found: error
+          retention-days: 14
