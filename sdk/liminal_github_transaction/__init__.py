@@ -12,8 +12,8 @@ from ._contracts import (
     TransactionStep,
     checkpoint_reference,
 )
+from ._guarded import GitHubTransactionOrchestrator
 from ._journal import TransactionJournal, validate_journal
-from ._orchestrator import GitHubTransactionOrchestrator
 
 __all__ = [
     "AUTHORITY",
