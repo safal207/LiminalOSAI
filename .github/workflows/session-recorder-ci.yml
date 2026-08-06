@@ -1,0 +1,229 @@
+name: ChatGPT Session Recorder SDK
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/session-recorder-ci.yml
+      - Makefile
+      - docs/CHATGPT_SESSION_RECORDER_SDK.md
+      - examples/chatgpt_session_recorder/**
+      - sdk/**
+      - tools/chatgpt_session_recorder.py
+      - tools/chatgpt_live_session_exporter.py
+      - tools/chatgpt_conversation_normalizer.py
+      - tools/chatgpt_liminal_adapter.py
+      - tests/test_chatgpt_session_recorder.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chatgpt-session-recorder-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/session-recorder
+          git rev-parse HEAD | tee reports/session-recorder/head-sha.txt
+
+      - name: Run recorder contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_chatgpt_session_recorder.py -v \
+            2>&1 | tee reports/session-recorder/unit-tests.log
+
+      - name: Run recorder to adapter self-check
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 examples/chatgpt_session_recorder/self_check.py \
+            --output-dir reports/session-recorder/self-check \
+            | tee reports/session-recorder/self-check.stdout.json
+
+          python3 tools/chatgpt_session_recorder.py verify \
+            --journal reports/session-recorder/self-check/session-journal.json \
+            | tee reports/session-recorder/verify.stdout.json
+
+          python3 tools/chatgpt_live_session_exporter.py \
+            --input reports/session-recorder/self-check/chatgpt-live-session.json \
+            --output-dir reports/session-recorder/exported \
+            | tee reports/session-recorder/exporter.stdout.json
+
+          python3 tools/chatgpt_conversation_normalizer.py \
+            --input reports/session-recorder/exported/chatgpt-conversation-bundle.json \
+            --output-dir reports/session-recorder/normalized \
+            | tee reports/session-recorder/normalizer.stdout.json
+
+          python3 tools/chatgpt_liminal_adapter.py \
+            --input reports/session-recorder/normalized/chatgpt-liminal-input.json \
+            --output-dir reports/session-recorder/advice \
+            | tee reports/session-recorder/adapter.stdout.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          journal = json.loads(Path('reports/session-recorder/self-check/session-journal.json').read_text())
+          live = json.loads(Path('reports/session-recorder/self-check/chatgpt-live-session.json').read_text())
+          advice = json.loads(Path('reports/session-recorder/advice/chatgpt-liminal-advice.json').read_text())
+
+          assert journal['schema_version'] == 'chatgpt-session-journal-v0.4'
+          assert journal['session']['sealed'] is True
+          assert journal['session']['capture_complete'] is True
+          assert len(journal['head_sha256']) == 64
+          assert len(journal['seal_sha256']) == 64
+          assert journal['authority']['execution'] is False
+          assert journal['authority']['hidden_message_access'] is False
+          assert live['schema_version'] == 'chatgpt-live-session-v0.3'
+          assert advice['decision'] == 'ALLOW'
+          assert advice['authority']['merge'] is False
+          PY
+
+      - name: Verify tampering fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp reports/session-recorder/self-check/session-journal.json \
+            reports/session-recorder/tampered-journal.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path('reports/session-recorder/tampered-journal.json')
+          journal = json.loads(path.read_text())
+          journal['entries'][0]['event']['text'] = 'tampered'
+          path.write_text(json.dumps(journal, indent=2) + '\n')
+          PY
+          set +e
+          python3 tools/chatgpt_session_recorder.py verify \
+            --journal reports/session-recorder/tampered-journal.json \
+            > reports/session-recorder/tamper.stdout.txt \
+            2> reports/session-recorder/tamper.stderr.txt
+          status=$?
+          set -e
+          test "$status" -eq 2
+
+      - name: Verify unauthorized performed write reaches REVISE
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from sdk.liminal_session_recorder import SessionRecorder
+
+          root = Path('reports/session-recorder/unauthorized')
+          root.mkdir(parents=True, exist_ok=True)
+          recorder = SessionRecorder.create(
+              root / 'journal.json',
+              session_id='unauthorized-write',
+              high_stakes=False,
+              requires_current_information=True,
+          )
+          recorder.record_user_message(event_id='user-1', text='Report what happened')
+          recorder.record_tool_event(
+              event_id='write-1',
+              tool='GitHub',
+              operation='merge pull request',
+              status='success',
+              effect='write',
+              evidence_eligible=True,
+              freshness='current',
+              locator='pull/unknown#merged',
+              reversible=False,
+              recovery_plan='Revert the merge commit',
+          )
+          recorder.record_assistant_draft(
+              event_id='draft-1',
+              response='The write completed.',
+              no_signal=False,
+              intent_alignment=0.99,
+          )
+          recorder.record_claim(
+              event_id='claim-1',
+              draft_event_id='draft-1',
+              text='The write completed.',
+              kind='fact',
+              confidence=0.99,
+              requires_current_information=True,
+              evidence_event_ids=['write-1'],
+          )
+          recorder.seal(request_event_id='user-1', draft_event_id='draft-1')
+          recorder.export_live_session(root / 'live.json')
+          PY
+
+          python3 tools/chatgpt_live_session_exporter.py \
+            --input reports/session-recorder/unauthorized/live.json \
+            --output-dir reports/session-recorder/unauthorized/exported \
+            > reports/session-recorder/unauthorized/exporter.stdout.json
+          python3 tools/chatgpt_conversation_normalizer.py \
+            --input reports/session-recorder/unauthorized/exported/chatgpt-conversation-bundle.json \
+            --output-dir reports/session-recorder/unauthorized/normalized \
+            > reports/session-recorder/unauthorized/normalizer.stdout.json
+          python3 tools/chatgpt_liminal_adapter.py \
+            --input reports/session-recorder/unauthorized/normalized/chatgpt-liminal-input.json \
+            --output-dir reports/session-recorder/unauthorized/advice \
+            > reports/session-recorder/unauthorized/adapter.stdout.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          advice = json.loads(
+              Path('reports/session-recorder/unauthorized/advice/chatgpt-liminal-advice.json').read_text()
+          )
+          assert advice['decision'] == 'REVISE'
+          assert any('performed_without_user_authorization' in reason for reason in advice['reasons'])
+          PY
+
+      - name: Verify unsupported fields fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > reports/session-recorder/invalid-event.json <<'JSON'
+          {
+            "id": "user-invalid",
+            "type": "user_message",
+            "text": "hello",
+            "raw_secret": "must not be accepted"
+          }
+          JSON
+          set +e
+          python3 tools/chatgpt_session_recorder.py append \
+            --journal reports/session-recorder/self-check/session-journal.json \
+            --event reports/session-recorder/invalid-event.json \
+            > reports/session-recorder/invalid.stdout.txt \
+            2> reports/session-recorder/invalid.stderr.txt
+          status=$?
+          set -e
+          test "$status" -eq 2
+
+      - name: Hash and upload evidence
+        if: always()
+        shell: bash
+        run: |
+          find reports/session-recorder -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > reports/session-recorder/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chatgpt-session-recorder-${{ github.run_id }}
+          path: reports/session-recorder/
+          if-no-files-found: error
+          retention-days: 14
