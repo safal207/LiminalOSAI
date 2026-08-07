@@ -19,6 +19,7 @@ from ._core import (
     enum,
     exact_keys,
     mapping,
+    optional_sha256,
     optional_string,
     string,
 )
@@ -91,22 +92,21 @@ def validate_start_record(raw: dict[str, Any], sequence: int) -> dict[str, Any]:
 
 
 def validate_finish_record(raw: dict[str, Any], sequence: int) -> dict[str, Any]:
-    exact_keys(
-        raw,
-        {
-            "type",
-            "sequence",
-            "call_id",
-            "status",
-            "locator",
-            "recorder_event_id",
-            "recorder_head_after",
-        },
-        "tool_call_finished",
-    )
+    expected = {
+        "type",
+        "sequence",
+        "call_id",
+        "status",
+        "locator",
+        "recorder_event_id",
+        "recorder_head_after",
+    }
+    if "payload_sha256" in raw:
+        expected.add("payload_sha256")
+    exact_keys(raw, expected, "tool_call_finished")
     if raw.get("sequence") != sequence:
         raise HostAdapterError(f"tool_call_finished.sequence must be {sequence}")
-    return {
+    record = {
         "type": "tool_call_finished",
         "sequence": sequence,
         "call_id": string(raw.get("call_id"), "call_id"),
@@ -119,6 +119,11 @@ def validate_finish_record(raw: dict[str, Any], sequence: int) -> dict[str, Any]
             raw.get("recorder_head_after"), "recorder_head_after"
         ),
     }
+    if "payload_sha256" in raw:
+        record["payload_sha256"] = optional_sha256(
+            raw.get("payload_sha256"), "payload_sha256"
+        )
+    return record
 
 
 def validate_trace(raw_value: Any) -> dict[str, Any]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ ZERO_HASH = "0" * 64
 TOOL_EFFECTS = {"read", "write", "none"}
 TOOL_STATUSES = {"success", "failure", "cancelled"}
 FRESHNESS_VALUES = {"current", "stable", "unknown"}
+SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 AUTHORITY = {
     "mode": "host_integration_only",
@@ -68,6 +70,15 @@ def optional_string(value: Any, name: str) -> str | None:
     if value is None:
         return None
     return string(value, name)
+
+
+def optional_sha256(value: Any, name: str) -> str | None:
+    if value is None:
+        return None
+    digest = string(value, name)
+    if not SHA256_RE.fullmatch(digest):
+        raise HostAdapterError(f"{name} must be a 64-character SHA-256 digest")
+    return digest.lower()
 
 
 def boolean(value: Any, name: str) -> bool:
