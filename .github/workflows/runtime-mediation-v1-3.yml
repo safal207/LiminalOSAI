@@ -1,0 +1,48 @@
+name: Runtime Mediation v1.3
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_runtime_mediation/**'
+      - 'tests/test_runtime_mediation_v1_3.py'
+      - 'docs/RUNTIME_MEDIATION.md'
+      - '.github/workflows/runtime-mediation-v1-3.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run runtime mediation tests
+        run: python3 -m unittest tests/test_runtime_mediation_v1_3.py -v
+      - name: Re-run capability broker
+        run: python3 -m unittest tests/test_capability_broker_phase1.py -v
+      - name: Re-run egress gateway
+        run: python3 -m unittest tests/test_egress_gateway_phase2.py -v
+      - name: Re-run causal escalation
+        run: python3 -m unittest tests/test_causal_escalation_phase3.py -v
+      - name: Re-run containment
+        run: python3 -m unittest tests/test_containment_phase4.py -v
+      - name: Build production kernel fixture
+        run: make
+      - name: Run full repository regression
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: Verify authority boundary
+        run: |
+          python3 - <<'PY'
+          from sdk.liminal_runtime_mediation import AUTHORITY
+          assert AUTHORITY['host_callback_dispatch'] is True
+          assert AUTHORITY['network_via_egress_gateway'] is True
+          assert AUTHORITY['direct_subprocess_execution'] is False
+          assert AUTHORITY['direct_socket_creation'] is False
+          assert AUTHORITY['direct_filesystem_mutation'] is False
+          assert AUTHORITY['direct_package_installation'] is False
+          assert AUTHORITY['credential_material_export'] is False
+          assert AUTHORITY['os_kernel_enforcement'] is False
+          PY
+      - name: Verify no direct OS authority imports
+        run: |
+          ! grep -R -nE '(^|[[:space:]])(import|from)[[:space:]]+(subprocess|socket|os)([[:space:].]|$)' sdk/liminal_runtime_mediation
