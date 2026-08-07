@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import tempfile
 import threading
 import unittest
@@ -106,6 +107,16 @@ class FileMutationBrokerTests(unittest.TestCase):
         verify_execution_receipt(receipt)
         with open(self.target, "rb") as fh:
             self.assertEqual(fh.read(), b"after")
+
+    def test_privileged_mode_bits_are_not_preserved(self):
+        os.chmod(self.target, 0o4755)
+        _, broker, adapter = self._stack()
+        auth = broker.authorize(self._request())
+        receipt = adapter.replace(lease_id=auth["lease_id"], content=b"after")
+        self.assertEqual(receipt["outcome"], "SUCCEEDED")
+        observed_mode = stat.S_IMODE(os.stat(self.target).st_mode)
+        self.assertEqual(observed_mode & 0o7000, 0)
+        self.assertEqual(observed_mode & 0o0777, 0o755)
 
     def test_path_traversal_and_separator_ambiguity_rejected(self):
         for path in ("../escape", "docs/../file.txt", "/abs/file", "docs\\file.txt", "docs//file.txt", "./docs/file.txt"):
