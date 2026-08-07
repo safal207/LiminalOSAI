@@ -24,7 +24,7 @@ model / agent intent
 → second compare-before
 → atomic os.replace
 → directory fsync
-→ post-write digest verification
+→ post-write digest + mode verification
 → digest-only execution receipt
 ```
 
@@ -39,15 +39,17 @@ Supported:
 - one-time, short-lived lease;
 - containment/revoke/expiry re-check before trusted adapter access;
 - Linux/POSIX no-follow directory descriptor traversal;
-- same-directory atomic replacement.
+- same-directory atomic replacement;
+- trusted internal temporary-file creation solely as the atomic-replace implementation detail.
 
 Not supported:
 
-- create;
-- delete;
+- creating a new **target** file;
+- deleting a target file;
 - arbitrary rename/move;
 - directory mutation;
 - following symlinks;
+- preserving setuid, setgid, or sticky privilege bits on the replacement inode;
 - wildcard path authority;
 - network/process/credential authority.
 
@@ -78,11 +80,15 @@ The adapter:
 3. walks every parent with `O_DIRECTORY | O_NOFOLLOW` via `dir_fd`;
 4. opens the target with `O_NOFOLLOW` and requires a regular file;
 5. compares the target digest to `expected_before_sha256`;
-6. writes a same-directory exclusive temporary file;
-7. preserves the prior permission mode, fsyncs the temporary file;
+6. creates and writes a same-directory exclusive internal temporary file;
+7. preserves ordinary `rwx` permission bits only, stripping setuid/setgid/sticky bits, then fsyncs the temporary file;
 8. re-checks the target digest immediately before replacement;
 9. calls `os.replace` with source/destination dirfds;
-10. fsyncs the parent directory and verifies the final digest.
+10. fsyncs the parent directory and verifies the final digest and absence of privileged mode bits.
+
+The trusted adapter authority metadata therefore distinguishes internal temporary
+creation from target-file creation: the former is required by the implementation,
+while the latter remains forbidden by this MVP.
 
 Raw file bytes and raw host paths do not appear in governance receipts.
 
@@ -105,7 +111,7 @@ inside the host/kernel trust boundary.
 - content hash/length mismatch → lease consumed, filesystem unchanged;
 - stale before digest → lease consumed, target unchanged;
 - symlink/non-regular target → lease consumed, target unchanged;
-- post-write verification failure → FAILED digest-only evidence; operator should
+- post-write digest or privileged-mode verification failure → FAILED digest-only evidence; operator should
   treat this as an integrity incident because the atomic replacement already
   occurred.
 
