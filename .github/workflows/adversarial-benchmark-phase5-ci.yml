@@ -1,0 +1,52 @@
+name: Adversarial Benchmark Phase 5
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_adversarial_benchmark/**'
+      - 'tests/test_adversarial_benchmark_phase5.py'
+      - 'docs/ADVERSARIAL_BENCHMARK_PHASE5.md'
+      - '.github/workflows/adversarial-benchmark-phase5-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record exact head
+        run: echo "${GITHUB_SHA}"
+      - name: Run Phase 5 benchmark tests
+        run: python3 -m unittest tests/test_adversarial_benchmark_phase5.py -v
+      - name: Re-run Phase 3 detector tests
+        run: python3 -m unittest tests/test_causal_escalation_phase3.py -v
+      - name: Re-run Phase 4 containment tests
+        run: python3 -m unittest tests/test_containment_phase4.py -v
+      - name: Run full repository regression
+        run: make test
+      - name: Verify benchmark acceptance metrics
+        run: |
+          python3 - <<'PY'
+          from sdk.liminal_adversarial_benchmark import run_benchmark
+          r = run_benchmark()
+          m = r['metrics']
+          assert m['pass_rate'] == 1.0
+          assert m['replay_integrity_rate'] == 1.0
+          assert m['evidence_completeness_rate'] == 1.0
+          assert m['containment_success_rate'] == 1.0
+          assert m['benign_false_contain_rate'] == 0.0
+          print(r['report_sha256'])
+          PY
+      - name: Verify non-weaponized authority boundary
+        run: |
+          python3 - <<'PY'
+          from sdk.liminal_adversarial_benchmark import AUTHORITY
+          assert AUTHORITY['live_exploitation'] is False
+          assert AUTHORITY['external_network'] is False
+          assert AUTHORITY['credential_access'] is False
+          assert AUTHORITY['repository_mutation'] is False
+          assert AUTHORITY['process_escape'] is False
+          assert AUTHORITY['automatic_release'] is False
+          PY
