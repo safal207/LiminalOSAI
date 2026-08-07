@@ -1,0 +1,110 @@
+name: Post-Sandbox Phase 0 Contracts
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/post-sandbox-phase0-ci.yml
+      - docs/POST_SANDBOX_PHASE0_THREAT_MODEL.md
+      - sdk/liminal_post_sandbox_contracts/**
+      - tests/test_post_sandbox_phase0_contracts.py
+      - Makefile
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: post-sandbox-phase0-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/post-sandbox-phase0
+          git rev-parse HEAD | tee reports/post-sandbox-phase0/head-sha.txt
+
+      - name: Run Phase 0 contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_post_sandbox_phase0_contracts.py -v \
+            2>&1 | tee reports/post-sandbox-phase0/contract-tests.log
+
+      - name: Run full repository regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          make test 2>&1 | tee reports/post-sandbox-phase0/full-stack-tests.log
+          make test-repo 2>&1 | tee reports/post-sandbox-phase0/repo-hygiene.log
+
+      - name: Verify Phase 0 authority remains non-executing
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee reports/post-sandbox-phase0/authority.json
+          import json
+          from sdk.liminal_post_sandbox_contracts import AUTHORITY, default_evidence_requirements
+          assert AUTHORITY['capability_grant'] is False
+          assert AUTHORITY['capability_use'] is False
+          assert AUTHORITY['execution'] is False
+          assert AUTHORITY['network_mediation'] is False
+          assert AUTHORITY['process_control'] is False
+          assert AUTHORITY['containment_execution'] is False
+          assert AUTHORITY['human_release'] is False
+          requirements = default_evidence_requirements()
+          assert requirements
+          assert all(item.fail_closed_on_missing for item in requirements)
+          print(json.dumps({'authority': AUTHORITY, 'evidence_contract_count': len(requirements)}, indent=2, sort_keys=True))
+          PY
+
+      - name: Verify threat model names every Phase 0 deliverable
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'sandbox escape / escalation threat model' docs/POST_SANDBOX_PHASE0_THREAT_MODEL.md
+          grep -q 'capability schema' docs/POST_SANDBOX_PHASE0_THREAT_MODEL.md
+          grep -q 'containment lifecycle' docs/POST_SANDBOX_PHASE0_THREAT_MODEL.md
+          grep -q 'causal-event schema' docs/POST_SANDBOX_PHASE0_THREAT_MODEL.md
+          grep -q 'runtime evidence requirements' docs/POST_SANDBOX_PHASE0_THREAT_MODEL.md
+          grep -q 'trust boundaries / non-goals' docs/POST_SANDBOX_PHASE0_THREAT_MODEL.md
+
+      - name: Verify no secret-shaped material was added
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -R --binary-files=without-match -n 'BEGIN PRIVATE KEY' \
+            sdk/liminal_post_sandbox_contracts tests/test_post_sandbox_phase0_contracts.py \
+            docs/POST_SANDBOX_PHASE0_THREAT_MODEL.md
+          ! grep -R --binary-files=without-match -nE '(Bearer [A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,})' \
+            sdk/liminal_post_sandbox_contracts tests/test_post_sandbox_phase0_contracts.py \
+            docs/POST_SANDBOX_PHASE0_THREAT_MODEL.md
+
+      - name: Hash evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          find reports/post-sandbox-phase0 -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > reports/post-sandbox-phase0/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: post-sandbox-phase0-${{ github.sha }}
+          path: reports/post-sandbox-phase0
+          if-no-files-found: error
