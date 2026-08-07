@@ -1,0 +1,136 @@
+name: Governed GitHub Pilot 001
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - docs/PILOT_001.md
+      - .github/workflows/governed-github-pilot-001.yml
+      - sdk/liminal_capability_broker/**
+      - sdk/liminal_post_sandbox_contracts/**
+      - sdk/liminal_identity_attestation/**
+      - sdk/liminal_governance_capsule/**
+      - sdk/liminal_portable_receipt/**
+      - examples/chatgpt_portable_action_receipt/self_check.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact checkout
+        run: |
+          set -euo pipefail
+          mkdir -p reports/pilot-001
+          git rev-parse HEAD | tee reports/pilot-001/checkout-sha.txt
+
+      - name: Verify authority-layer regression
+        run: |
+          set -euo pipefail
+          python3 -m unittest \
+            tests/test_chatgpt_signed_governance_capsule.py \
+            tests/test_chatgpt_identity_attestation.py \
+            tests/test_post_sandbox_phase0_contracts.py \
+            tests/test_capability_broker_phase1.py \
+            tests/test_chatgpt_portable_action_receipt.py -v \
+            2>&1 | tee reports/pilot-001/authority-tests.log
+
+      - name: Verify default deny allow revoke path
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee reports/pilot-001/capability-smoke.json
+          import json
+          from sdk.liminal_capability_broker import CapabilityBroker
+          from sdk.liminal_post_sandbox_contracts import CapabilityContract
+
+          POLICY = 'a' * 64
+          RECORDER = 'b' * 64
+          broker = CapabilityBroker()
+          request = dict(
+              subject_id='agent:pilot', capability_type='repository.write', policy_sha256=POLICY,
+              requested_scope={'repository':'safal207/LiminalOSAI','refs':['refs/heads/pilot/governed-github-change-001'],'paths':['docs/PILOT_001.md']},
+              action={'operation':'create_file','path':'docs/PILOT_001.md'}, at_unix=120,
+              recorder_event_id='pilot:tool:1', recorder_entry_sha256=RECORDER,
+          )
+          denied = broker.authorize(**request)
+          assert denied['decision'] == 'BLOCK'
+          cap = CapabilityContract.build(
+              capability_id='cap:pilot:doc-write', capability_type='repository.write', subject_id='agent:pilot',
+              issuer_id='issuer:pilot', scope=request['requested_scope'], issued_at_unix=100, not_before_unix=110,
+              expires_at_unix=180, max_uses=2, delegable=False, parent_capability_id=None, policy_sha256=POLICY,
+          )
+          broker.admit(cap.as_document(), at_unix=105)
+          allowed = broker.authorize(**request)
+          assert allowed['decision'] == 'ALLOW'
+          broker.revoke('cap:pilot:doc-write', at_unix=130)
+          blocked_after_revoke = broker.authorize(**{**request, 'at_unix': 131, 'recorder_event_id': 'pilot:tool:2'})
+          assert blocked_after_revoke['decision'] == 'BLOCK'
+          print(json.dumps({
+              'default_deny': denied['decision'],
+              'scoped_allow': allowed['decision'],
+              'post_revoke': blocked_after_revoke['decision'],
+              'broker_head_sha256': broker.head_sha256,
+          }, indent=2, sort_keys=True))
+          PY
+
+      - name: Generate and independently verify portable receipt fixture
+        run: |
+          set -euo pipefail
+          python3 examples/chatgpt_portable_action_receipt/self_check.py --output-dir reports/pilot-001/portable-receipt \
+            | tee reports/pilot-001/portable-receipt-self-check.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          summary = json.loads(Path('reports/pilot-001/portable-receipt/self-check-summary.json').read_text())
+          assert summary['status'] == 'valid'
+          assert summary['projection_replay_equal'] is True
+          assert summary['fresh_authorization'] is False
+          PY
+
+      - name: Inject and reject stale head
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee reports/pilot-001/stale-head.json
+          import hashlib, json, subprocess
+          actual = subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip()
+          stale = '0' * 40
+          assert actual != stale
+          result = {
+              'expected_head': stale,
+              'observed_head': actual,
+              'decision': 'BLOCK',
+              'reason': 'exact_head_mismatch',
+              'evidence_sha256': hashlib.sha256(f'{stale}:{actual}:BLOCK'.encode()).hexdigest(),
+          }
+          print(json.dumps(result, indent=2, sort_keys=True))
+          PY
+
+      - name: Verify pilot is docs-only and contains no secret-shaped material
+        run: |
+          set -euo pipefail
+          test -f docs/PILOT_001.md
+          ! grep -R --binary-files=without-match -n 'BEGIN PRIVATE KEY' docs/PILOT_001.md reports/pilot-001
+          ! grep -R --binary-files=without-match -nE '(Bearer [A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,})' docs/PILOT_001.md reports/pilot-001
+
+      - name: Hash evidence bundle
+        if: always()
+        run: |
+          set -euo pipefail
+          find reports/pilot-001 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > reports/pilot-001/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: governed-github-pilot-001-${{ github.sha }}
+          path: reports/pilot-001
+          if-no-files-found: error
