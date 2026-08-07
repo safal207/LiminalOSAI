@@ -30,7 +30,11 @@ _AUTHORITY_ITEMS = (
     ("internal_temp_cleanup", True),
     ("arbitrary_rename", False),
     ("symlink_follow", False),
+    ("ordinary_mode_bits_preserved", True),
     ("privileged_mode_bits_preserved", False),
+    ("uid_gid_preserved", True),
+    ("acl_preserved", False),
+    ("extended_attributes_preserved", False),
     ("network_authority", False),
     ("process_authority", False),
     ("secret_material_access", False),
@@ -158,15 +162,19 @@ class AtomicFileReplacer:
         components = relative_path.split("/")
         if not components or any(part in {"", ".", ".."} for part in components):
             raise AtomicFileReplaceError("invalid_relative_path")
+        try:
+            nofollow = os.O_NOFOLLOW
+            directory = os.O_DIRECTORY
+        except AttributeError as exc:  # pragma: no cover - non-POSIX host
+            raise AtomicFileReplaceError("required_posix_open_flags_unavailable") from exc
 
-        nofollow = getattr(os, "O_NOFOLLOW", 0)
-        root_fd = os.open(host_root, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+        root_fd = os.open(host_root, os.O_RDONLY | directory | nofollow)
         opened: list[int] = [root_fd]
         parent_fd = root_fd
         temp_name: str | None = None
         try:
             for component in components[:-1]:
-                next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=parent_fd)
+                next_fd = os.open(component, os.O_RDONLY | directory | nofollow, dir_fd=parent_fd)
                 opened.append(next_fd)
                 parent_fd = next_fd
 
@@ -177,9 +185,9 @@ class AtomicFileReplacer:
                 if not stat.S_ISREG(target_stat.st_mode):
                     raise AtomicFileReplaceError("target_not_regular_file")
                 first_before = _read_digest(target_fd)
-                # Preserve ordinary rwx permission bits only. A replacement must
-                # never inherit setuid/setgid/sticky privilege bits from the old inode.
                 replacement_mode = stat.S_IMODE(target_stat.st_mode) & 0o0777
+                original_uid = target_stat.st_uid
+                original_gid = target_stat.st_gid
             finally:
                 os.close(target_fd)
             if first_before != expected_before_sha256:
@@ -199,20 +207,23 @@ class AtomicFileReplacer:
                     if written <= 0:
                         raise AtomicFileReplaceError("short_write")
                     offset += written
+                # A new inode inherits the adapter's ownership. Preserve the
+                # target uid/gid fail-closed before replacement, then restore
+                # ordinary rwx bits only (never setuid/setgid/sticky).
+                os.fchown(temp_fd, original_uid, original_gid)
                 os.fchmod(temp_fd, replacement_mode)
                 os.fsync(temp_fd)
             finally:
                 os.close(temp_fd)
 
-            # Re-check the named target immediately before replacement. This
-            # catches ordinary stale-write races while retaining a no-follow
-            # descriptor path. The host/kernel remains part of the trust base.
             check_fd = os.open(leaf, os.O_RDONLY | nofollow, dir_fd=parent_fd)
             try:
                 check_stat = os.fstat(check_fd)
                 if not stat.S_ISREG(check_stat.st_mode):
                     raise AtomicFileReplaceError("target_changed_type")
                 second_before = _read_digest(check_fd)
+                if check_stat.st_uid != original_uid or check_stat.st_gid != original_gid:
+                    raise AtomicFileReplaceError("target_ownership_changed")
             finally:
                 os.close(check_fd)
             if second_before != expected_before_sha256:
@@ -229,12 +240,16 @@ class AtomicFileReplacer:
                     raise AtomicFileReplaceError("post_replace_not_regular")
                 observed_after = _read_digest(verify_fd)
                 observed_mode = stat.S_IMODE(verify_stat.st_mode)
+                observed_uid = verify_stat.st_uid
+                observed_gid = verify_stat.st_gid
             finally:
                 os.close(verify_fd)
             if observed_after != desired_content_sha256:
                 raise AtomicFileReplaceError("post_replace_digest_mismatch")
             if observed_mode & 0o7000:
                 raise AtomicFileReplaceError("privileged_mode_bits_present")
+            if observed_uid != original_uid or observed_gid != original_gid:
+                raise AtomicFileReplaceError("post_replace_ownership_mismatch")
         finally:
             if temp_name is not None:
                 try:
