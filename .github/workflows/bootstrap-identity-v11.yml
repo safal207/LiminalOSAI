@@ -33,6 +33,9 @@ jobs:
           base64 -d /tmp/identity-v11.tar.xz.b64 > /tmp/identity-v11.tar.xz
           tar -xJf /tmp/identity-v11.tar.xz
 
+          # The GitHub Actions token cannot create a new workflow file. The
+          # connector adds this reviewed file after source materialization.
+          rm .github/workflows/identity-attestation-ci.yml
           rm -rf .bootstrap/identity-v11
           rm .github/workflows/bootstrap-identity-v11.yml
 
@@ -40,5 +43,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add --all
           git diff --cached --check
-          git commit -m "feat: add IdP and KMS Attestation Bridge v1.1"
+          git commit -m "feat: add IdP and KMS Attestation Bridge v1.1 sources"
           git push origin "HEAD:${GITHUB_REF_NAME}"
