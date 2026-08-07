@@ -1,0 +1,55 @@
+name: Containment Phase 4
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_containment/**'
+      - 'tests/test_containment_phase4.py'
+      - '.github/workflows/containment-phase4-ci.yml'
+      - 'sdk/liminal_capability_broker/**'
+      - 'sdk/liminal_causal_escalation/**'
+      - 'sdk/liminal_post_sandbox_contracts/**'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record exact head
+        run: echo "$GITHUB_SHA"
+      - name: Run Phase 4 tests
+        run: python3 -m unittest tests/test_containment_phase4.py -v
+      - name: Re-run Phase 3 detector tests
+        run: python3 -m unittest tests/test_causal_escalation_phase3.py -v
+      - name: Re-run Phase 1 broker tests
+        run: python3 -m unittest tests/test_capability_broker_phase1.py -v
+      - name: Verify authority boundary
+        run: |
+          python3 - <<'PY'
+          from sdk.liminal_containment import AUTHORITY
+          assert AUTHORITY['human_release_required'] is True
+          assert AUTHORITY['automatic_release'] is False
+          assert AUTHORITY['os_process_control'] is False
+          assert AUTHORITY['shell_execution'] is False
+          PY
+      - name: Verify fail-closed smoke path
+        run: |
+          python3 - <<'PY'
+          from sdk.liminal_capability_broker import CapabilityBroker
+          from sdk.liminal_containment import ContainmentCoordinator, ContainmentBlocked
+          c=ContainmentCoordinator(broker=CapabilityBroker(), freeze_runtime=lambda:None, close_egress=lambda:None, seal_trace=lambda:'a'*64, snapshot_forensics=lambda:{'trace_head_sha256':'b'*64,'broker_head_sha256':'0'*64,'event_count':0,'capability_count':0,'reason_codes':['test']})
+          r=c.contain({'decision':'CONTAIN','receipt_sha256':'c'*64}, incident_id='incident:ci', at_unix=1)
+          assert r['final_state']=='REVIEW'
+          try:
+              c.release(human_release_id='', approved=True, at_unix=2)
+          except ContainmentBlocked:
+              pass
+          else:
+              raise AssertionError('release without human id must block')
+          PY
+      - name: Secret-shaped material scan
+        run: |
+          ! grep -RniE '(BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|Bearer [A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,})' sdk/liminal_containment tests/test_containment_phase4.py
