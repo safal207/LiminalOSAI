@@ -1,0 +1,127 @@
+name: Capability Broker Phase 1
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/capability-broker-phase1-ci.yml
+      - docs/CAPABILITY_BROKER_PHASE1.md
+      - sdk/liminal_capability_broker/**
+      - sdk/liminal_post_sandbox_contracts/**
+      - tests/test_capability_broker_phase1.py
+      - tests/test_post_sandbox_phase0_contracts.py
+      - Makefile
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: capability-broker-phase1-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/capability-broker-phase1
+          git rev-parse HEAD | tee reports/capability-broker-phase1/head-sha.txt
+
+      - name: Run Phase 1 adversarial tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_capability_broker_phase1.py -v \
+            2>&1 | tee reports/capability-broker-phase1/broker-tests.log
+
+      - name: Re-run Phase 0 contract suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_post_sandbox_phase0_contracts.py -v \
+            2>&1 | tee reports/capability-broker-phase1/phase0-tests.log
+
+      - name: Run full repository regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          make test 2>&1 | tee reports/capability-broker-phase1/full-stack-tests.log
+          make test-repo 2>&1 | tee reports/capability-broker-phase1/repo-hygiene.log
+
+      - name: Verify broker authority boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee reports/capability-broker-phase1/authority.json
+          import json
+          from sdk.liminal_capability_broker import BROKER_AUTHORITY
+          assert BROKER_AUTHORITY['capability_grant'] is True
+          assert BROKER_AUTHORITY['capability_use_decision'] is True
+          assert BROKER_AUTHORITY['execution'] is False
+          assert BROKER_AUTHORITY['network_mediation'] is False
+          assert BROKER_AUTHORITY['credential_material_access'] is False
+          assert BROKER_AUTHORITY['process_control'] is False
+          assert BROKER_AUTHORITY['containment_execution'] is False
+          assert BROKER_AUTHORITY['automatic_github_write_authorization'] is False
+          assert BROKER_AUTHORITY['merge'] is False
+          assert BROKER_AUTHORITY['deployment'] is False
+          print(json.dumps(BROKER_AUTHORITY, indent=2, sort_keys=True))
+          PY
+
+      - name: Verify default deny and revocation smoke path
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee reports/capability-broker-phase1/smoke.json
+          import json
+          from sdk.liminal_capability_broker import CapabilityBroker
+          from sdk.liminal_post_sandbox_contracts import CapabilityContract
+          P='a'*64
+          scope={'repository':'safal207/LiminalOSAI','refs':['refs/heads/agent/pilot'],'paths':['docs/']}
+          broker=CapabilityBroker('broker:ci')
+          denied=broker.authorize(subject_id='agent:ci', capability_type='repository.write', policy_sha256=P, requested_scope=scope, action={'op':'update_file'}, at_unix=120)
+          assert denied['decision']=='BLOCK'
+          cap=CapabilityContract.build(capability_id='cap:ci:1',capability_type='repository.write',subject_id='agent:ci',issuer_id='issuer:ci',scope=scope,issued_at_unix=100,not_before_unix=110,expires_at_unix=200,max_uses=1,delegable=False,parent_capability_id=None,policy_sha256=P)
+          broker.admit(cap.as_document(), at_unix=105)
+          allowed=broker.authorize(subject_id='agent:ci', capability_type='repository.write', policy_sha256=P, requested_scope=scope, action={'op':'update_file'}, at_unix=120)
+          assert allowed['decision']=='ALLOW'
+          broker.revoke('cap:ci:1', at_unix=121)
+          blocked=broker.authorize(subject_id='agent:ci', capability_type='repository.write', policy_sha256=P, requested_scope=scope, action={'op':'update_file'}, at_unix=122)
+          assert blocked['decision']=='BLOCK'
+          print(json.dumps({'denied':denied,'allowed':allowed,'blocked':blocked,'state':broker.state_document()}, indent=2, sort_keys=True))
+          PY
+
+      - name: Verify no secret-shaped material was added
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -R --binary-files=without-match -n 'BEGIN PRIVATE KEY' \
+            sdk/liminal_capability_broker tests/test_capability_broker_phase1.py docs/CAPABILITY_BROKER_PHASE1.md
+          ! grep -R --binary-files=without-match -nE '(Bearer [A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,})' \
+            sdk/liminal_capability_broker tests/test_capability_broker_phase1.py docs/CAPABILITY_BROKER_PHASE1.md
+
+      - name: Hash evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          find reports/capability-broker-phase1 -type f ! -name SHA256SUMS -print0 \
+            | sort -z | xargs -0 sha256sum > reports/capability-broker-phase1/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: capability-broker-phase1-${{ github.sha }}
+          path: reports/capability-broker-phase1
+          if-no-files-found: error
