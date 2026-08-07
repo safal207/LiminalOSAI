@@ -64,6 +64,8 @@ class GitHubAgentBridge:
         max_request_bytes: int = 1_048_576,
     ) -> "GitHubAgentBridge":
         config_file = Path(config_path)
+        host_trace_file = Path(host_trace_path)
+        recorder_file = Path(recorder_path)
         if config_file.exists():
             raise GitHubBridgeError(f"bridge config already exists: {config_file}")
         config = GitHubBridgeConfig(
@@ -73,13 +75,21 @@ class GitHubAgentBridge:
             max_request_bytes=max_request_bytes,
         ).normalized()
         HostIntegrationAdapter.create(
-            host_trace_path,
-            recorder_path=recorder_path,
+            host_trace_file,
+            recorder_path=recorder_file,
             session_id=session_id,
             high_stakes=high_stakes,
             requires_current_information=requires_current_information,
         )
-        _atomic_write_json(config_file, config.as_document())
+        try:
+            _atomic_write_json(config_file, config.as_document())
+        except Exception:
+            for artifact in (host_trace_file, recorder_file):
+                try:
+                    artifact.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
         return cls(config_file)
 
     @property
@@ -126,20 +136,49 @@ class GitHubAgentBridge:
         event: dict[str, Any]
         try:
             with self.host.tool_call(spec) as call:
-                raw_result = executor(
-                    normalized.action,
-                    copy.deepcopy(normalized.arguments),
-                )
-                result = GitHubExecutorResult.from_value(raw_result)
+                try:
+                    raw_result = executor(
+                        normalized.action,
+                        copy.deepcopy(normalized.arguments),
+                    )
+                    result = GitHubExecutorResult.from_value(raw_result)
+                except Exception as exc:
+                    locator = f"exception:{type(exc).__module__}.{type(exc).__qualname__}"
+                    exception_payload_sha256 = canonical_sha256(
+                        {"exception_type": locator}
+                    )
+                    call.fail(
+                        locator=locator,
+                        payload_sha256=exception_payload_sha256,
+                    )
+                    raise
+                payload_sha256 = result.payload_sha256
                 if result.status == "success":
-                    event = call.succeed(locator=result.locator)
+                    event = call.succeed(
+                        locator=result.locator,
+                        payload_sha256=payload_sha256,
+                    )
                 elif result.status == "failure":
-                    event = call.fail(locator=result.locator)
+                    event = call.fail(
+                        locator=result.locator,
+                        payload_sha256=payload_sha256,
+                    )
                 else:
-                    event = call.cancel(locator=result.locator)
+                    event = call.cancel(
+                        locator=result.locator,
+                        payload_sha256=payload_sha256,
+                    )
             verification = self.host.verify()
         except HostAdapterError as exc:
             raise GitHubBridgeError(f"host adapter rejected GitHub operation: {exc}") from exc
+        persisted_payload_sha256 = verification["payload_sha256_by_call"].get(
+            normalized.call_id
+        )
+        if persisted_payload_sha256 != payload_sha256:
+            raise GitHubBridgeError(
+                "host trace payload digest does not match executor result: "
+                f"{normalized.call_id}"
+            )
         return GitHubExecutionReceipt(
             schema_version=BRIDGE_SCHEMA,
             call_id=normalized.call_id,
@@ -148,7 +187,7 @@ class GitHubAgentBridge:
             request_sha256=normalized.request_sha256,
             status=result.status,
             locator=result.locator,
-            payload_sha256=result.payload_sha256,
+            payload_sha256=payload_sha256,
             recorder_event_id=event["id"],
             recorder_head_sha256=verification["recorder_head_sha256"],
             host_trace_head_sha256=verification["trace_head_sha256"],
@@ -158,6 +197,11 @@ class GitHubAgentBridge:
     def verify(self, *, allow_pending: bool = False) -> dict[str, Any]:
         config = self.config
         host_summary = self.host.verify(allow_pending=allow_pending)
+        missing_payload_sha256 = sorted(
+            call_id
+            for call_id, digest in host_summary["payload_sha256_by_call"].items()
+            if digest is None
+        )
         return {
             "schema_version": BRIDGE_SCHEMA,
             "config_sha256": canonical_sha256(config.payload()),
@@ -165,6 +209,7 @@ class GitHubAgentBridge:
             "protected_branches": list(config.protected_branches),
             "max_request_bytes": config.max_request_bytes,
             "host": host_summary,
+            "missing_payload_sha256_call_ids": missing_payload_sha256,
             "authority": AUTHORITY,
         }
 
@@ -200,7 +245,13 @@ class GitHubAgentBridge:
         )
 
     def export_live_session(self, output_path: str | Path) -> dict[str, Any]:
-        self.verify()
+        verification = self.verify()
+        missing = verification["missing_payload_sha256_call_ids"]
+        if missing:
+            raise GitHubBridgeError(
+                "cannot export GitHub evidence without payload_sha256 for: "
+                + ", ".join(missing)
+            )
         return self.host.export_live_session(output_path)
 
 

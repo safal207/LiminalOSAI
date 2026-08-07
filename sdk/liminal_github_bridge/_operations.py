@@ -200,18 +200,18 @@ def merge_pr(raw: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-R, O, W = frozenset, frozenset(), "write"
+R, NO_OPTIONAL, W = frozenset, frozenset(), "write"
 OPERATION_POLICIES = {
-    "get_repo": OperationPolicy("read", R({"repository_full_name"}), O, True, None, get_repo),
+    "get_repo": OperationPolicy("read", R({"repository_full_name"}), NO_OPTIONAL, True, None, get_repo),
     "fetch_file": OperationPolicy("read", R({"repository_full_name", "path"}), R({"ref", "encoding"}), True, None, fetch_file),
-    "fetch_pr": OperationPolicy("read", R({"repo_full_name", "pr_number"}), O, True, None, pr_read),
-    "compare_commits": OperationPolicy("read", R({"repo_full_name", "base", "head"}), O, True, None, compare_commits),
-    "get_commit_combined_status": OperationPolicy("read", R({"repo_full_name", "commit_sha"}), O, True, None, commit_status),
-    "list_pr_changed_filenames": OperationPolicy("read", R({"repo_full_name", "pr_number"}), O, True, None, pr_read),
+    "fetch_pr": OperationPolicy("read", R({"repo_full_name", "pr_number"}), NO_OPTIONAL, True, None, pr_read),
+    "compare_commits": OperationPolicy("read", R({"repo_full_name", "base", "head"}), NO_OPTIONAL, True, None, compare_commits),
+    "get_commit_combined_status": OperationPolicy("read", R({"repo_full_name", "commit_sha"}), NO_OPTIONAL, True, None, commit_status),
+    "list_pr_changed_filenames": OperationPolicy("read", R({"repo_full_name", "pr_number"}), NO_OPTIONAL, True, None, pr_read),
     "create_branch": OperationPolicy(W, R({"repository_full_name", "branch_name"}), R({"sha", "base_ref"}), True, "Delete the created branch", create_branch),
-    "create_file": OperationPolicy(W, R({"repository_full_name", "path", "content", "message", "branch"}), O, True, "Delete the created file in a follow-up commit", create_file),
-    "update_file": OperationPolicy(W, R({"repository_full_name", "path", "content", "message", "sha", "branch"}), O, True, "Revert the update commit", update_file),
-    "delete_file": OperationPolicy(W, R({"repository_full_name", "path", "message", "sha", "branch"}), O, True, "Restore the file from its parent commit", delete_file),
+    "create_file": OperationPolicy(W, R({"repository_full_name", "path", "content", "message", "branch"}), NO_OPTIONAL, True, "Delete the created file in a follow-up commit", create_file),
+    "update_file": OperationPolicy(W, R({"repository_full_name", "path", "content", "message", "sha", "branch"}), NO_OPTIONAL, True, "Revert the update commit", update_file),
+    "delete_file": OperationPolicy(W, R({"repository_full_name", "path", "message", "sha", "branch"}), NO_OPTIONAL, True, "Restore the file from its parent commit", delete_file),
     "create_blob": OperationPolicy(W, R({"repository_full_name", "content"}), R({"encoding"}), True, "Leave the blob unreferenced", create_blob),
     "create_tree": OperationPolicy(W, R({"repository_full_name", "tree_elements"}), R({"base_tree_sha"}), True, "Leave the tree unreferenced", create_tree),
     "create_commit": OperationPolicy(W, R({"repository_full_name", "message", "tree_sha", "parent_sha"}), R({"additional_parent_shas"}), True, "Leave the commit unreferenced or move the branch back", create_commit),

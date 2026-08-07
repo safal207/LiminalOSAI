@@ -4,7 +4,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import sdk.liminal_github_bridge._bridge as bridge_module
 from sdk.liminal_github_bridge import (
     AUTHORITY,
     BRIDGE_SCHEMA,
@@ -13,6 +15,7 @@ from sdk.liminal_github_bridge import (
     GitHubExecutorResult,
     GitHubOperation,
 )
+from sdk.liminal_host_adapter import ToolCallSpec
 
 REPO = "safal207/LiminalOSAI"
 SHA_A = "a" * 40
@@ -215,21 +218,45 @@ class GitHubAgentBridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(GitHubBridgeError, "max_request_bytes"):
             small.validate_operation(operation)
 
+    def test_create_rolls_back_host_artifacts_if_config_write_fails(self) -> None:
+        root = Path(self.tmp.name) / "rollback"
+        config = root / "config.json"
+        trace = root / "trace.json"
+        journal = root / "journal.json"
+        with mock.patch.object(
+            bridge_module,
+            "_atomic_write_json",
+            side_effect=OSError("simulated config write failure"),
+        ):
+            with self.assertRaisesRegex(OSError, "simulated config write failure"):
+                GitHubAgentBridge.create(
+                    config,
+                    host_trace_path=trace,
+                    recorder_path=journal,
+                    session_id="rollback",
+                    high_stakes=False,
+                    requires_current_information=False,
+                    allowed_repositories=[REPO],
+                )
+        self.assertFalse(config.exists())
+        self.assertFalse(trace.exists())
+        self.assertFalse(journal.exists())
+
     def test_operation_summary_contains_digest_not_file_content(self) -> None:
-        secret = "visible-but-redacted-from-summary"
+        file_content = "visible-but-redacted-from-summary"
         operation = self.op(
             "file-1",
             "create_file",
             {
                 "repository_full_name": REPO,
                 "path": "artifact.txt",
-                "content": secret,
+                "content": file_content,
                 "message": "create artifact",
                 "branch": "agent/v06",
             },
         )
         normalized = self.bridge.validate_operation(operation)
-        self.assertNotIn(secret, normalized.operation_summary)
+        self.assertNotIn(file_content, normalized.operation_summary)
         self.assertIn(normalized.request_sha256, normalized.operation_summary)
 
     def test_read_executes_without_authorization(self) -> None:
@@ -277,6 +304,15 @@ class GitHubAgentBridgeTests(unittest.TestCase):
         self.assertEqual(receipt.recorder_event_id, "branch-1")
         self.assertEqual(receipt.authority, AUTHORITY)
         self.assertEqual(len(receipt.payload_sha256), 64)
+        trace = json.loads(self.trace.read_text())
+        finish = trace["entries"][-1]["record"]
+        self.assertEqual(finish["payload_sha256"], receipt.payload_sha256)
+        verification = self.bridge.verify()
+        self.assertEqual(
+            verification["host"]["payload_sha256_by_call"][receipt.call_id],
+            receipt.payload_sha256,
+        )
+        self.assertEqual(verification["missing_payload_sha256_call_ids"], [])
 
     def test_authorization_targets_exact_call_id(self) -> None:
         operation = self.branch_op("branch-exact")
@@ -328,6 +364,11 @@ class GitHubAgentBridgeTests(unittest.TestCase):
             self.bridge.execute(operation, executor)
         summary = self.bridge.verify()
         self.assertEqual(summary["host"]["completed_calls"], 1)
+        self.assertEqual(summary["missing_payload_sha256_call_ids"], [])
+        self.assertEqual(
+            len(summary["host"]["payload_sha256_by_call"]["read-exception"]),
+            64,
+        )
         journal = json.loads(self.journal.read_text())
         self.assertEqual(journal["entries"][-1]["event"]["status"], "failure")
 
@@ -351,6 +392,21 @@ class GitHubAgentBridgeTests(unittest.TestCase):
                 },
             )
 
+    def test_payload_digest_tampering_fails_closed(self) -> None:
+        operation = self.op("read-tamper", "get_repo", {"repository_full_name": REPO})
+        self.bridge.execute(
+            operation,
+            lambda action, arguments: GitHubExecutorResult.success(
+                locator="repo:" + REPO,
+                payload={"default_branch": "main"},
+            ),
+        )
+        trace = json.loads(self.trace.read_text())
+        trace["entries"][-1]["record"]["payload_sha256"] = "f" * 64
+        self.trace.write_text(json.dumps(trace), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "entry hash mismatch"):
+            self.bridge.verify()
+
     def test_config_tampering_fails_closed(self) -> None:
         raw = json.loads(self.config.read_text())
         raw["allowed_repositories"] = ["attacker/repo"]
@@ -363,6 +419,43 @@ class GitHubAgentBridgeTests(unittest.TestCase):
         self.assertEqual(summary["authority"], AUTHORITY)
         self.assertFalse(summary["authority"]["merge_authority"])
         self.assertFalse(summary["authority"]["github_execution_ownership"])
+
+    def test_export_rejects_completed_call_without_payload_digest(self) -> None:
+        self.bridge.record_user_message(event_id="user-legacy", text="Run legacy tool")
+        with self.bridge.host.tool_call(
+            ToolCallSpec(
+                call_id="legacy-call",
+                tool="LegacyTool",
+                operation="legacy read",
+                effect="read",
+                evidence_eligible=True,
+                freshness="current",
+                reversible=True,
+                recovery_plan=None,
+            )
+        ) as call:
+            call.succeed(locator="fixture://legacy")
+        self.bridge.record_assistant_draft(
+            event_id="draft-legacy",
+            response="The legacy tool completed.",
+            no_signal=False,
+            intent_alignment=1.0,
+        )
+        self.bridge.record_claim(
+            event_id="claim-legacy",
+            draft_event_id="draft-legacy",
+            text="The legacy tool completed.",
+            kind="fact",
+            confidence=1.0,
+            requires_current_information=True,
+            evidence_event_ids=["legacy-call"],
+        )
+        self.bridge.seal(
+            request_event_id="user-legacy",
+            draft_event_id="draft-legacy",
+        )
+        with self.assertRaisesRegex(GitHubBridgeError, "payload_sha256"):
+            self.bridge.export_live_session(self.live)
 
     def test_full_session_seals_and_exports(self) -> None:
         self.bridge.record_user_message(event_id="user-1", text="Create the reviewed branch")

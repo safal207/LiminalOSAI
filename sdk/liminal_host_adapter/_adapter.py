@@ -18,6 +18,7 @@ from ._core import (
     atomic_write_json,
     enum,
     exclusive_lock,
+    optional_sha256,
     optional_string,
     string,
 )
@@ -41,23 +42,38 @@ class ToolCallHandle(AbstractContextManager["ToolCallHandle"]):
     def __enter__(self) -> "ToolCallHandle":
         return self
 
-    def succeed(self, *, locator: str | None) -> dict[str, Any]:
+    def succeed(
+        self, *, locator: str | None, payload_sha256: str | None = None
+    ) -> dict[str, Any]:
         result = self._adapter.finish_tool_call(
-            self.call_id, status="success", locator=locator
+            self.call_id,
+            status="success",
+            locator=locator,
+            payload_sha256=payload_sha256,
         )
         self._finished = True
         return result
 
-    def fail(self, *, locator: str | None) -> dict[str, Any]:
+    def fail(
+        self, *, locator: str | None, payload_sha256: str | None = None
+    ) -> dict[str, Any]:
         result = self._adapter.finish_tool_call(
-            self.call_id, status="failure", locator=locator
+            self.call_id,
+            status="failure",
+            locator=locator,
+            payload_sha256=payload_sha256,
         )
         self._finished = True
         return result
 
-    def cancel(self, *, locator: str | None = None) -> dict[str, Any]:
+    def cancel(
+        self, *, locator: str | None = None, payload_sha256: str | None = None
+    ) -> dict[str, Any]:
         result = self._adapter.finish_tool_call(
-            self.call_id, status="cancelled", locator=locator
+            self.call_id,
+            status="cancelled",
+            locator=locator,
+            payload_sha256=payload_sha256,
         )
         self._finished = True
         return result
@@ -66,7 +82,10 @@ class ToolCallHandle(AbstractContextManager["ToolCallHandle"]):
         if exc is not None and not self._finished:
             locator = f"exception:{exc_type.__module__}.{exc_type.__qualname__}"
             self._adapter.finish_tool_call(
-                self.call_id, status="failure", locator=locator
+                self.call_id,
+                status="failure",
+                locator=locator,
+                payload_sha256=None,
             )
             self._finished = True
             return False
@@ -251,11 +270,19 @@ class HostIntegrationAdapter:
         return self.start_tool_call(spec)
 
     def finish_tool_call(
-        self, call_id: str, *, status: str, locator: str | None
+        self,
+        call_id: str,
+        *,
+        status: str,
+        locator: str | None,
+        payload_sha256: str | None = None,
     ) -> dict[str, Any]:
         target_id = string(call_id, "call_id")
         normalized_status = enum(status, "status", TOOL_STATUSES)
         normalized_locator = optional_string(locator, "locator")
+        normalized_payload_sha256 = optional_sha256(
+            payload_sha256, "payload_sha256"
+        )
         start = self._pending_starts().get(target_id)
         if start is None:
             raise HostAdapterError(f"tool call is not pending: {target_id}")
@@ -288,14 +315,20 @@ class HostIntegrationAdapter:
                 "call_id": target_id,
                 "status": normalized_status,
                 "locator": normalized_locator,
+                "payload_sha256": normalized_payload_sha256,
                 "recorder_event_id": event["id"],
                 "recorder_head_after": recorder_after["head_sha256"],
             }
         )
         return event
 
-    def recover_tool_call(self, call_id: str) -> dict[str, Any]:
+    def recover_tool_call(
+        self, call_id: str, *, payload_sha256: str | None = None
+    ) -> dict[str, Any]:
         target_id = string(call_id, "call_id")
+        normalized_payload_sha256 = optional_sha256(
+            payload_sha256, "payload_sha256"
+        )
         start = self._pending_starts().get(target_id)
         if start is None:
             raise HostAdapterError(f"tool call is not pending: {target_id}")
@@ -334,6 +367,7 @@ class HostIntegrationAdapter:
                 "call_id": target_id,
                 "status": event["status"],
                 "locator": event["locator"],
+                "payload_sha256": normalized_payload_sha256,
                 "recorder_event_id": target_id,
                 "recorder_head_after": entry["entry_sha256"],
             }
@@ -423,6 +457,10 @@ class HostIntegrationAdapter:
             "started_calls": len(starts),
             "completed_calls": len(finishes),
             "pending_call_ids": pending,
+            "payload_sha256_by_call": {
+                call_id: finish.get("payload_sha256")
+                for call_id, finish in sorted(finishes.items())
+            },
             "trace_head_sha256": trace["head_sha256"],
             "recorder_head_sha256": journal["head_sha256"],
             "authority": AUTHORITY,
