@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from sdk.liminal_file_mutation_broker import FileMutationBroker, FileMutationError
+from sdk.liminal_file_mutation_broker import FileMutationBroker
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
 
 SCHEMA = "liminal-file-mutation-execution-receipt-v0.1"
@@ -24,10 +24,13 @@ _AUTHORITY_ITEMS = (
     ("mode", "trusted_posix_file_replacement_backend"),
     ("filesystem_access", True),
     ("existing_regular_file_replace", True),
-    ("file_create", False),
-    ("file_delete", False),
+    ("target_file_create", False),
+    ("target_file_delete", False),
+    ("internal_temp_file_create", True),
+    ("internal_temp_cleanup", True),
     ("arbitrary_rename", False),
     ("symlink_follow", False),
+    ("privileged_mode_bits_preserved", False),
     ("network_authority", False),
     ("process_authority", False),
     ("secret_material_access", False),
@@ -91,13 +94,7 @@ class FileMutationExecutionReceipt:
 
 
 class AtomicFileReplacer:
-    def __init__(
-        self,
-        *,
-        broker: FileMutationBroker,
-        adapter_token: str,
-        host_roots: Mapping[str, str],
-    ) -> None:
+    def __init__(self, *, broker: FileMutationBroker, adapter_token: str, host_roots: Mapping[str, str]) -> None:
         if not isinstance(adapter_token, str) or not adapter_token:
             raise AtomicFileReplaceError("invalid_adapter_token")
         roots: dict[str, str] = {}
@@ -117,19 +114,17 @@ class AtomicFileReplacer:
         if not isinstance(content, bytes):
             raise AtomicFileReplaceError("content_must_be_bytes")
         ref = self.broker.consume_for_trusted_adapter(lease_id, adapter_token=self._adapter_token)
-        before = ref.expected_before_sha256
-        after = ref.desired_content_sha256
         common = {
             "lease_id_sha256": canonical_sha256(ref.lease_id),
             "authorization_receipt_sha256": ref.authorization_receipt_sha256,
             "binding_sha256": ref.binding_sha256,
             "relative_path_sha256": canonical_sha256(ref.relative_path),
-            "before_sha256": before,
-            "after_sha256": after,
+            "before_sha256": ref.expected_before_sha256,
+            "after_sha256": ref.desired_content_sha256,
             "content_length": ref.content_length,
         }
         try:
-            if len(content) != ref.content_length or _sha256_bytes(content) != after:
+            if len(content) != ref.content_length or _sha256_bytes(content) != ref.desired_content_sha256:
                 raise AtomicFileReplaceError("authorized_content_mismatch")
             host_root = self._host_roots.get(ref.root_id)
             if host_root is None:
@@ -137,8 +132,8 @@ class AtomicFileReplacer:
             self._replace_under_root(
                 host_root=host_root,
                 relative_path=ref.relative_path,
-                expected_before_sha256=before,
-                desired_content_sha256=after,
+                expected_before_sha256=ref.expected_before_sha256,
+                desired_content_sha256=ref.desired_content_sha256,
                 content=content,
                 lease_id=ref.lease_id,
             )
@@ -164,9 +159,8 @@ class AtomicFileReplacer:
         if not components or any(part in {"", ".", ".."} for part in components):
             raise AtomicFileReplaceError("invalid_relative_path")
 
-        root_flags = os.O_RDONLY | os.O_DIRECTORY
         nofollow = getattr(os, "O_NOFOLLOW", 0)
-        root_fd = os.open(host_root, root_flags | nofollow)
+        root_fd = os.open(host_root, os.O_RDONLY | os.O_DIRECTORY | nofollow)
         opened: list[int] = [root_fd]
         parent_fd = root_fd
         temp_name: str | None = None
@@ -183,7 +177,9 @@ class AtomicFileReplacer:
                 if not stat.S_ISREG(target_stat.st_mode):
                     raise AtomicFileReplaceError("target_not_regular_file")
                 first_before = _read_digest(target_fd)
-                original_mode = stat.S_IMODE(target_stat.st_mode)
+                # Preserve ordinary rwx permission bits only. A replacement must
+                # never inherit setuid/setgid/sticky privilege bits from the old inode.
+                replacement_mode = stat.S_IMODE(target_stat.st_mode) & 0o0777
             finally:
                 os.close(target_fd)
             if first_before != expected_before_sha256:
@@ -203,7 +199,7 @@ class AtomicFileReplacer:
                     if written <= 0:
                         raise AtomicFileReplaceError("short_write")
                     offset += written
-                os.fchmod(temp_fd, original_mode)
+                os.fchmod(temp_fd, replacement_mode)
                 os.fsync(temp_fd)
             finally:
                 os.close(temp_fd)
@@ -232,10 +228,13 @@ class AtomicFileReplacer:
                 if not stat.S_ISREG(verify_stat.st_mode):
                     raise AtomicFileReplaceError("post_replace_not_regular")
                 observed_after = _read_digest(verify_fd)
+                observed_mode = stat.S_IMODE(verify_stat.st_mode)
             finally:
                 os.close(verify_fd)
             if observed_after != desired_content_sha256:
                 raise AtomicFileReplaceError("post_replace_digest_mismatch")
+            if observed_mode & 0o7000:
+                raise AtomicFileReplaceError("privileged_mode_bits_present")
         finally:
             if temp_name is not None:
                 try:
