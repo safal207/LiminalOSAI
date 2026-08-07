@@ -1,0 +1,119 @@
+name: Isolated Execution Broker
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_isolated_execution/**'
+      - 'adapters/docker/**'
+      - 'tests/test_isolated_execution_broker.py'
+      - 'tests/fixtures/isolated_executor/**'
+      - 'docs/ISOLATED_EXECUTION_BROKER.md'
+      - '.github/workflows/isolated-execution-broker.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run isolated execution broker tests
+        run: python3 -m unittest tests/test_isolated_execution_broker.py -v
+
+      - name: Re-run Runtime Mediation
+        run: python3 -m unittest tests/test_runtime_mediation_v1_3.py -v
+
+      - name: Re-run Capability Broker
+        run: python3 -m unittest tests/test_capability_broker_phase1.py -v
+
+      - name: Re-run Egress Gateway
+        run: python3 -m unittest tests/test_egress_gateway_phase2.py -v
+
+      - name: Re-run Causal Escalation
+        run: python3 -m unittest tests/test_causal_escalation_phase3.py -v
+
+      - name: Re-run Containment
+        run: python3 -m unittest tests/test_containment_phase4.py -v
+
+      - name: Verify model-facing SDK has no host execution authority
+        run: |
+          ! grep -R -nE '(^|[[:space:]])(import|from)[[:space:]]+(subprocess|socket|os)([[:space:].]|$)' sdk/liminal_isolated_execution
+          grep -q 'shell=False' adapters/docker/liminal_docker_executor.py
+
+      - name: Build immutable local fixture image
+        run: |
+          docker build -f tests/fixtures/isolated_executor/Dockerfile -t liminal-isolated-fixture:local .
+          IMAGE_ID="$(docker image inspect liminal-isolated-fixture:local --format '{{.Id}}')"
+          case "$IMAGE_ID" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo "unexpected image id: $IMAGE_ID"; exit 1 ;; esac
+          echo "IMAGE_ID=$IMAGE_ID" >> "$GITHUB_ENV"
+
+      - name: Run real container isolation negative probes
+        run: python3 adapters/docker/liminal_docker_executor.py --self-test "$IMAGE_ID" "$GITHUB_WORKSPACE"
+
+      - name: Run governed container execution end to end
+        run: |
+          python3 - <<'PY'
+          import os
+          from adapters.docker.liminal_docker_executor import DockerExecutor
+          from sdk.liminal_capability_broker import CapabilityBroker
+          from sdk.liminal_isolated_execution import IsolatedExecutionBroker, IsolatedExecutionPlan, verify_receipt
+          from sdk.liminal_post_sandbox_contracts import CapabilityContract
+          from sdk.liminal_runtime_mediation import RuntimeMediator, RuntimeOperation
+
+          P = 'a' * 64
+          scope = {
+              'executables': ['/bin/true'],
+              'working_directory': '/workspace',
+              'argument_profile': 'isolated_ci_fixture',
+          }
+          broker = CapabilityBroker('broker:isolated-ci')
+          broker.admit(CapabilityContract.build(
+              capability_id='cap:isolated-ci', capability_type='process.execute',
+              subject_id='agent:ci', issuer_id='human:ci', scope=scope,
+              issued_at_unix=10, not_before_unix=10, expires_at_unix=500,
+              max_uses=2, delegable=False, parent_capability_id=None,
+              policy_sha256=P,
+          ).as_document(), at_unix=20)
+          mediator = RuntimeMediator(broker=broker)
+          plan = IsolatedExecutionPlan.build(
+              operation_id='op:isolated-ci', image_id=os.environ['IMAGE_ID'],
+              argv=('/bin/true',), host_workspace=os.environ['GITHUB_WORKSPACE'],
+              timeout_seconds=20,
+          )
+          op = RuntimeOperation(
+              operation_id='op:isolated-ci', subject_id='agent:ci', policy_sha256=P,
+              kind='process.execute', scope=scope, payload_sha256=plan.payload_sha256,
+              at_unix=30,
+          )
+          isolated = IsolatedExecutionBroker(mediator=mediator, backend=DockerExecutor())
+          receipt = isolated.execute(operation=op, plan=plan)
+          assert receipt['admission_decision'] == 'ALLOW'
+          assert receipt['execution_outcome'] == 'SUCCEEDED'
+          assert receipt['backend_invoked'] is True
+          verify_receipt(receipt)
+          assert '/bin/true' not in str(receipt)
+          assert os.environ['GITHUB_WORKSPACE'] not in str(receipt)
+          print('governed-container-execution', receipt['receipt_sha256'], 'PASS')
+          PY
+
+      - name: Build production kernel fixture
+        run: make
+
+      - name: Run full repository regression
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Verify explicit authority boundary
+        run: |
+          python3 - <<'PY'
+          from sdk.liminal_isolated_execution import AUTHORITY
+          assert AUTHORITY['runtime_mediation_required'] is True
+          assert AUTHORITY['trusted_backend_dispatch'] is True
+          assert AUTHORITY['network_none'] is True
+          assert AUTHORITY['workspace_read_only'] is True
+          assert AUTHORITY['direct_host_subprocess_execution'] is False
+          assert AUTHORITY['direct_docker_api_access'] is False
+          assert AUTHORITY['vm_isolation'] is False
+          assert AUTHORITY['kernel_or_container_runtime_exploit_resistance'] is False
+          PY
