@@ -1,0 +1,93 @@
+name: Egress Gateway Phase 2
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_egress_gateway/**'
+      - 'tests/test_egress_gateway_phase2.py'
+      - 'docs/EGRESS_GATEWAY_PHASE2.md'
+      - 'Makefile'
+      - '.github/workflows/egress-gateway-phase2-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact head
+        run: |
+          set -euo pipefail
+          mkdir -p reports/egress-gateway-phase2
+          git rev-parse HEAD | tee reports/egress-gateway-phase2/head-sha.txt
+      - name: Run Phase 2 adversarial tests
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_egress_gateway_phase2.py -v 2>&1 | tee reports/egress-gateway-phase2/phase2-tests.log
+      - name: Re-run Capability Broker tests
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_capability_broker_phase1.py -v 2>&1 | tee reports/egress-gateway-phase2/broker-tests.log
+      - name: Run full repository regression
+        run: |
+          set -euo pipefail
+          make test 2>&1 | tee reports/egress-gateway-phase2/full-regression.log
+      - name: Verify authority boundary
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from sdk.liminal_egress_gateway import GATEWAY_AUTHORITY
+          assert GATEWAY_AUTHORITY['network_mediation'] is True
+          assert GATEWAY_AUTHORITY['dns_validation'] is True
+          assert GATEWAY_AUTHORITY['external_secret_injection'] is True
+          assert GATEWAY_AUTHORITY['capability_grant'] is False
+          assert GATEWAY_AUTHORITY['shell_execution'] is False
+          assert GATEWAY_AUTHORITY['deployment'] is False
+          assert GATEWAY_AUTHORITY['containment_execution'] is False
+          assert GATEWAY_AUTHORITY['os_firewall_installation'] is False
+          PY
+      - name: Verify default deny and DNS guard smoke path
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from sdk.liminal_capability_broker import CapabilityBroker
+          from sdk.liminal_egress_gateway import EgressBlocked, EgressGateway, GatewayRequest, TransportResponse
+          from sdk.liminal_post_sandbox_contracts import CapabilityContract
+          policy='a'*64
+          req=GatewayRequest('call:smoke','agent:worker',policy,'GET','https://api.example.com/x',{},'b'*64,{},120)
+          gateway=EgressGateway(broker=CapabilityBroker(), resolver=lambda h:['93.184.216.34'], transport=lambda r:TransportResponse(200,{},'c'*64))
+          try: gateway.execute(req)
+          except EgressBlocked: pass
+          else: raise SystemExit('missing capability did not block')
+          broker=CapabilityBroker()
+          cap=CapabilityContract.build(capability_id='cap:net',capability_type='network.connect_domain',subject_id='agent:worker',issuer_id='issuer:test',scope={'domains':['api.example.com'],'protocols':['https'],'ports':[443]},issued_at_unix=100,not_before_unix=100,expires_at_unix=200,max_uses=2,delegable=False,parent_capability_id=None,policy_sha256=policy)
+          broker.admit(cap.as_document(),at_unix=105)
+          good=EgressGateway(broker=broker,resolver=lambda h:['93.184.216.34'],transport=lambda r:TransportResponse(200,{},'c'*64))
+          assert good.execute(req)['decision']=='ALLOW'
+          bad=EgressGateway(broker=broker,resolver=lambda h:['127.0.0.1'],transport=lambda r:TransportResponse(200,{},'c'*64))
+          try: bad.execute(req)
+          except EgressBlocked: pass
+          else: raise SystemExit('private DNS address did not block')
+          PY
+      - name: Verify no secret-shaped material was added
+        run: |
+          set -euo pipefail
+          ! grep -RniE --exclude='egress-gateway-phase2-ci.yml' --exclude='test_egress_gateway_phase2.py' '(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|Bearer [A-Za-z0-9._-]{12,}|super-secret-value)' sdk/liminal_egress_gateway docs/EGRESS_GATEWAY_PHASE2.md
+      - name: Hash evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          find reports/egress-gateway-phase2 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > reports/egress-gateway-phase2/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: egress-gateway-phase2-${{ github.sha }}
+          path: reports/egress-gateway-phase2
+          if-no-files-found: error
