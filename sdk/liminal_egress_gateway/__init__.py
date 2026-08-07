@@ -5,12 +5,12 @@ from .gateway import (
     DirectSocketGuard,
     EgressBlocked,
     EgressError,
-    EgressGateway,
     GatewayRequest,
     NetworkExecutionReceipt,
     TransportRequest,
     TransportResponse,
 )
+from .strict import EgressGateway
 
 __all__ = [
     "ALLOWED_METHODS",
