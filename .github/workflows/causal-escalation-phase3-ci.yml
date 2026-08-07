@@ -1,0 +1,67 @@
+name: Causal Escalation Phase 3
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_causal_escalation/**'
+      - 'tests/test_causal_escalation_phase3.py'
+      - 'docs/CAUSAL_ESCALATION_PHASE3.md'
+      - '.github/workflows/causal-escalation-phase3-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record exact head
+        run: echo "$GITHUB_SHA" > causal-escalation-head.txt
+      - name: Run Phase 3 deterministic tests
+        run: python3 -m unittest tests/test_causal_escalation_phase3.py -v
+      - name: Run Phase 0 and Capability Broker regression
+        run: python3 -m unittest tests/test_post_sandbox_phase0_contracts.py tests/test_capability_broker_phase1.py -v
+      - name: Run Egress Gateway regression
+        run: python3 -m unittest tests/test_egress_gateway_phase2.py -v
+      - name: Verify composed-risk smoke path
+        run: |
+          python3 - <<'PY'
+          from sdk.liminal_causal_escalation import TrajectoryEvent, analyze_trajectory
+          prev='0'*64
+          events=[]
+          for i, kind in enumerate(['package.install','network.connect_domain','credential.access','process.spawn_child'],1):
+              e=TrajectoryEvent.build(event_id=f'e:{i}', sequence=i, observed_at_unix=100+i, kind=kind, decision='ALLOW', subject_id='user:smoke', capability_id=None, privilege_level_before=0, privilege_level_after=0, metadata={'i':i}, previous_event_sha256=prev)
+              events.append(e); prev=e.event_sha256
+          result=analyze_trajectory(events)
+          assert result['decision']=='CONTAIN', result
+          assert result['risk_score']>=80, result
+          assert result['authority']['containment_execution'] is False
+          print(result['explanation'])
+          PY
+      - name: Verify replay equality and tamper fail-closed
+        run: |
+          python3 - <<'PY'
+          from sdk.liminal_causal_escalation import TrajectoryEvent, EscalationError, analyze_trajectory, replay
+          e=TrajectoryEvent.build(event_id='e:1', sequence=1, observed_at_unix=1, kind='repository.write', decision='ALLOW', subject_id='user:x', capability_id=None, privilege_level_before=0, privilege_level_after=0, metadata={}, previous_event_sha256='0'*64)
+          doc=e.body()|{'event_sha256':e.event_sha256}
+          assert analyze_trajectory([e]) == replay([doc])
+          bad=dict(doc); bad['kind']='credential.access'
+          try: replay([bad])
+          except EscalationError: pass
+          else: raise SystemExit('tamper was accepted')
+          PY
+      - name: Verify authority boundary
+        run: |
+          grep -q '"containment_execution": False' sdk/liminal_causal_escalation/__init__.py
+          grep -q '"execution": False' sdk/liminal_causal_escalation/__init__.py
+          grep -q '"capability_grant": False' sdk/liminal_causal_escalation/__init__.py
+      - name: Hash evidence
+        run: sha256sum causal-escalation-head.txt docs/CAUSAL_ESCALATION_PHASE3.md > causal-escalation-evidence.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: causal-escalation-phase3-evidence
+          path: |
+            causal-escalation-head.txt
+            causal-escalation-evidence.sha256
