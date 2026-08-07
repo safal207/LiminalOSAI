@@ -62,9 +62,11 @@ jobs:
           assert BROKER_AUTHORITY['trusted_adapter_authentication'] is True
           assert ADAPTER_AUTHORITY['filesystem_access'] is True
           assert ADAPTER_AUTHORITY['existing_regular_file_replace'] is True
-          assert ADAPTER_AUTHORITY['file_create'] is False
-          assert ADAPTER_AUTHORITY['file_delete'] is False
+          assert ADAPTER_AUTHORITY['target_file_create'] is False
+          assert ADAPTER_AUTHORITY['target_file_delete'] is False
+          assert ADAPTER_AUTHORITY['internal_temp_file_create'] is True
           assert ADAPTER_AUTHORITY['symlink_follow'] is False
+          assert ADAPTER_AUTHORITY['privileged_mode_bits_preserved'] is False
           PY
 
       - name: Build production kernel fixture
