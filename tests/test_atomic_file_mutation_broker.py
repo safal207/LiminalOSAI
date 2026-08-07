@@ -9,6 +9,7 @@ import threading
 import unittest
 
 from adapters.filesystem.liminal_atomic_file_replacer import (
+    AtomicFileReplaceError,
     AtomicFileReplacer,
     verify_execution_receipt,
 )
@@ -98,6 +99,7 @@ class FileMutationBrokerTests(unittest.TestCase):
         )
 
     def test_valid_replace_is_atomic_and_digest_bound(self):
+        before_stat = os.stat(self.target)
         _, broker, adapter = self._stack()
         auth = broker.authorize(self._request())
         self.assertEqual(auth["decision"], "ALLOW")
@@ -107,6 +109,9 @@ class FileMutationBrokerTests(unittest.TestCase):
         verify_execution_receipt(receipt)
         with open(self.target, "rb") as fh:
             self.assertEqual(fh.read(), b"after")
+        after_stat = os.stat(self.target)
+        self.assertEqual(after_stat.st_uid, before_stat.st_uid)
+        self.assertEqual(after_stat.st_gid, before_stat.st_gid)
 
     def test_privileged_mode_bits_are_not_preserved(self):
         os.chmod(self.target, 0o4755)
@@ -267,7 +272,7 @@ class FileMutationBrokerTests(unittest.TestCase):
             verify_authorization_receipt(bad_auth)
         bad_execution = dict(execution)
         bad_execution["raw_content"] = "after"
-        with self.assertRaises(Exception):
+        with self.assertRaises(AtomicFileReplaceError):
             verify_execution_receipt(bad_execution)
 
     def test_binding_is_immutable_after_construction(self):
