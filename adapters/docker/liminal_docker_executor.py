@@ -8,9 +8,16 @@ IsolatedExecutionBroker have admitted the exact plan.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import subprocess
 import sys
 from typing import Sequence
+
+# Support direct `python adapters/docker/liminal_docker_executor.py ...` execution
+# while keeping normal imports rooted at the repository package boundary.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from sdk.liminal_isolated_execution import IsolatedExecutionPlan
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
