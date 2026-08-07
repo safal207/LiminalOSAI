@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import unittest
 
 from sdk.liminal_capability_broker import BROKER_AUTHORITY, BrokerError, CapabilityBroker
@@ -21,7 +20,7 @@ def contract(**overrides):
         scope={
             "repository": "safal207/LiminalOSAI",
             "refs": ["refs/heads/agent/test"],
-            "paths": ["docs/", "README.md"],
+            "paths": ["README.md", "docs/"],
         },
         issued_at_unix=100,
         not_before_unix=110,
@@ -127,9 +126,7 @@ class CapabilityBrokerTests(unittest.TestCase):
         broker = CapabilityBroker()
         broker.admit(contract().as_document(), at_unix=105)
         result = authorize(broker, requested_scope={
-            "repository":"safal207/LiminalOSAI",
-            "refs":["refs/heads/agent/test"],
-            "paths":["sdk/"],
+            "repository":"safal207/LiminalOSAI", "refs":["refs/heads/agent/test"], "paths":["sdk/"]
         })
         self.assertEqual(result["decision"], "BLOCK")
         self.assertIn("scope_mismatch", result["reason_codes"])
@@ -138,9 +135,7 @@ class CapabilityBrokerTests(unittest.TestCase):
         broker = CapabilityBroker()
         broker.admit(contract().as_document(), at_unix=105)
         result = authorize(broker, requested_scope={
-            "repository":"safal207/LiminalOSAI",
-            "refs":["refs/heads/main"],
-            "paths":["docs/"],
+            "repository":"safal207/LiminalOSAI", "refs":["refs/heads/main"], "paths":["docs/"]
         })
         self.assertEqual(result["decision"], "BLOCK")
 
@@ -148,9 +143,7 @@ class CapabilityBrokerTests(unittest.TestCase):
         broker = CapabilityBroker()
         broker.admit(contract().as_document(), at_unix=105)
         result = authorize(broker, requested_scope={
-            "repository":"safal207/other",
-            "refs":["refs/heads/agent/test"],
-            "paths":["docs/"],
+            "repository":"safal207/other", "refs":["refs/heads/agent/test"], "paths":["docs/"]
         })
         self.assertEqual(result["decision"], "BLOCK")
 
