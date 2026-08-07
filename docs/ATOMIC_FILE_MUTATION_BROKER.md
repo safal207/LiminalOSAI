@@ -24,7 +24,7 @@ model / agent intent
 → second compare-before
 → atomic os.replace
 → directory fsync
-→ post-write digest + mode verification
+→ post-write digest + ownership + mode verification
 → digest-only execution receipt
 ```
 
@@ -40,6 +40,7 @@ Supported:
 - containment/revoke/expiry re-check before trusted adapter access;
 - Linux/POSIX no-follow directory descriptor traversal;
 - same-directory atomic replacement;
+- preservation of the target uid/gid and ordinary `rwx` permission bits;
 - trusted internal temporary-file creation solely as the atomic-replace implementation detail.
 
 Not supported:
@@ -50,6 +51,7 @@ Not supported:
 - directory mutation;
 - following symlinks;
 - preserving setuid, setgid, or sticky privilege bits on the replacement inode;
+- preserving ACLs or extended attributes in this MVP;
 - wildcard path authority;
 - network/process/credential authority.
 
@@ -76,19 +78,24 @@ may open and replace files only after consuming an admitted lease.
 The adapter:
 
 1. verifies authorized content length and SHA-256 before root access;
-2. opens the root directory without following symlinks;
-3. walks every parent with `O_DIRECTORY | O_NOFOLLOW` via `dir_fd`;
-4. opens the target with `O_NOFOLLOW` and requires a regular file;
-5. compares the target digest to `expected_before_sha256`;
-6. creates and writes a same-directory exclusive internal temporary file;
-7. preserves ordinary `rwx` permission bits only, stripping setuid/setgid/sticky bits, then fsyncs the temporary file;
-8. re-checks the target digest immediately before replacement;
-9. calls `os.replace` with source/destination dirfds;
-10. fsyncs the parent directory and verifies the final digest and absence of privileged mode bits.
+2. fails closed if required POSIX `O_NOFOLLOW` / `O_DIRECTORY` flags are unavailable;
+3. opens the root directory without following symlinks;
+4. walks every parent with `O_DIRECTORY | O_NOFOLLOW` via `dir_fd`;
+5. opens the target with `O_NOFOLLOW` and requires a regular file;
+6. compares the target digest to `expected_before_sha256` and records uid/gid plus ordinary mode bits;
+7. creates and writes a same-directory exclusive internal temporary file;
+8. preserves uid/gid fail-closed, preserves ordinary `rwx` bits only, strips setuid/setgid/sticky bits, then fsyncs the temporary file;
+9. re-checks target digest, type and ownership immediately before replacement;
+10. calls `os.replace` with source/destination dirfds;
+11. fsyncs the parent directory and verifies final digest, uid/gid and absence of privileged mode bits.
 
-The trusted adapter authority metadata therefore distinguishes internal temporary
-creation from target-file creation: the former is required by the implementation,
-while the latter remains forbidden by this MVP.
+ACLs and extended attributes are intentionally not copied by this MVP. A target
+whose security semantics depend on ACL/xattr metadata should not be routed
+through this adapter until a later metadata-preserving profile is implemented.
+
+The trusted adapter authority metadata distinguishes internal temporary creation
+from target-file creation: the former is required by the implementation, while
+the latter remains forbidden by this MVP.
 
 Raw file bytes and raw host paths do not appear in governance receipts.
 
@@ -102,23 +109,45 @@ inside the host/kernel trust boundary.
 
 ## Failure behavior
 
-- bad path → no lease;
-- missing/scope-mismatched capability → no lease;
-- containment → no lease / no adapter reference;
-- revoked or expired source capability → no adapter reference;
-- wrong adapter credential → lease remains unconsumed;
-- expired/replayed lease → no adapter reference;
-- content hash/length mismatch → lease consumed, filesystem unchanged;
-- stale before digest → lease consumed, target unchanged;
-- symlink/non-regular target → lease consumed, target unchanged;
-- post-write digest or privileged-mode verification failure → FAILED digest-only evidence; operator should
-  treat this as an integrity incident because the atomic replacement already
-  occurred.
+There are two distinct failure shapes.
+
+### Before trusted lease consumption
+
+These raise an exception and produce **no execution receipt**, because the
+trusted filesystem adapter has not been admitted:
+
+- non-bytes content;
+- wrong adapter credential;
+- unknown, expired, replayed lease;
+- containment active at consumption;
+- revoked/expired source capability;
+- host clock regression.
+
+The target filesystem is not accessed through the adapter in these cases.
+
+### After trusted lease consumption
+
+The lease is permanently consumed. Failures return a `FAILED` digest-only
+execution receipt and never reactivate the lease:
+
+- desired content hash/length mismatch — filesystem remains unchanged;
+- host root mapping missing — filesystem remains unchanged;
+- required POSIX no-follow flags unavailable — filesystem remains unchanged;
+- stale before digest — target remains unchanged;
+- symlink/non-regular/missing target or parent — target remains unchanged;
+- inability to preserve uid/gid before replacement — target remains unchanged;
+- write/fsync/second-check failures — target remains unchanged when failure occurs before `os.replace`;
+- post-write digest, ownership or privileged-mode verification failure — the atomic replacement already occurred and the operator should treat this as an integrity incident.
+
+Authorization-stage failures such as bad logical paths, missing/scope-mismatched
+capabilities, unknown root bindings, replayed call IDs, or containment return a
+`BLOCK` authorization receipt and issue no lease.
 
 ## Explicit nonclaims
 
 This is not a general filesystem sandbox, not a VM boundary, and not protection
-against a malicious kernel or privileged host process. It does not replace Git,
-repository permissions, branch protection or code review. The host root mapping,
-trusted adapter credential and kernel/filesystem implementation remain trusted
-control-plane authority.
+against a malicious kernel or privileged host process. It does not preserve ACLs
+or extended attributes, and it does not replace Git, repository permissions,
+branch protection or code review. The host root mapping, trusted adapter
+credential and kernel/filesystem implementation remain trusted control-plane
+authority.
