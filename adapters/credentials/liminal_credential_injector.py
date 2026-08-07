@@ -8,6 +8,7 @@ in receipts or governance documents.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
 from sdk.liminal_credential_broker import CredentialBroker, CredentialError, CredentialUseRequest
@@ -16,20 +17,34 @@ from sdk.liminal_post_sandbox_contracts import canonical_sha256
 INJECTION_SCHEMA = "liminal-credential-injection-receipt-v0.1"
 ZERO_SHA256 = "0" * 64
 
-AUTHORITY = {
-    "mode": "trusted_secret_injection_boundary",
-    "secret_provider_access": True,
-    "secret_injection": True,
-    "secret_material_export": False,
-    "raw_secret_receipt_storage": False,
-    "network_authority": False,
-    "credential_discovery": False,
-    "deployment": False,
-}
+_AUTHORITY_ITEMS = (
+    ("mode", "trusted_secret_injection_boundary"),
+    ("secret_provider_access", True),
+    ("secret_injection", True),
+    ("adapter_authentication", True),
+    ("secret_material_export", False),
+    ("raw_secret_receipt_storage", False),
+    ("network_authority", False),
+    ("credential_discovery", False),
+    ("deployment", False),
+)
+AUTHORITY = MappingProxyType(dict(_AUTHORITY_ITEMS))
+
+_INJECTION_RECEIPT_KEYS = frozenset({
+    "schema", "call_id", "subject_id", "credential_ref_sha256", "request_sha256",
+    "binding_sha256", "capability_receipt_sha256", "authorization_receipt_sha256",
+    "lease_ref_sha256", "destination_sha256", "injection_target_sha256", "decision",
+    "injection_outcome", "result_sha256", "reason_codes", "at_unix", "authority",
+    "receipt_sha256",
+})
 
 
 class CredentialInjectionError(RuntimeError):
     pass
+
+
+def _authority_doc() -> dict[str, Any]:
+    return dict(_AUTHORITY_ITEMS)
 
 
 @dataclass(frozen=True)
@@ -98,7 +113,7 @@ class CredentialInjectionReceipt:
             "result_sha256": self.result_sha256,
             "reason_codes": list(self.reason_codes),
             "at_unix": self.at_unix,
-            "authority": AUTHORITY,
+            "authority": _authority_doc(),
         }
 
     def as_document(self) -> dict[str, Any]:
@@ -110,8 +125,18 @@ InjectionSink = Callable[[InjectionContext, str], InjectionObservation]
 
 
 class CredentialInjector:
-    def __init__(self, *, broker: CredentialBroker, secret_provider: SecretProvider, sink: InjectionSink) -> None:
+    def __init__(
+        self,
+        *,
+        broker: CredentialBroker,
+        adapter_token: str,
+        secret_provider: SecretProvider,
+        sink: InjectionSink,
+    ) -> None:
+        if not isinstance(adapter_token, str) or len(adapter_token) < 32 or "\x00" in adapter_token:
+            raise CredentialInjectionError("invalid_adapter_token")
         self.broker = broker
+        self._adapter_token = adapter_token
         self.secret_provider = secret_provider
         self.sink = sink
         self._receipts: list[CredentialInjectionReceipt] = []
@@ -129,7 +154,7 @@ class CredentialInjector:
             "authorization_receipt_sha256": authorization["receipt_sha256"],
             "destination_sha256": canonical_sha256({"protocol": req.protocol, "domain": req.domain, "port": req.port}),
             "injection_target_sha256": canonical_sha256(req.injection_target),
-            "at_unix": req.at_unix,
+            "at_unix": authorization["decision_at_unix"],
         }
         if authorization["decision"] != "ALLOW":
             return self._receipt(
@@ -144,7 +169,7 @@ class CredentialInjector:
         lease_id = authorization["lease_id"]
         lease_ref_sha = canonical_sha256({"lease_id": lease_id})
         try:
-            trusted = self.broker.consume_for_trusted_adapter(lease_id, at_unix=req.at_unix)
+            trusted = self.broker.consume_for_trusted_adapter(lease_id, adapter_token=self._adapter_token)
         except CredentialError as exc:
             return self._receipt(
                 **common,
@@ -212,13 +237,16 @@ class CredentialInjector:
 
 
 def verify_injection_receipt(document: Mapping[str, Any]) -> dict[str, Any]:
-    raw = dict(document)
-    receipt_sha = raw.pop("receipt_sha256", None)
-    if raw.get("schema") != INJECTION_SCHEMA or raw.get("authority") != AUTHORITY:
+    raw_full = dict(document)
+    if set(raw_full) != _INJECTION_RECEIPT_KEYS:
+        raise CredentialInjectionError("injection_schema_mismatch")
+    raw = dict(raw_full)
+    receipt_sha = raw.pop("receipt_sha256")
+    if raw.get("schema") != INJECTION_SCHEMA or raw.get("authority") != _authority_doc():
         raise CredentialInjectionError("injection_schema_mismatch")
     if receipt_sha != canonical_sha256(raw):
         raise CredentialInjectionError("injection_digest_mismatch")
-    return dict(document)
+    return raw_full
 
 
 __all__ = [
