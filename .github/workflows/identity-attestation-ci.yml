@@ -1,0 +1,149 @@
+name: ChatGPT Identity and KMS Attestation Bridge
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/identity-attestation-ci.yml
+      - docs/CHATGPT_IDENTITY_ATTESTATION_BRIDGE.md
+      - examples/chatgpt_identity_attestation/**
+      - sdk/liminal_identity_attestation/**
+      - tools/chatgpt_identity_attestation.py
+      - tests/test_chatgpt_identity_attestation.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chatgpt-identity-attestation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head and OpenSSL
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/identity-attestation
+          git rev-parse HEAD | tee reports/identity-attestation/head-sha.txt
+          openssl version | tee reports/identity-attestation/openssl-version.txt
+
+      - name: Run v1.1 contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_chatgpt_identity_attestation.py -v \
+            2>&1 | tee reports/identity-attestation/unit-tests.log
+
+      - name: Run full earlier stack regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          make test 2>&1 | tee reports/identity-attestation/full-stack-tests.log
+          make test-repo 2>&1 | tee reports/identity-attestation/repo-hygiene.log
+
+      - name: Generate full identity-bound fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 examples/chatgpt_identity_attestation/self_check.py \
+            --output-dir reports/identity-attestation/self-check \
+            | tee reports/identity-attestation/self-check.stdout.json
+
+      - name: Verify fixture through CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/chatgpt_identity_attestation.py verify \
+            --bundle reports/identity-attestation/self-check/identity-bundle.json \
+            --identity-trust-store reports/identity-attestation/self-check/identity-trust-store.json \
+            --capsule reports/identity-attestation/self-check/governance-capsule.json \
+            --governance-trust-store reports/identity-attestation/self-check/governance-trust-store.json \
+            --at-unix 2000000010 \
+            --expected-session-sha256 16a65b5753dff117079b79133941ad3d8d31712823c79c5f4667b74ca57ed6ed \
+            --expected-tenant-id tenant:liminal \
+            --expected-organization-id org:liminal \
+            --expected-role repository-maintainer \
+            | tee reports/identity-attestation/cli-verification.json
+
+      - name: Verify bundle tampering and expiry fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp reports/identity-attestation/self-check/identity-bundle.json \
+            reports/identity-attestation/tampered-bundle.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('reports/identity-attestation/tampered-bundle.json')
+          value = json.loads(path.read_text())
+          value['capsule_sha256'] = 'f' * 64
+          path.write_text(json.dumps(value, indent=2, sort_keys=True) + '\n')
+          PY
+          set +e
+          python3 tools/chatgpt_identity_attestation.py verify \
+            --bundle reports/identity-attestation/tampered-bundle.json \
+            --identity-trust-store reports/identity-attestation/self-check/identity-trust-store.json \
+            --capsule reports/identity-attestation/self-check/governance-capsule.json \
+            --governance-trust-store reports/identity-attestation/self-check/governance-trust-store.json \
+            --at-unix 2000000010 \
+            > reports/identity-attestation/tamper.stdout.txt \
+            2> reports/identity-attestation/tamper.stderr.txt
+          tamper_status=$?
+          python3 tools/chatgpt_identity_attestation.py verify \
+            --bundle reports/identity-attestation/self-check/identity-bundle.json \
+            --identity-trust-store reports/identity-attestation/self-check/identity-trust-store.json \
+            --capsule reports/identity-attestation/self-check/governance-capsule.json \
+            --governance-trust-store reports/identity-attestation/self-check/governance-trust-store.json \
+            --at-unix 2000000400 \
+            > reports/identity-attestation/expiry.stdout.txt \
+            2> reports/identity-attestation/expiry.stderr.txt
+          expiry_status=$?
+          set -e
+          test "$tamper_status" -eq 2
+          test "$expiry_status" -eq 2
+
+      - name: Verify evidence excludes secret material
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -R --binary-files=without-match -n 'BEGIN PRIVATE KEY' reports/identity-attestation
+          ! grep -R --binary-files=without-match -n 'secret-token-value' reports/identity-attestation
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          result = json.loads(
+              Path('reports/identity-attestation/cli-verification.json').read_text()
+          )
+          assert result['status'] == 'valid'
+          assert result['authority']['automatic_write_authorization'] is False
+          assert result['authority']['kms_invocation_ownership'] is False
+          assert result['capsule_verification']['authority']['automatic_merge'] is False
+          PY
+
+      - name: Hash and upload evidence
+        if: always()
+        shell: bash
+        run: |
+          find reports/identity-attestation -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > reports/identity-attestation/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chatgpt-identity-attestation-${{ github.run_id }}
+          path: reports/identity-attestation/
+          if-no-files-found: error
+          retention-days: 14
