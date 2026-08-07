@@ -53,7 +53,7 @@ def default_scenarios() -> tuple[Scenario, ...]:
         Scenario("package-egress", "composed-risk", ("package.install", "network.connect_domain"), "REVISE", False),
         Scenario("egress-credential", "credential-boundary", ("network.connect_domain", "credential.access"), "REVISE", False),
         Scenario("runtime-credential", "runtime-integrity", ("runtime.configure", "credential.access", "process.execute"), "REVISE", False),
-        Scenario("package-credential-child", "composed-risk", ("package.install", "credential.access", "process.spawn_child"), "BLOCK", False),
+        Scenario("package-credential-child", "composed-risk", ("package.install", "credential.access", "process.spawn_child"), "CONTAIN", True),
         Scenario("full-composed-escalation", "composed-risk", ("package.install", "network.connect_domain", "credential.access", "process.spawn_child"), "CONTAIN", True),
         Scenario("runtime-egress-credential-child", "runtime-integrity", ("runtime.configure", "network.connect_domain", "credential.access", "process.spawn_child"), "CONTAIN", True),
     )
