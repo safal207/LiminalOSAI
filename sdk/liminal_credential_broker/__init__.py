@@ -1,15 +1,20 @@
 """Bound credential-use governance for LiminalOS.
 
-The model-facing broker never reads or returns secret material. It combines an
-existing ``credential.access`` capability with a host-provisioned exact binding
-for purpose, destination and injection target, then issues a short-lived opaque
-lease. Secret resolution happens only in a trusted adapter outside this SDK.
+The model-facing broker never reads or returns secret material. A host creates
+it with an immutable set of exact credential bindings and a trusted-adapter
+token before exposing the broker to model-facing code. Authorization uses a
+host-controlled clock and produces short-lived, one-time opaque leases.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import re
+import threading
+import time
 from dataclasses import dataclass
-from typing import Any, Mapping
+from types import MappingProxyType
+from typing import Any, Callable, Mapping, Sequence
 
 from sdk.liminal_capability_broker import CapabilityBroker
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
@@ -19,30 +24,48 @@ BINDING_SCHEMA = "liminal-credential-binding-v0.1"
 ZERO_SHA256 = "0" * 64
 MAX_LEASE_TTL_SECONDS = 30
 
-AUTHORITY = {
-    "mode": "credential_use_governance_only",
-    "binding_registration": True,
-    "credential_capability_admission": True,
-    "opaque_lease_issue": True,
-    "lease_consumption": True,
-    "secret_provider_access": False,
-    "secret_material_export": False,
-    "network_authority": False,
-    "process_authority": False,
-    "deployment": False,
-    "automatic_release": False,
-}
+_AUTHORITY_ITEMS = (
+    ("mode", "credential_use_governance_only"),
+    ("immutable_host_bindings", True),
+    ("credential_capability_admission", True),
+    ("opaque_lease_issue", True),
+    ("lease_consumption", True),
+    ("trusted_clock", True),
+    ("atomic_state_transitions", True),
+    ("secret_provider_access", False),
+    ("secret_material_export", False),
+    ("network_authority", False),
+    ("process_authority", False),
+    ("deployment", False),
+    ("automatic_release", False),
+)
+# Public read-only metadata for inspection. Trust decisions never hash/compare
+# this object; documents receive a fresh plain dict from _authority_doc().
+AUTHORITY = MappingProxyType(dict(_AUTHORITY_ITEMS))
 
 _IDENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,191}$")
 _DOMAIN = re.compile(r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$")
 _HEADER = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}$")
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 
+_AUTH_RECEIPT_KEYS = frozenset({
+    "schema", "authorization_id", "call_id", "subject_id", "credential_ref_sha256",
+    "request_sha256", "binding_sha256", "capability_receipt_sha256", "decision",
+    "reason_codes", "lease_id", "lease_expires_at_unix", "request_declared_at_unix",
+    "decision_at_unix", "authority", "receipt_sha256",
+})
+
+Clock = Callable[[], int]
+
 
 class CredentialError(ValueError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+def _authority_doc() -> dict[str, Any]:
+    return dict(_AUTHORITY_ITEMS)
 
 
 @dataclass(frozen=True)
@@ -66,7 +89,7 @@ class CredentialBinding:
             "domain": self.domain,
             "port": self.port,
             "injection_target": self.injection_target,
-            "authority": AUTHORITY,
+            "authority": _authority_doc(),
         }
 
     def as_document(self) -> dict[str, Any]:
@@ -103,7 +126,7 @@ class CredentialBinding:
             "schema", "binding_id", "credential_id", "purpose", "protocol", "domain",
             "port", "injection_target", "authority", "binding_sha256",
         }
-        if set(raw) != expected or raw.get("schema") != BINDING_SCHEMA or raw.get("authority") != AUTHORITY:
+        if set(raw) != expected or raw.get("schema") != BINDING_SCHEMA or raw.get("authority") != _authority_doc():
             raise CredentialError("binding_schema_mismatch")
         item = cls(
             binding_id=_ident(raw["binding_id"], "binding_id"),
@@ -149,6 +172,8 @@ class CredentialUseRequest:
 
     def body(self) -> dict[str, Any]:
         r = self.normalized()
+        # at_unix is requester-declared evidence only. It is never used for TTL,
+        # capability expiry, revocation, or lease-consumption decisions.
         return {
             "call_id": r.call_id,
             "subject_id": r.subject_id,
@@ -176,7 +201,8 @@ class CredentialAuthorizationReceipt:
     reason_codes: tuple[str, ...]
     lease_id: str | None
     lease_expires_at_unix: int | None
-    at_unix: int
+    request_declared_at_unix: int
+    decision_at_unix: int
     receipt_sha256: str
 
     def body(self) -> dict[str, Any]:
@@ -193,8 +219,9 @@ class CredentialAuthorizationReceipt:
             "reason_codes": list(self.reason_codes),
             "lease_id": self.lease_id,
             "lease_expires_at_unix": self.lease_expires_at_unix,
-            "at_unix": self.at_unix,
-            "authority": AUTHORITY,
+            "request_declared_at_unix": self.request_declared_at_unix,
+            "decision_at_unix": self.decision_at_unix,
+            "authority": _authority_doc(),
         }
 
     def as_document(self) -> dict[str, Any]:
@@ -207,7 +234,6 @@ class _Lease:
     request: CredentialUseRequest
     binding: CredentialBinding
     capability_id: str
-    capability_receipt_sha256: str
     authorization_receipt_sha256: str
     issued_at_unix: int
     expires_at_unix: int
@@ -228,130 +254,166 @@ class TrustedCredentialReference:
 
 
 class CredentialBroker:
-    def __init__(self, *, capability_broker: CapabilityBroker, lease_ttl_seconds: int = 10) -> None:
+    """Host-configured, then model-facing credential-use broker.
+
+    Bindings and the adapter authentication secret are supplied once at
+    construction. There is intentionally no public post-construction binding
+    registration method.
+    """
+
+    def __init__(
+        self,
+        *,
+        capability_broker: CapabilityBroker,
+        bindings: Sequence[Mapping[str, Any]],
+        adapter_token: str,
+        lease_ttl_seconds: int = 10,
+        clock: Clock | None = None,
+    ) -> None:
+        if not isinstance(capability_broker, CapabilityBroker):
+            raise CredentialError("invalid_capability_broker")
         if isinstance(lease_ttl_seconds, bool) or not isinstance(lease_ttl_seconds, int) or not 1 <= lease_ttl_seconds <= MAX_LEASE_TTL_SECONDS:
             raise CredentialError("invalid_lease_ttl")
-        self.capability_broker = capability_broker
-        self.lease_ttl_seconds = lease_ttl_seconds
-        self._bindings: dict[str, CredentialBinding] = {}
+        if not isinstance(adapter_token, str) or len(adapter_token) < 32 or "\x00" in adapter_token:
+            raise CredentialError("invalid_adapter_token")
+        if clock is not None and not callable(clock):
+            raise CredentialError("invalid_clock")
+
+        binding_map: dict[str, CredentialBinding] = {}
+        for document in bindings:
+            binding = CredentialBinding.from_document(document)
+            existing = binding_map.get(binding.binding_id)
+            if existing and existing.binding_sha256 != binding.binding_sha256:
+                raise CredentialError("duplicate_binding_id")
+            binding_map[binding.binding_id] = binding
+        if not binding_map:
+            raise CredentialError("bindings_required")
+
+        self._capability_broker = capability_broker
+        self._bindings = MappingProxyType(binding_map)
+        self._adapter_token_sha256 = hashlib.sha256(adapter_token.encode("utf-8")).hexdigest()
+        self._lease_ttl_seconds = lease_ttl_seconds
+        self._clock = clock or (lambda: int(time.time()))
+        self._lock = threading.RLock()
         self._leases: dict[str, _Lease] = {}
         self._seen_call_ids: set[str] = set()
         self._receipts: list[CredentialAuthorizationReceipt] = []
         self._contained = False
         self._containment_evidence_sha256 = ZERO_SHA256
 
-    def register_binding(self, document: Mapping[str, Any]) -> dict[str, Any]:
-        binding = CredentialBinding.from_document(document)
-        existing = self._bindings.get(binding.binding_id)
-        if existing and existing.binding_sha256 != binding.binding_sha256:
-            raise CredentialError("duplicate_binding_id")
-        self._bindings[binding.binding_id] = binding
-        return binding.as_document()
-
     def enter_containment(self, incident_receipt_sha256: str) -> None:
-        self._containment_evidence_sha256 = _sha(incident_receipt_sha256, "incident_receipt_sha256")
-        self._contained = True
+        with self._lock:
+            self._containment_evidence_sha256 = _sha(incident_receipt_sha256, "incident_receipt_sha256")
+            self._contained = True
 
     def exit_containment(self, human_release_receipt_sha256: str) -> None:
-        self._containment_evidence_sha256 = _sha(human_release_receipt_sha256, "human_release_receipt_sha256")
-        self._contained = False
+        with self._lock:
+            self._containment_evidence_sha256 = _sha(human_release_receipt_sha256, "human_release_receipt_sha256")
+            self._contained = False
 
     def authorize(self, request: CredentialUseRequest) -> dict[str, Any]:
         req = request.normalized()
         request_sha = canonical_sha256(req.body())
         credential_ref_sha = canonical_sha256({"credential_id": req.credential_id})
-        if req.call_id in self._seen_call_ids:
-            return self._receipt(
-                req=req, credential_ref_sha=credential_ref_sha, request_sha=request_sha,
-                binding_sha=ZERO_SHA256, capability_receipt_sha=ZERO_SHA256,
-                decision="BLOCK", reasons=("replayed_call_id",), lease_id=None, lease_expires=None,
+        with self._lock:
+            now = self._now()
+            if req.call_id in self._seen_call_ids:
+                return self._receipt(
+                    req=req, decision_at=now, credential_ref_sha=credential_ref_sha, request_sha=request_sha,
+                    binding_sha=ZERO_SHA256, capability_receipt_sha=ZERO_SHA256,
+                    decision="BLOCK", reasons=("replayed_call_id",), lease_id=None, lease_expires=None,
+                )
+            self._seen_call_ids.add(req.call_id)
+            if self._contained:
+                return self._receipt(
+                    req=req, decision_at=now, credential_ref_sha=credential_ref_sha, request_sha=request_sha,
+                    binding_sha=ZERO_SHA256, capability_receipt_sha=ZERO_SHA256,
+                    decision="BLOCK", reasons=("containment_active",), lease_id=None, lease_expires=None,
+                )
+            binding = self._match_binding(req)
+            if binding is None:
+                return self._receipt(
+                    req=req, decision_at=now, credential_ref_sha=credential_ref_sha, request_sha=request_sha,
+                    binding_sha=ZERO_SHA256, capability_receipt_sha=ZERO_SHA256,
+                    decision="BLOCK", reasons=("binding_mismatch",), lease_id=None, lease_expires=None,
+                )
+            capability = self._capability_broker.authorize(
+                subject_id=req.subject_id,
+                capability_type="credential.access",
+                policy_sha256=req.policy_sha256,
+                requested_scope={"credential_ids": [req.credential_id], "purpose": req.purpose},
+                action={
+                    "operation": "credential_use",
+                    "call_id": req.call_id,
+                    "request_sha256": request_sha,
+                    "binding_sha256": binding.binding_sha256,
+                    "destination_sha256": canonical_sha256({
+                        "protocol": req.protocol, "domain": req.domain, "port": req.port,
+                    }),
+                    "injection_target_sha256": canonical_sha256(req.injection_target),
+                },
+                at_unix=now,
             )
-        self._seen_call_ids.add(req.call_id)
-        if self._contained:
-            return self._receipt(
-                req=req, credential_ref_sha=credential_ref_sha, request_sha=request_sha,
-                binding_sha=ZERO_SHA256, capability_receipt_sha=ZERO_SHA256,
-                decision="BLOCK", reasons=("containment_active",), lease_id=None, lease_expires=None,
-            )
-        binding = self._match_binding(req)
-        if binding is None:
-            return self._receipt(
-                req=req, credential_ref_sha=credential_ref_sha, request_sha=request_sha,
-                binding_sha=ZERO_SHA256, capability_receipt_sha=ZERO_SHA256,
-                decision="BLOCK", reasons=("binding_mismatch",), lease_id=None, lease_expires=None,
-            )
-        capability = self.capability_broker.authorize(
-            subject_id=req.subject_id,
-            capability_type="credential.access",
-            policy_sha256=req.policy_sha256,
-            requested_scope={"credential_ids": [req.credential_id], "purpose": req.purpose},
-            action={
-                "operation": "credential_use",
-                "call_id": req.call_id,
-                "request_sha256": request_sha,
-                "binding_sha256": binding.binding_sha256,
-                "destination_sha256": canonical_sha256({
-                    "protocol": req.protocol, "domain": req.domain, "port": req.port,
-                }),
-                "injection_target_sha256": canonical_sha256(req.injection_target),
-            },
-            at_unix=req.at_unix,
-        )
-        if capability["decision"] != "ALLOW":
-            return self._receipt(
-                req=req, credential_ref_sha=credential_ref_sha, request_sha=request_sha,
+            if capability["decision"] != "ALLOW":
+                return self._receipt(
+                    req=req, decision_at=now, credential_ref_sha=credential_ref_sha, request_sha=request_sha,
+                    binding_sha=binding.binding_sha256,
+                    capability_receipt_sha=capability["receipt_sha256"], decision="BLOCK",
+                    reasons=tuple(capability["reason_codes"]), lease_id=None, lease_expires=None,
+                )
+            lease_id = f"credential-lease:{len(self._leases)+1}:{canonical_sha256({'call_id': req.call_id, 'binding': binding.binding_sha256, 'decision_at': now})[:16]}"
+            expires = now + self._lease_ttl_seconds
+            authorization = self._receipt(
+                req=req, decision_at=now, credential_ref_sha=credential_ref_sha, request_sha=request_sha,
                 binding_sha=binding.binding_sha256,
-                capability_receipt_sha=capability["receipt_sha256"], decision="BLOCK",
-                reasons=tuple(capability["reason_codes"]), lease_id=None, lease_expires=None,
+                capability_receipt_sha=capability["receipt_sha256"], decision="ALLOW",
+                reasons=("binding_match", "credential_capability_admitted", "opaque_lease_issued"),
+                lease_id=lease_id, lease_expires=expires,
             )
-        lease_id = f"credential-lease:{len(self._leases)+1}:{canonical_sha256({'call_id': req.call_id, 'binding': binding.binding_sha256})[:16]}"
-        expires = req.at_unix + self.lease_ttl_seconds
-        base = self._receipt(
-            req=req, credential_ref_sha=credential_ref_sha, request_sha=request_sha,
-            binding_sha=binding.binding_sha256,
-            capability_receipt_sha=capability["receipt_sha256"], decision="ALLOW",
-            reasons=("binding_match", "credential_capability_admitted", "opaque_lease_issued"),
-            lease_id=lease_id, lease_expires=expires,
-        )
-        self._leases[lease_id] = _Lease(
-            lease_id=lease_id, request=req, binding=binding,
-            capability_id=capability["capability_id"], capability_receipt_sha256=capability["receipt_sha256"],
-            authorization_receipt_sha256=base["receipt_sha256"], issued_at_unix=req.at_unix,
-            expires_at_unix=expires,
-        )
-        return base
+            self._leases[lease_id] = _Lease(
+                lease_id=lease_id, request=req, binding=binding,
+                capability_id=capability["capability_id"],
+                authorization_receipt_sha256=authorization["receipt_sha256"],
+                issued_at_unix=now, expires_at_unix=expires,
+            )
+            return authorization
 
-    def consume_for_trusted_adapter(self, lease_id: str, *, at_unix: int) -> TrustedCredentialReference:
-        _time(at_unix)
-        if self._contained:
-            raise CredentialError("containment_active")
-        lease = self._leases.get(lease_id)
-        if lease is None:
-            raise CredentialError("unknown_lease")
-        if lease.consumed:
-            raise CredentialError("lease_replayed")
-        if at_unix > lease.expires_at_unix:
-            raise CredentialError("lease_expired")
-        if at_unix < lease.issued_at_unix:
-            raise CredentialError("lease_time_regression")
-        if not self._capability_still_active(lease.capability_id, at_unix):
-            raise CredentialError("source_capability_inactive")
-        # Consume before secret resolution. Provider/sink failures never reactivate it.
-        lease.consumed = True
-        return TrustedCredentialReference(
-            lease_id=lease.lease_id,
-            credential_id=lease.request.credential_id,
-            purpose=lease.request.purpose,
-            protocol=lease.request.protocol,
-            domain=lease.request.domain,
-            port=lease.request.port,
-            injection_target=lease.request.injection_target,
-            authorization_receipt_sha256=lease.authorization_receipt_sha256,
-            binding_sha256=lease.binding.binding_sha256,
-        )
+    def consume_for_trusted_adapter(self, lease_id: str, *, adapter_token: str) -> TrustedCredentialReference:
+        # Authenticate the host adapter before examining or mutating lease state.
+        if not self._adapter_authenticated(adapter_token):
+            raise CredentialError("trusted_adapter_auth_failed")
+        with self._lock:
+            now = self._now()
+            if self._contained:
+                raise CredentialError("containment_active")
+            lease = self._leases.get(lease_id)
+            if lease is None:
+                raise CredentialError("unknown_lease")
+            if lease.consumed:
+                raise CredentialError("lease_replayed")
+            if now >= lease.expires_at_unix:
+                raise CredentialError("lease_expired")
+            if now < lease.issued_at_unix:
+                raise CredentialError("trusted_clock_regression")
+            if not self._capability_still_active(lease.capability_id, now):
+                raise CredentialError("source_capability_inactive")
+            # Consume before secret resolution. Provider/sink failures never reactivate it.
+            lease.consumed = True
+            return TrustedCredentialReference(
+                lease_id=lease.lease_id,
+                credential_id=lease.request.credential_id,
+                purpose=lease.request.purpose,
+                protocol=lease.request.protocol,
+                domain=lease.request.domain,
+                port=lease.request.port,
+                injection_target=lease.request.injection_target,
+                authorization_receipt_sha256=lease.authorization_receipt_sha256,
+                binding_sha256=lease.binding.binding_sha256,
+            )
 
     def receipts(self) -> tuple[dict[str, Any], ...]:
-        return tuple(r.as_document() for r in self._receipts)
+        with self._lock:
+            return tuple(r.as_document() for r in self._receipts)
 
     def _match_binding(self, req: CredentialUseRequest) -> CredentialBinding | None:
         matches = [
@@ -363,21 +425,32 @@ class CredentialBroker:
             and binding.port == req.port
             and binding.injection_target == req.injection_target
         ]
-        if len(matches) != 1:
-            return None
-        return matches[0]
+        return matches[0] if len(matches) == 1 else None
 
     def _capability_still_active(self, capability_id: str, at_unix: int) -> bool:
-        state = self.capability_broker.state_document()
+        state = self._capability_broker.state_document()
         for item in state["capabilities"]:
             if item["capability_id"] == capability_id:
                 return item["status"] == "active" and at_unix < item["expires_at_unix"]
         return False
 
+    def _adapter_authenticated(self, adapter_token: Any) -> bool:
+        if not isinstance(adapter_token, str):
+            return False
+        candidate = hashlib.sha256(adapter_token.encode("utf-8")).hexdigest()
+        return hmac.compare_digest(candidate, self._adapter_token_sha256)
+
+    def _now(self) -> int:
+        value = self._clock()
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise CredentialError("trusted_clock_invalid")
+        return value
+
     def _receipt(
         self,
         *,
         req: CredentialUseRequest,
+        decision_at: int,
         credential_ref_sha: str,
         request_sha: str,
         binding_sha: str,
@@ -399,7 +472,8 @@ class CredentialBroker:
             reason_codes=tuple(sorted(set(reasons))),
             lease_id=lease_id,
             lease_expires_at_unix=lease_expires,
-            at_unix=req.at_unix,
+            request_declared_at_unix=req.at_unix,
+            decision_at_unix=decision_at,
             receipt_sha256="",
         )
         receipt = CredentialAuthorizationReceipt(**{**base.__dict__, "receipt_sha256": canonical_sha256(base.body())})
@@ -408,13 +482,16 @@ class CredentialBroker:
 
 
 def verify_authorization_receipt(document: Mapping[str, Any]) -> dict[str, Any]:
-    raw = dict(document)
-    receipt_sha = raw.pop("receipt_sha256", None)
-    if raw.get("schema") != AUTH_SCHEMA or raw.get("authority") != AUTHORITY:
+    raw_full = dict(document)
+    if set(raw_full) != _AUTH_RECEIPT_KEYS:
+        raise CredentialError("authorization_schema_mismatch")
+    raw = dict(raw_full)
+    receipt_sha = raw.pop("receipt_sha256")
+    if raw.get("schema") != AUTH_SCHEMA or raw.get("authority") != _authority_doc():
         raise CredentialError("authorization_schema_mismatch")
     if receipt_sha != canonical_sha256(raw):
         raise CredentialError("authorization_digest_mismatch")
-    return dict(document)
+    return raw_full
 
 
 def _ident(value: Any, name: str) -> str:
