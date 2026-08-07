@@ -21,6 +21,8 @@ jobs:
         run: python3 -m unittest tests/test_capability_broker_phase1.py -v
       - name: Re-run causal escalation
         run: python3 -m unittest tests/test_causal_escalation_phase3.py -v
+      - name: Build production kernel
+        run: make
       - name: Run full repository regression
         run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Verify authority boundary
