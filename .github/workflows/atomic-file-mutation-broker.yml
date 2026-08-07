@@ -49,7 +49,10 @@ jobs:
 
       - name: Verify model-facing file SDK has no filesystem mutation imports
         run: |
+          set -euo pipefail
+          test -d sdk/liminal_file_mutation_broker
           ! grep -R -nE '(^|[[:space:]])(import|from)[[:space:]]+(os|pathlib|shutil|tempfile)([[:space:].]|$)' sdk/liminal_file_mutation_broker
+          ! grep -R -nE '(__import__|importlib\.import_module)' sdk/liminal_file_mutation_broker
 
       - name: Verify explicit authority boundary
         run: |
@@ -66,7 +69,11 @@ jobs:
           assert ADAPTER_AUTHORITY['target_file_delete'] is False
           assert ADAPTER_AUTHORITY['internal_temp_file_create'] is True
           assert ADAPTER_AUTHORITY['symlink_follow'] is False
+          assert ADAPTER_AUTHORITY['ordinary_mode_bits_preserved'] is True
           assert ADAPTER_AUTHORITY['privileged_mode_bits_preserved'] is False
+          assert ADAPTER_AUTHORITY['uid_gid_preserved'] is True
+          assert ADAPTER_AUTHORITY['acl_preserved'] is False
+          assert ADAPTER_AUTHORITY['extended_attributes_preserved'] is False
           PY
 
       - name: Build production kernel fixture
