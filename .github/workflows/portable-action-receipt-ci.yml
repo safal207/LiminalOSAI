@@ -1,0 +1,198 @@
+name: ChatGPT Portable Action Receipt
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/portable-action-receipt-ci.yml
+      - docs/CHATGPT_PORTABLE_ACTION_RECEIPT.md
+      - examples/chatgpt_portable_action_receipt/**
+      - sdk/liminal_portable_receipt/**
+      - tools/chatgpt_portable_action_receipt.py
+      - tests/test_chatgpt_portable_action_receipt.py
+      - Makefile
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chatgpt-portable-action-receipt-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head and OpenSSL
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/portable-receipt
+          git rev-parse HEAD | tee reports/portable-receipt/head-sha.txt
+          openssl version | tee reports/portable-receipt/openssl-version.txt
+
+      - name: Run v1.2 adversarial contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_chatgpt_portable_action_receipt.py -v \
+            2>&1 | tee reports/portable-receipt/unit-tests.log
+
+      - name: Run full repository regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          make test 2>&1 | tee reports/portable-receipt/full-stack-tests.log
+          make test-repo 2>&1 | tee reports/portable-receipt/repo-hygiene.log
+
+      - name: Generate full portable receipt fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 examples/chatgpt_portable_action_receipt/self_check.py \
+            --output-dir reports/portable-receipt/self-check \
+            | tee reports/portable-receipt/self-check.stdout.json
+
+      - name: Verify receipt in a separate CLI process
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/chatgpt_portable_action_receipt.py verify \
+            --receipt reports/portable-receipt/self-check/portable-action-receipt.json \
+            --governance-trust-store reports/portable-receipt/self-check/governance-trust-store.json \
+            --identity-trust-store reports/portable-receipt/self-check/identity-trust-store.json \
+            --expected-repository safal207/LiminalOSAI \
+            --expected-source-head 2222222222222222222222222222222222222222 \
+            --expected-result-head 3333333333333333333333333333333333333333 \
+            --output reports/portable-receipt/cli-verification.json
+
+      - name: Generate ecosystem projections through CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt=reports/portable-receipt/self-check/portable-action-receipt.json
+          python3 tools/chatgpt_portable_action_receipt.py project \
+            --receipt "$receipt" --format proofpath \
+            --output reports/portable-receipt/cli-proofpath.json
+          python3 tools/chatgpt_portable_action_receipt.py project \
+            --receipt "$receipt" --format cml \
+            --source-commit 2222222222222222222222222222222222222222 \
+            --output reports/portable-receipt/cli-cml.json
+          python3 tools/chatgpt_portable_action_receipt.py project \
+            --receipt "$receipt" --format liminaldb \
+            --output reports/portable-receipt/cli-liminaldb.json
+          python3 tools/chatgpt_portable_action_receipt.py project \
+            --receipt "$receipt" --format rinse-supersession \
+            --output reports/portable-receipt/cli-rinse.json
+
+      - name: Verify projection authority boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path('reports/portable-receipt')
+          verification = json.loads((root / 'cli-verification.json').read_text())
+          proofpath = json.loads((root / 'cli-proofpath.json').read_text())
+          cml = json.loads((root / 'cli-cml.json').read_text())
+          liminaldb = json.loads((root / 'cli-liminaldb.json').read_text())
+          rinse = json.loads((root / 'cli-rinse.json').read_text())
+
+          assert verification['status'] == 'valid'
+          assert verification['fresh_authorization'] is False
+          assert verification['authority']['execution_authority'] is False
+          assert verification['authority']['automatic_write_authorization'] is False
+
+          assert len(proofpath) == 1
+          assert proofpath[0]['schema'] == 'org.proofpath.authorization-record.v0.1'
+          assert proofpath[0]['consumption_state'] == 'CONSUMED'
+          assert 'grants no fresh authority' in proofpath[0]['claim_boundary']
+
+          assert cml['schema_version'] == 'cml-memory-pack-v1'
+          assert cml['manifest']['merge_authority'] is False
+          assert cml['manifest']['execution_authority'] is False
+          assert cml['manifest']['contains_private_data'] is False
+
+          assert liminaldb['profile'] == 'org.liminaldb.trustworthy-transition-ledger.v0.1'
+          assert liminaldb['projection_boundary']['durability_only'] is True
+          assert liminaldb['projection_boundary']['authority_effect'] == 'none'
+          assert all(
+              event.get('dimensions', {}).get('causal_validity') in (None, 'NOT_EVALUATED')
+              for event in liminaldb['event_inputs']
+          )
+
+          assert rinse['supersession']['source_receipt_preserved'] is True
+          assert rinse['supersession']['authority_effect'] == 'none'
+          assert rinse['interpretations'][0]['source_trace_ids'] == rinse['interpretations'][1]['source_trace_ids']
+          PY
+
+      - name: Verify tampering fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp reports/portable-receipt/self-check/portable-action-receipt.json \
+            reports/portable-receipt/tampered-receipt.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('reports/portable-receipt/tampered-receipt.json')
+          value = json.loads(path.read_text())
+          value['claims']['result_head_oid'] = '4' * 40
+          path.write_text(json.dumps(value, indent=2, sort_keys=True) + '\n')
+          PY
+          set +e
+          python3 tools/chatgpt_portable_action_receipt.py verify \
+            --receipt reports/portable-receipt/tampered-receipt.json \
+            --governance-trust-store reports/portable-receipt/self-check/governance-trust-store.json \
+            --identity-trust-store reports/portable-receipt/self-check/identity-trust-store.json \
+            > reports/portable-receipt/tamper.stdout.txt \
+            2> reports/portable-receipt/tamper.stderr.txt
+          status=$?
+          set -e
+          test "$status" -eq 2
+
+      - name: Verify evidence excludes secret and raw payload material
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -R --binary-files=without-match -n 'BEGIN PRIVATE KEY' reports/portable-receipt
+          ! grep -R --binary-files=without-match -n 'secret-token-value' reports/portable-receipt
+          ! grep -R --binary-files=without-match -n 'visible intent redacted by digest' reports/portable-receipt
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('reports/portable-receipt/self-check')
+          receipt = json.loads((root / 'portable-action-receipt.json').read_text())
+          assert receipt['claims']['redaction_profile'] == 'liminal-digest-only-redaction-v1.2'
+          assert receipt['claims']['capability']['status'] == 'not_implemented'
+          assert receipt['claims']['containment']['status'] == 'not_implemented'
+          replay = json.loads((root / 'projection-ledger-verification.json').read_text())
+          assert replay['replay_equal'] is True
+          assert replay['authority_effect'] == 'none'
+          PY
+
+      - name: Hash evidence
+        if: always()
+        shell: bash
+        run: |
+          find reports/portable-receipt -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z | xargs -0 sha256sum \
+            > reports/portable-receipt/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chatgpt-portable-action-receipt-${{ github.run_id }}
+          path: reports/portable-receipt/
+          if-no-files-found: error
+          retention-days: 14
