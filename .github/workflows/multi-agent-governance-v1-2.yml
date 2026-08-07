@@ -1,0 +1,34 @@
+name: Multi-Agent Governance v1.2
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_multi_agent/**'
+      - 'tests/test_multi_agent_governance_v1_2.py'
+      - '.github/workflows/multi-agent-governance-v1-2.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run multi-agent tests
+        run: python3 -m unittest tests/test_multi_agent_governance_v1_2.py -v
+      - name: Re-run capability broker
+        run: python3 -m unittest tests/test_capability_broker_phase1.py -v
+      - name: Re-run causal escalation
+        run: python3 -m unittest tests/test_causal_escalation_phase3.py -v
+      - name: Run full repository regression
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: Verify authority boundary
+        run: |
+          python3 - <<'PY'
+          from sdk.liminal_multi_agent import AUTHORITY
+          assert AUTHORITY['execution'] is False
+          assert AUTHORITY['credential_access'] is False
+          assert AUTHORITY['autonomous_agent_spawn'] is False
+          assert AUTHORITY['automatic_release'] is False
+          PY
