@@ -1,0 +1,83 @@
+name: Atomic File Mutation Broker
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_file_mutation_broker/**'
+      - 'adapters/filesystem/**'
+      - 'tests/test_atomic_file_mutation_broker.py'
+      - 'docs/ATOMIC_FILE_MUTATION_BROKER.md'
+      - 'sdk/liminal_capability_broker/**'
+      - 'sdk/liminal_post_sandbox_contracts/**'
+      - 'sdk/liminal_runtime_mediation/**'
+      - '.github/workflows/atomic-file-mutation-broker.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run atomic file mutation broker tests
+        run: python3 -m unittest tests/test_atomic_file_mutation_broker.py -v
+
+      - name: Re-run Capability Broker
+        run: python3 -m unittest tests/test_capability_broker_phase1.py -v
+
+      - name: Re-run Egress Gateway
+        run: python3 -m unittest tests/test_egress_gateway_phase2.py -v
+
+      - name: Re-run Causal Escalation
+        run: python3 -m unittest tests/test_causal_escalation_phase3.py -v
+
+      - name: Re-run Containment
+        run: python3 -m unittest tests/test_containment_phase4.py -v
+
+      - name: Re-run Runtime Mediation
+        run: python3 -m unittest tests/test_runtime_mediation_v1_3.py -v
+
+      - name: Re-run Isolated Execution Broker
+        run: python3 -m unittest tests/test_isolated_execution_broker.py -v
+
+      - name: Re-run Bound Credential Broker
+        run: python3 -m unittest tests/test_bound_credential_broker.py -v
+
+      - name: Verify model-facing file SDK has no filesystem mutation imports
+        run: |
+          set -euo pipefail
+          test -d sdk/liminal_file_mutation_broker
+          ! grep -R -nE '(^|[[:space:]])(import|from)[[:space:]]+(os|pathlib|shutil|tempfile)([[:space:].]|$)' sdk/liminal_file_mutation_broker
+          ! grep -R -nE '(__import__|importlib\.import_module)' sdk/liminal_file_mutation_broker
+
+      - name: Verify explicit authority boundary
+        run: |
+          python3 - <<'PY'
+          from sdk.liminal_file_mutation_broker import AUTHORITY as BROKER_AUTHORITY
+          from adapters.filesystem.liminal_atomic_file_replacer import AUTHORITY as ADAPTER_AUTHORITY
+          assert BROKER_AUTHORITY['filesystem_access'] is False
+          assert BROKER_AUTHORITY['file_create'] is False
+          assert BROKER_AUTHORITY['file_delete'] is False
+          assert BROKER_AUTHORITY['trusted_adapter_authentication'] is True
+          assert ADAPTER_AUTHORITY['filesystem_access'] is True
+          assert ADAPTER_AUTHORITY['existing_regular_file_replace'] is True
+          assert ADAPTER_AUTHORITY['target_file_create'] is False
+          assert ADAPTER_AUTHORITY['target_file_delete'] is False
+          assert ADAPTER_AUTHORITY['internal_temp_file_create'] is True
+          assert ADAPTER_AUTHORITY['symlink_follow'] is False
+          assert ADAPTER_AUTHORITY['ordinary_mode_bits_preserved'] is True
+          assert ADAPTER_AUTHORITY['privileged_mode_bits_preserved'] is False
+          assert ADAPTER_AUTHORITY['uid_gid_preserved'] is True
+          assert ADAPTER_AUTHORITY['acl_preserved'] is False
+          assert ADAPTER_AUTHORITY['extended_attributes_preserved'] is False
+          PY
+
+      - name: Build production kernel fixture
+        run: make
+
+      - name: Run full repository regression
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
