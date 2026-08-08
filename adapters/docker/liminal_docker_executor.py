@@ -166,8 +166,13 @@ class DockerProcessTreeBackend:
         if fields[1] != "true" and fields[2] != "true":
             raise DockerExecutionError("governed container is not running")
 
+        # Do not pass host-specific `ps` formatting flags through `docker top`.
+        # Docker delegates those flags to the host `ps` implementation, and the
+        # accepted syntax differs across runner images. Parse the default table
+        # by its PID/PPID headers instead; raw host PIDs remain inside this
+        # trusted adapter and never enter model-facing receipts.
         top = subprocess.run(
-            [self.docker_binary, "top", self.session_id, "-eo", "pid=,ppid="],
+            [self.docker_binary, "top", self.session_id],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -178,14 +183,26 @@ class DockerProcessTreeBackend:
         )
         if top.returncode != 0:
             raise DockerExecutionError("docker top failed for governed execution session")
+        lines = [line for line in top.stdout.splitlines() if line.strip()]
+        if len(lines) < 2:
+            raise DockerExecutionError("docker top returned no process rows")
+        header = lines[0].split()
+        try:
+            pid_index = header.index("PID")
+            ppid_index = header.index("PPID")
+        except ValueError as exc:
+            raise DockerExecutionError("docker top output lacks PID/PPID columns") from exc
+        required_index = max(pid_index, ppid_index)
         pairs: list[tuple[str, str]] = []
-        for line in top.stdout.splitlines():
+        for line in lines[1:]:
             parts = line.split()
-            if len(parts) != 2 or not all(part.isdigit() for part in parts):
-                if line.strip():
-                    raise DockerExecutionError("docker top returned invalid pid lineage")
-                continue
-            pairs.append((parts[0], parts[1]))
+            if len(parts) <= required_index:
+                raise DockerExecutionError("docker top returned invalid pid lineage")
+            raw_pid = parts[pid_index]
+            raw_parent = parts[ppid_index]
+            if not raw_pid.isdigit() or not raw_parent.isdigit():
+                raise DockerExecutionError("docker top returned non-numeric pid lineage")
+            pairs.append((raw_pid, raw_parent))
         raw_ids = {pid for pid, _ in pairs}
         if root_raw not in raw_ids:
             raise DockerExecutionError("container root PID missing from docker top")
