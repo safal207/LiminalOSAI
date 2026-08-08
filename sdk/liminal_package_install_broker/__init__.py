@@ -48,7 +48,7 @@ _AUTHORITY_ITEMS = (
 AUTHORITY = MappingProxyType(dict(_AUTHORITY_ITEMS))
 
 _IDENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,191}$")
-_PACKAGE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
+_PACKAGE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _VERSION = re.compile(r"^[0-9][A-Za-z0-9._+!-]{0,127}$")
 _REGISTRY = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,189}[a-z0-9])?$")
 _IMAGE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -80,7 +80,7 @@ def _sha(value: str, name: str) -> str:
 def _package(value: str) -> str:
     if not isinstance(value, str):
         raise PackageInstallError("invalid_package_name")
-    normalized = value.lower().replace("_", "-")
+    normalized = re.sub(r"[-_.]+", "-", value.lower())
     if not _PACKAGE.fullmatch(normalized):
         raise PackageInstallError("invalid_package_name")
     return normalized
@@ -184,6 +184,11 @@ class PackageInstallRequest:
             dependency_count=_bounded_int(self.dependency_count, "dependency_count", minimum=0, maximum=MAX_DEPENDENCIES),
         )
 
+    @property
+    def package_coordinate(self) -> str:
+        r = self.normalized()
+        return f"{r.package_name}=={r.version}"
+
     def safe_body(self) -> dict[str, Any]:
         r = self.normalized()
         return {
@@ -194,6 +199,7 @@ class PackageInstallRequest:
             "registry": r.registry,
             "package_name": r.package_name,
             "version": r.version,
+            "package_coordinate": f"{r.package_name}=={r.version}",
             "artifact_sha256": r.artifact_sha256,
             "dependency_plan_sha256": r.dependency_plan_sha256,
             "staged_manifest_sha256": r.staged_manifest_sha256,
@@ -327,13 +333,15 @@ class PackageInstallBroker:
                 "install_target": INSTALL_TARGET,
             }
             package_plan_sha = canonical_sha256(package_plan)
+            package_coordinate = f"{req.package_name}=={req.version}"
             package_capability = self.capability_broker.authorize(
                 subject_id=req.subject_id,
                 capability_type="package.install",
                 policy_sha256=req.policy_sha256,
-                requested_scope={"registries": [req.registry], "packages": [req.package_name]},
+                requested_scope={"registries": [req.registry], "packages": [package_coordinate]},
                 action={
                     "call_id": req.call_id,
+                    "package_coordinate": package_coordinate,
                     "package_plan_sha256": package_plan_sha,
                     "artifact_sha256": req.artifact_sha256,
                     "dependency_plan_sha256": req.dependency_plan_sha256,
