@@ -4,8 +4,14 @@ on:
   pull_request:
     paths:
       - 'sdk/liminal_isolated_execution/**'
+      - 'sdk/liminal_process_tree_containment/**'
+      - 'sdk/liminal_runtime_mediation/**'
+      - 'sdk/liminal_capability_broker/**'
+      - 'sdk/liminal_post_sandbox_contracts/**'
+      - 'sdk/liminal_containment/**'
       - 'adapters/docker/**'
       - 'tests/test_isolated_execution_broker.py'
+      - 'tests/test_process_tree_active_containment.py'
       - 'tests/fixtures/isolated_executor/**'
       - 'docs/ISOLATED_EXECUTION_BROKER.md'
       - '.github/workflows/isolated-execution-broker.yml'
@@ -18,9 +24,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Run isolated execution broker tests
         run: python3 -m unittest tests/test_isolated_execution_broker.py -v
+
+      - name: Re-run Process Tree Active Containment
+        run: python3 -m unittest tests/test_process_tree_active_containment.py -v
 
       - name: Re-run Runtime Mediation
         run: python3 -m unittest tests/test_runtime_mediation_v1_3.py -v
@@ -39,7 +50,7 @@ jobs:
 
       - name: Verify model-facing SDK has no host execution authority
         run: |
-          ! grep -R -nE '(^|[[:space:]])(import|from)[[:space:]]+(subprocess|socket|os)([[:space:].]|$)' sdk/liminal_isolated_execution
+          ! grep -R -nE '(^|[[:space:]])(import|from)[[:space:]]+(subprocess|socket|os)([[:space:].]|$)' sdk/liminal_isolated_execution sdk/liminal_process_tree_containment
           grep -q 'shell=False' adapters/docker/liminal_docker_executor.py
 
       - name: Build immutable local fixture image

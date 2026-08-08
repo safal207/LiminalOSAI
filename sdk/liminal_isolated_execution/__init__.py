@@ -6,6 +6,7 @@ admitted by RuntimeMediator, then calls a trusted backend callback.
 """
 from __future__ import annotations
 
+import posixpath
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
@@ -136,10 +137,14 @@ class IsolatedExecutionPlan:
         for arg in self.argv:
             if not isinstance(arg, str) or not arg or "\x00" in arg or len(arg) > 4096:
                 raise IsolationError("argv contains an invalid argument")
-        if not isinstance(self.host_workspace, str) or not self.host_workspace.startswith("/"):
-            raise IsolationError("host_workspace must be an absolute path")
+        if not isinstance(self.host_workspace, str) or not self.host_workspace.startswith("/") or self.host_workspace.startswith("//"):
+            raise IsolationError("host_workspace must be one normalized absolute POSIX path")
         if "\x00" in self.host_workspace or "," in self.host_workspace or len(self.host_workspace) > 4096:
             raise IsolationError("host_workspace contains unsupported characters")
+        if self.host_workspace != posixpath.normpath(self.host_workspace):
+            raise IsolationError("host_workspace must not contain dot, parent or redundant path segments")
+        if any(part in {".", ".."} for part in self.host_workspace.split("/")):
+            raise IsolationError("host_workspace contains forbidden relative path segments")
         if not isinstance(self.timeout_seconds, int) or isinstance(self.timeout_seconds, bool) or not 1 <= self.timeout_seconds <= 120:
             raise IsolationError("timeout_seconds must be between 1 and 120")
         self.profile.validate()

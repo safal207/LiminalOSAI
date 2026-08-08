@@ -1,0 +1,170 @@
+name: Process Tree Active Containment
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_process_tree/**'
+      - 'sdk/liminal_process_lineage/**'
+      - 'sdk/liminal_process_tree_containment/**'
+      - 'sdk/liminal_containment/**'
+      - 'sdk/liminal_isolated_execution/**'
+      - 'adapters/docker/**'
+      - 'tests/test_process_tree_active_containment.py'
+      - 'tests/test_isolated_execution_broker.py'
+      - 'tests/test_containment_phase4.py'
+      - 'tests/fixtures/isolated_executor/**'
+      - 'docs/PROCESS_TREE_ACTIVE_CONTAINMENT.md'
+      - '.github/workflows/process-tree-active-containment.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head
+        run: echo "${GITHUB_SHA}"
+
+      - name: Run process-tree containment tests
+        run: python3 -m unittest tests/test_process_tree_active_containment.py -v
+
+      - name: Re-run isolated execution tests
+        run: python3 -m unittest tests/test_isolated_execution_broker.py -v
+
+      - name: Re-run Phase 4 containment tests
+        run: python3 -m unittest tests/test_containment_phase4.py -v
+
+      - name: Re-run escape trajectory benchmark
+        run: python3 -m unittest tests/test_escape_trajectory_benchmark_v1.py -v
+
+      - name: Build immutable local fixture image
+        run: |
+          docker build -f tests/fixtures/isolated_executor/Dockerfile -t liminal-process-tree-fixture:local .
+          IMAGE_ID="$(docker image inspect liminal-process-tree-fixture:local --format '{{.Id}}')"
+          case "$IMAGE_ID" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo "unexpected image id: $IMAGE_ID"; exit 1 ;; esac
+          echo "IMAGE_ID=$IMAGE_ID" >> "$GITHUB_ENV"
+
+      - name: Prove real Docker session with child reaches zero survivors
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+          from adapters.docker.liminal_docker_executor import build_docker_argv
+          from sdk.liminal_isolated_execution import IsolatedExecutionPlan
+          from sdk.liminal_post_sandbox_contracts import canonical_sha256
+          from sdk.liminal_process_tree import ProcessTreeSupervisor, ZERO_SHA256, verify_receipt
+
+          session = f"liminal-tree-ci-{os.environ['GITHUB_RUN_ID']}"
+          plan = IsolatedExecutionPlan.build(
+              operation_id="op:process-tree-ci",
+              image_id=os.environ["IMAGE_ID"],
+              argv=("/bin/sh", "-c", "sleep 120 & wait"),
+              host_workspace=os.environ["GITHUB_WORKSPACE"],
+              timeout_seconds=120,
+          )
+          argv = build_docker_argv(plan, container_name=session)
+          argv.insert(2, "-d")
+
+          def inspect_session(name):
+              state = subprocess.run(
+                  ["docker", "inspect", "--format", "{{.State.Running}} {{.State.Paused}}", name],
+                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                  timeout=10, check=False, shell=False,
+              )
+              if state.returncode != 0:
+                  lower = state.stderr.lower()
+                  if "no such object" in lower or "no such container" in lower:
+                      return {"exists": False, "running": False, "descendant_count": 0, "tree_sha256": ZERO_SHA256}
+                  raise RuntimeError("docker inspect failed")
+              fields = state.stdout.strip().split()
+              if len(fields) != 2:
+                  raise RuntimeError("invalid docker state")
+              top = subprocess.run(
+                  ["docker", "top", name], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                  text=True, timeout=10, check=False, shell=False,
+              )
+              if top.returncode != 0:
+                  raise RuntimeError("docker top failed")
+              rows = [line.strip() for line in top.stdout.splitlines() if line.strip()]
+              if len(rows) < 2:
+                  raise RuntimeError("docker process evidence is empty")
+              processes = rows[1:]
+              return {
+                  "exists": True,
+                  "running": fields[0] == "true" and fields[1] != "true",
+                  "descendant_count": max(0, len(processes) - 1),
+                  "tree_sha256": canonical_sha256(processes),
+              }
+
+          def freeze_session(name):
+              r = subprocess.run(["docker", "pause", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False, shell=False)
+              if r.returncode != 0:
+                  raise RuntimeError("docker pause failed")
+
+          def terminate_session(name):
+              r = subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=15, check=False, shell=False)
+              if r.returncode != 0 and "no such" not in r.stderr.lower():
+                  raise RuntimeError("docker rm -f failed")
+
+          launched = subprocess.run(
+              argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+              stderr=subprocess.PIPE, text=True, timeout=20, check=False, shell=False,
+          )
+          if launched.returncode != 0:
+              raise RuntimeError("failed to launch bounded process-tree fixture")
+
+          try:
+              before = inspect_session(session)
+              assert before["descendant_count"] >= 1, before
+              registry = ProcessTreeSupervisor(
+                  inspect_session=inspect_session,
+                  freeze_session=freeze_session,
+                  terminate_session=terminate_session,
+              )
+              registry.register_session(
+                  session_id=session,
+                  operation_id=plan.operation_id,
+                  plan_sha256=plan.plan_sha256,
+                  backend_identity_sha256=canonical_sha256({"backend": "docker-ci", "session": session}),
+              )
+              frozen = registry.freeze_all()
+              assert not frozen["failure_codes"], frozen
+              receipt = registry.quiesce_all(incident_id="incident:docker-ci")
+              assert receipt["zero_survivors"] is True, receipt
+              assert receipt["survivor_count"] == 0, receipt
+              assert receipt["terminated_count"] == 1, receipt
+              verify_receipt(receipt)
+              assert inspect_session(session)["exists"] is False
+              print("process-tree-zero-survivors", receipt["receipt_sha256"], "PASS")
+          finally:
+              subprocess.run(
+                  ["docker", "rm", "-f", session], stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL, timeout=10, check=False, shell=False,
+              )
+          PY
+
+      - name: Run full repository regression
+        run: make test
+
+      - name: Verify authority boundaries
+        run: |
+          python3 - <<'PY'
+          from sdk.liminal_process_lineage import AUTHORITY as LINEAGE
+          from sdk.liminal_process_tree import AUTHORITY as TREE
+          assert LINEAGE['model_supplied_pid_authority'] is False
+          assert LINEAGE['shell_execution'] is False
+          assert LINEAGE['direct_kill_syscall'] is False
+          assert LINEAGE['direct_container_runtime_access'] is False
+          assert LINEAGE['trusted_backend_process_control'] is True
+          assert LINEAGE['zero_survivor_required'] is True
+          assert TREE['direct_host_process_enumeration'] is False
+          assert TREE['direct_subprocess_execution'] is False
+          assert TREE['direct_docker_api_access'] is False
+          assert TREE['separate_freeze_and_quiesce'] is True
+          assert TREE['verify_zero_survivors'] is True
+          PY
