@@ -1,0 +1,83 @@
+name: Objective Integrity Guard
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_objective_integrity/**'
+      - 'sdk/liminal_post_sandbox_contracts/**'
+      - 'sdk/liminal_runtime_mediation/**'
+      - 'sdk/liminal_effect_commit/**'
+      - 'sdk/liminal_escape_trajectory/**'
+      - 'tests/test_objective_integrity_guard.py'
+      - 'tests/test_post_sandbox_phase0_contracts.py'
+      - 'tests/test_runtime_mediation_v1_3.py'
+      - 'tests/test_epoch_bound_capability.py'
+      - 'tests/test_epoch_bound_effect_commit.py'
+      - 'tests/test_escape_trajectory_benchmark_v1.py'
+      - 'docs/OBJECTIVE_INTEGRITY_GUARD.md'
+      - '.github/workflows/objective-integrity-guard.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head
+        run: echo "${GITHUB_SHA}"
+
+      - name: Run Objective Integrity Guard tests
+        run: python3 -m unittest tests/test_objective_integrity_guard.py -v
+
+      - name: Re-run Phase-0 objective contract tests
+        run: python3 -m unittest tests/test_post_sandbox_phase0_contracts.py -v
+
+      - name: Re-run runtime mediation tests
+        run: python3 -m unittest tests/test_runtime_mediation_v1_3.py -v
+
+      - name: Re-run epoch-bound capability and effect-commit tests
+        run: |
+          python3 -m unittest tests/test_epoch_bound_capability.py -v
+          python3 -m unittest tests/test_epoch_bound_effect_commit.py -v
+
+      - name: Re-run runtime configuration and containment tests
+        run: |
+          python3 -m unittest tests/test_bound_runtime_config_broker.py -v
+          python3 -m unittest tests/test_containment_phase4.py -v
+          python3 -m unittest tests/test_process_tree_active_containment.py -v
+
+      - name: Re-run isolated execution and package tests
+        run: |
+          python3 -m unittest tests/test_isolated_execution_broker.py -v
+          python3 -m unittest tests/test_bound_package_install_broker.py -v
+          python3 -m unittest tests/test_offline_wheel_materializer.py -v
+
+      - name: Re-run escape trajectory benchmark
+        run: python3 -m unittest tests/test_escape_trajectory_benchmark_v1.py -v
+
+      - name: Run full repository regression
+        run: make test
+
+      - name: Verify authority boundary
+        run: |
+          python3 - <<'PY'
+          from sdk.liminal_objective_integrity import AUTHORITY
+          assert AUTHORITY['deterministic_policy_evaluation'] is True
+          assert AUTHORITY['trusted_observation_verification_required'] is True
+          assert AUTHORITY['method_integrity_completion_gate'] is True
+          assert AUTHORITY['capability_grant'] is False
+          assert AUTHORITY['runtime_execution'] is False
+          assert AUTHORITY['network_execution'] is False
+          assert AUTHORITY['secret_access'] is False
+          assert AUTHORITY['policy_mutation'] is False
+          assert AUTHORITY['runtime_mutation'] is False
+          assert AUTHORITY['hidden_answer_access'] is False
+          assert AUTHORITY['evaluator_state_access'] is False
+          assert AUTHORITY['semantic_omniscience'] is False
+          assert AUTHORITY['automatic_containment_execution'] is False
+          PY
