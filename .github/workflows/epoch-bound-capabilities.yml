@@ -9,7 +9,7 @@ on:
       - 'sdk/liminal_runtime_mediation/**'
       - 'tests/test_epoch_bound_capability.py'
       - 'tests/test_capability_broker_phase1.py'
-      - 'tests/test_bound_runtime_config.py'
+      - 'tests/test_bound_runtime_config_broker.py'
       - 'tests/test_runtime_mediation_v1_3.py'
       - 'docs/EPOCH_BOUND_CAPABILITIES.md'
       - '.github/workflows/epoch-bound-capabilities.yml'
@@ -35,7 +35,7 @@ jobs:
         run: python3 -m unittest tests/test_capability_broker_phase1.py -v
 
       - name: Re-run bound runtime configuration tests
-        run: python3 -m unittest tests/test_bound_runtime_config.py -v
+        run: python3 -m unittest tests/test_bound_runtime_config_broker.py -v
 
       - name: Re-run runtime mediation tests
         run: python3 -m unittest tests/test_runtime_mediation_v1_3.py -v
