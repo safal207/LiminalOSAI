@@ -12,11 +12,10 @@ a separate authority decision.
 ```text
 package intent
 → PackageInstallRequest
-→ host-provisioned staged workspace binding
-→ exact registry provenance
-→ exact package coordinate
+→ host-provisioned exact staged-plan binding
+→ registry + package==version
 → artifact SHA-256
-→ dependency-plan SHA-256
+→ dependency-plan SHA-256 + dependency count
 → staged-manifest SHA-256
 → package.install capability
 → deterministic installer plan
@@ -38,46 +37,56 @@ Execution additionally requires `process.execute` for:
 - working directory: `/workspace`;
 - argument profile: `bound-package-install-v0.1`.
 
-The `IsolatedExecutionBroker` binds the exact deterministic argv and immutable
+The `IsolatedExecutionBroker` binds the deterministic argv and immutable
 installer image into its payload digest before the process capability is used.
 
-## Offline-first design
+## Host-staged exact plan
 
 `registry` is provenance only. The MVP performs no live registry lookup or
-network download. The trusted host stages a read-only workspace before broker
-construction. The binding contains:
+network download. Before broker exposure, the trusted host creates an immutable
+`PackageWorkspaceBinding` that pins **every** materialization input:
 
 - opaque binding ID;
-- host workspace path (kept inside the host-provisioned object; receipts contain only its digest via the binding root);
-- staged manifest SHA-256;
-- immutable installer image `sha256:<digest>`.
-
-The model request references only the binding ID and expected manifest digest.
-A mismatch blocks before package capability consumption.
-
-## Exact install intent
-
-Each request binds:
-
-- call ID;
-- subject and policy root;
-- workspace binding ID;
+- host workspace path, represented externally only by the binding root;
 - registry provenance;
-- normalized package name;
-- exact version;
+- normalized `package==version` coordinate;
 - artifact SHA-256;
 - dependency-plan SHA-256;
 - staged-manifest SHA-256;
-- bounded dependency count.
+- bounded dependency count;
+- immutable installer image `sha256:<digest>`.
 
-The version and all digests are included in the request root, package plan root,
-capability action root and deterministic isolated installer argv. No caller can
-choose the installer executable, output target, argument profile, image, network
-mode or container hardening flags.
+Broker construction rebuilds and revalidates every binding and rejects a forged
+or inconsistent `binding_sha256`.
 
-## Isolation profile
+A model request references the binding ID and repeats the expected staged plan.
+The broker compares registry, coordinate, artifact digest, dependency-plan
+digest, manifest digest and dependency count **before** consuming
+`package.install`. Any mismatch returns `BLOCK`, issues no process request, and
+does not spend the package capability.
 
-The package broker reuses the existing default `IsolationProfile`:
+This distinction matters: `CapabilityBroker.authorize()` binds the action digest
+as evidence, but action fields are not themselves a host-staging oracle. The
+workspace binding is the trusted source of the exact install inputs.
+
+## Exact package capability
+
+The package capability is requested for:
+
+- the exact registry; and
+- the exact normalized coordinate `package==version`.
+
+Even after the host-staged plan matches, the capability can still independently
+block that coordinate. Artifact, dependency-plan, manifest and dependency-count
+roots are additionally bound into the capability action digest.
+
+## Deterministic isolated installer
+
+The caller cannot choose the installer executable, output target, argument
+profile, image, network mode or hardening flags. The argv is built exclusively
+from the validated host binding and fixed constants.
+
+The broker reuses the existing default `IsolationProfile`:
 
 - `network=none`;
 - read-only container root;
@@ -89,26 +98,19 @@ The package broker reuses the existing default `IsolationProfile`:
 - writable tmpfs only at `/tmp`, with `nosuid,nodev,noexec`;
 - package materialization target fixed at `/tmp/liminal-site-packages`.
 
-The package files are therefore ephemeral and disappear with the container. The
-MVP does not persist them to the host or execute imported/installed package code.
+The package files are ephemeral and disappear with the container. The MVP does
+not persist them to the host or authorize execution of installed package code.
 
 ## Receipt semantics
 
-The package receipt binds:
+The package receipt binds the exact request root, workspace binding root, package
+plan root, package-capability receipt, isolated-execution receipt, immutable
+installer image, artifact/dependency/manifest roots, dependency count and final
+package/process outcomes. Verification is exact-schema and digest checked.
 
-- exact request SHA-256;
-- workspace binding SHA-256;
-- package plan SHA-256;
-- package capability receipt SHA-256;
-- isolated execution receipt SHA-256;
-- package decision;
-- process admission decision;
-- execution outcome;
-- immutable installer image;
-- artifact, dependency-plan and staged-manifest digests.
-
-Receipt verification is exact-schema and digest checked. Raw host workspace
-paths and package-manager output are not embedded.
+Raw host workspace paths and package-manager output are not embedded. Package
+name/version are carried transitively through the request, binding, plan and
+capability receipt roots rather than exposed as raw receipt fields.
 
 ## Replay and timing
 
@@ -121,10 +123,10 @@ call is blocked before another package capability use or isolated execution.
 This MVP is not a package supply-chain authenticity oracle. It does not prove
 that a staged artifact was legitimately published by the registry owner, does
 not resolve dependencies, does not fetch packages, does not persist a runtime
-environment, and does not execute installed package code. Authenticity depends
-on trusted staging plus the exact artifact/manifest/dependency-plan digests.
+environment, and does not itself implement the trusted installer image.
+Authenticity depends on trusted staging plus the exact artifact/manifest/
+dependency-plan roots.
 
-The Docker/container runtime and immutable installer image remain trusted
-execution infrastructure. A later profile can add signed provenance (for
-example Sigstore/TUF-style evidence) without weakening this offline authority
-split.
+The container runtime and immutable installer image remain trusted execution
+infrastructure. A later profile can add signed provenance and a concrete package
+materializer without weakening this offline authority split.
