@@ -77,13 +77,13 @@ jobs:
               ledger_root = base / 'liminaldb-ledger'
               binary = Path('_liminaldb/liminal-db/target/debug/examples/liminalosai_governance_checkpoint_bridge').resolve()
 
-              def bridge(envelope):
+              def bridge(envelope, timeout_seconds):
                   env = dict(os.environ)
                   env['LIMINALDB_CHECKPOINT_ISSUED_AT_MS'] = str(envelope['captured_at_ms'] + 1)
                   proc = subprocess.run(
                       [str(binary), str(ledger_root)],
                       input=json.dumps(envelope), text=True, capture_output=True,
-                      env=env, check=True,
+                      env=env, check=True, timeout=timeout_seconds,
                   )
                   return json.loads(proc.stdout)
 
@@ -92,6 +92,7 @@ jobs:
                   delegate=primary,
                   journal=journal,
                   bridge=bridge,
+                  bridge_timeout_seconds=30.0,
                   clock_ms=lambda: next(ticks),
                   pinned_trusted_keys=({
                       'signer_id': 'liminalosai-governance-bridge',
@@ -162,6 +163,7 @@ jobs:
           assert AUTHORITY['fail_closed_on_bridge_failure'] is True
           assert AUTHORITY['explicit_mirror_reconciliation_required'] is True
           assert AUTHORITY['automatic_mirror_expiry'] is False
+          assert AUTHORITY['bounded_bridge_timeout_required'] is True
           assert AUTHORITY['primary_cas_authority'] is False
           assert AUTHORITY['capability_grant'] is False
           assert AUTHORITY['runtime_mutation'] is False
