@@ -1,0 +1,68 @@
+name: Bound Runtime Configuration Broker
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_runtime_config/**'
+      - 'sdk/liminal_runtime_mediation/**'
+      - 'sdk/liminal_capability_broker/**'
+      - 'tests/test_bound_runtime_config_broker.py'
+      - 'docs/BOUND_RUNTIME_CONFIGURATION_BROKER.md'
+      - '.github/workflows/bound-runtime-config-broker.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head
+        run: echo "${GITHUB_SHA}"
+
+      - name: Run bound runtime configuration tests
+        run: python3 -m unittest tests/test_bound_runtime_config_broker.py -v
+
+      - name: Re-run runtime mediation
+        run: python3 -m unittest tests/test_runtime_mediation_v1_3.py -v
+
+      - name: Re-run capability broker
+        run: python3 -m unittest tests/test_capability_broker_phase1.py -v
+
+      - name: Re-run containment
+        run: python3 -m unittest tests/test_containment_phase4.py -v
+
+      - name: Re-run process tree containment
+        run: python3 -m unittest tests/test_process_tree_active_containment.py -v
+
+      - name: Re-run isolated execution
+        run: python3 -m unittest tests/test_isolated_execution_broker.py -v
+
+      - name: Re-run bound package install broker
+        run: python3 -m unittest tests/test_bound_package_install_broker.py -v
+
+      - name: Re-run offline wheel materializer
+        run: python3 -m unittest tests/test_offline_wheel_materializer.py -v
+
+      - name: Run full repository regression
+        run: make test
+
+      - name: Verify authority boundary
+        run: |
+          python3 - <<'PY'
+          from sdk.liminal_runtime_config import AUTHORITY
+          assert AUTHORITY['runtime_mediation_required'] is True
+          assert AUTHORITY['trusted_state_observation'] is True
+          assert AUTHORITY['exact_before_state_binding'] is True
+          assert AUTHORITY['monotonic_runtime_epoch'] is True
+          assert AUTHORITY['old_epoch_authority_revocation'] is True
+          assert AUTHORITY['raw_environment_access'] is False
+          assert AUTHORITY['secret_material_export'] is False
+          assert AUTHORITY['shell_execution'] is False
+          assert AUTHORITY['direct_filesystem_mutation'] is False
+          assert AUTHORITY['direct_network_reconfiguration'] is False
+          PY
