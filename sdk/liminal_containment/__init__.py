@@ -15,6 +15,7 @@ AUTHORITY = {
     "freeze_via_host_callback": True,
     "revoke_live_capabilities": True,
     "close_egress_via_host_callback": True,
+    "active_process_quiescence_hook": True,
     "seal_trace": True,
     "bounded_snapshot": True,
     "human_release_required": True,
@@ -42,6 +43,7 @@ class IncidentReceipt:
     final_state: str
     transition_root_sha256: str
     revoked_capability_ids: tuple[str, ...]
+    runtime_quiescence_sha256: str
     sealed_trace_sha256: str
     snapshot_sha256: str
     partial_failures: tuple[str, ...]
@@ -56,6 +58,7 @@ class IncidentReceipt:
             "final_state": self.final_state,
             "transition_root_sha256": self.transition_root_sha256,
             "revoked_capability_ids": list(self.revoked_capability_ids),
+            "runtime_quiescence_sha256": self.runtime_quiescence_sha256,
             "sealed_trace_sha256": self.sealed_trace_sha256,
             "snapshot_sha256": self.snapshot_sha256,
             "partial_failures": list(self.partial_failures),
@@ -76,12 +79,14 @@ class ContainmentCoordinator:
         close_egress: Callable[[], None],
         seal_trace: Callable[[], str],
         snapshot_forensics: Callable[[], Mapping[str, Any]],
+        quiesce_runtime: Callable[[], Mapping[str, Any]] | None = None,
     ) -> None:
         self.broker = broker
         self.freeze_runtime = freeze_runtime
         self.close_egress = close_egress
         self.seal_trace = seal_trace
         self.snapshot_forensics = snapshot_forensics
+        self.quiesce_runtime = quiesce_runtime
         self.state = "IDLE"
         self._transitions: list[dict[str, Any]] = []
         self._incident: IncidentReceipt | None = None
@@ -92,6 +97,7 @@ class ContainmentCoordinator:
         phase3_sha = _validated_phase3_receipt(phase3_receipt)
         failures: list[str] = []
         revoked: list[str] = []
+        quiescence_sha = canonical_sha256({"mode": "not_configured"})
         sealed = "0" * 64
         snapshot_sha = "0" * 64
 
@@ -116,13 +122,24 @@ class ContainmentCoordinator:
                     failures.append(f"revoke:{cap_id}:{type(exc).__name__}")
         self._step("REVOKE", at_unix, canonical_sha256(sorted(revoked)))
 
+        if self.quiesce_runtime is not None:
+            try:
+                quiescence = dict(self.quiesce_runtime())
+                quiescence_sha = quiescence.get("receipt_sha256")
+                _require_sha(quiescence_sha, "runtime quiescence receipt")
+                if quiescence.get("decision") != "ALLOW" or quiescence.get("surviving_count") != 0:
+                    failures.append("runtime_quiescence_incomplete")
+            except Exception as exc:
+                failures.append(f"runtime_quiescence:{type(exc).__name__}")
+                quiescence_sha = "0" * 64
+
         try:
             sealed = self.seal_trace()
             _require_sha(sealed, "sealed trace")
         except Exception as exc:
             failures.append(f"seal:{type(exc).__name__}")
             sealed = "0" * 64
-        self._step("SEAL", at_unix, sealed)
+        self._step("SEAL", at_unix, canonical_sha256({"sealed": sealed, "runtime_quiescence": quiescence_sha}))
 
         try:
             snapshot = dict(self.snapshot_forensics())
@@ -140,6 +157,7 @@ class ContainmentCoordinator:
             final_state=self.state,
             transition_root_sha256=canonical_sha256(self._transitions),
             revoked_capability_ids=tuple(sorted(revoked)),
+            runtime_quiescence_sha256=quiescence_sha,
             sealed_trace_sha256=sealed,
             snapshot_sha256=snapshot_sha,
             partial_failures=tuple(sorted(failures)),
