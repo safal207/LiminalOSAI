@@ -9,7 +9,7 @@ on:
       - 'sdk/liminal_effect_commit/**'
       - 'sdk/liminal_escape_trajectory/**'
       - 'tests/test_objective_integrity_guard.py'
-      - 'tests/test_post_sandbox_phase0.py'
+      - 'tests/test_post_sandbox_phase0_contracts.py'
       - 'tests/test_runtime_mediation_v1_3.py'
       - 'tests/test_epoch_bound_capability.py'
       - 'tests/test_epoch_bound_effect_commit.py'
@@ -35,7 +35,7 @@ jobs:
         run: python3 -m unittest tests/test_objective_integrity_guard.py -v
 
       - name: Re-run Phase-0 objective contract tests
-        run: python3 -m unittest tests/test_post_sandbox_phase0.py -v
+        run: python3 -m unittest tests/test_post_sandbox_phase0_contracts.py -v
 
       - name: Re-run runtime mediation tests
         run: python3 -m unittest tests/test_runtime_mediation_v1_3.py -v
