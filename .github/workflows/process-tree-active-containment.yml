@@ -3,6 +3,8 @@ name: Process Tree Active Containment
 on:
   pull_request:
     paths:
+      - 'sdk/liminal_process_tree/**'
+      - 'sdk/liminal_process_lineage/**'
       - 'sdk/liminal_process_tree_containment/**'
       - 'sdk/liminal_containment/**'
       - 'sdk/liminal_isolated_execution/**'
@@ -54,7 +56,7 @@ jobs:
           import subprocess
           from adapters.docker.liminal_docker_executor import build_docker_argv, build_process_tree_supervisor
           from sdk.liminal_isolated_execution import IsolatedExecutionPlan
-          from sdk.liminal_process_tree_containment import verify_receipt
+          from sdk.liminal_process_lineage import verify_receipt
 
           session = f"liminal-tree-ci-{os.environ['GITHUB_RUN_ID']}"
           plan = IsolatedExecutionPlan.build(
@@ -86,7 +88,7 @@ jobs:
                   stderr=subprocess.DEVNULL, timeout=10, check=False, shell=False,
               )
               assert probe.returncode != 0
-              print("process-tree-zero-survivors", receipt["receipt_sha256"], "PASS")
+              print("process-lineage-zero-survivors", receipt["receipt_sha256"], "PASS")
           finally:
               subprocess.run(
                   ["docker", "rm", "-f", session], stdout=subprocess.DEVNULL,
@@ -97,14 +99,19 @@ jobs:
       - name: Run full repository regression
         run: make test
 
-      - name: Verify authority boundary
+      - name: Verify authority boundaries
         run: |
           python3 - <<'PY'
-          from sdk.liminal_process_tree_containment import AUTHORITY
-          assert AUTHORITY['model_supplied_pid_authority'] is False
-          assert AUTHORITY['shell_execution'] is False
-          assert AUTHORITY['direct_kill_syscall'] is False
-          assert AUTHORITY['direct_container_runtime_access'] is False
-          assert AUTHORITY['trusted_backend_process_control'] is True
-          assert AUTHORITY['zero_survivor_required'] is True
+          from sdk.liminal_process_lineage import AUTHORITY as LINEAGE
+          from sdk.liminal_process_tree import AUTHORITY as TREE
+          assert LINEAGE['model_supplied_pid_authority'] is False
+          assert LINEAGE['shell_execution'] is False
+          assert LINEAGE['direct_kill_syscall'] is False
+          assert LINEAGE['direct_container_runtime_access'] is False
+          assert LINEAGE['trusted_backend_process_control'] is True
+          assert LINEAGE['zero_survivor_required'] is True
+          assert TREE['direct_host_process_enumeration'] is False
+          assert TREE['direct_subprocess_execution'] is False
+          assert TREE['direct_docker_api_access'] is False
+          assert TREE['separate_freeze_and_quiesce'] is True
           PY
