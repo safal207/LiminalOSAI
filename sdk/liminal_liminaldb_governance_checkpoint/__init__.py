@@ -31,6 +31,7 @@ AUTHORITY = {
     "fail_closed_on_bridge_failure": True,
     "explicit_mirror_reconciliation_required": True,
     "automatic_mirror_expiry": False,
+    "bounded_bridge_timeout_required": True,
     "capability_grant": False,
     "runtime_mutation": False,
     "network_authority": False,
@@ -40,7 +41,7 @@ AUTHORITY = {
     "kernel_enforcement": False,
 }
 
-Bridge = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+Bridge = Callable[[Mapping[str, Any], float], Mapping[str, Any]]
 ClockMs = Callable[[], int]
 TrustedKeyPin = tuple[str, str, str]
 
@@ -102,6 +103,15 @@ def _clock(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise LiminalDBMirrorError("invalid_trusted_clock_ms")
     return value
+
+
+def _timeout(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise LiminalDBMirrorError("invalid_bridge_timeout_seconds")
+    seconds = float(value)
+    if seconds <= 0 or seconds > 300:
+        raise LiminalDBMirrorError("invalid_bridge_timeout_seconds")
+    return seconds
 
 
 def _trusted_key_pin(value: Mapping[str, Any]) -> TrustedKeyPin:
@@ -167,6 +177,10 @@ class SQLiteCheckpointMirrorJournal:
                     event_sha256 TEXT NOT NULL
                 )
                 """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS mirror_history_root_idx "
+                "ON mirror_history(root_id, id)"
             )
         finally:
             conn.close()
@@ -402,7 +416,7 @@ class _TransitionEvidence:
 
 
 class CheckpointingGovernanceStore:
-    """DurableGovernanceStore wrapper requiring a LiminalDB checkpoint mirror."""
+    """DurableGovernanceStore wrapper requiring a bounded LiminalDB bridge."""
 
     def __init__(
         self,
@@ -410,6 +424,7 @@ class CheckpointingGovernanceStore:
         delegate: DurableGovernanceStore,
         journal: SQLiteCheckpointMirrorJournal,
         bridge: Bridge,
+        bridge_timeout_seconds: float,
         clock_ms: ClockMs,
         pinned_trusted_keys: tuple[Mapping[str, Any], ...] | None = None,
     ) -> None:
@@ -425,6 +440,7 @@ class CheckpointingGovernanceStore:
         self.delegate = delegate
         self.journal = journal
         self.bridge = bridge
+        self.bridge_timeout_seconds = _timeout(bridge_timeout_seconds)
         self.clock_ms = clock_ms
         self._pinned_trusted_keys = frozenset(pins)
 
@@ -718,7 +734,7 @@ class CheckpointingGovernanceStore:
     ) -> None:
         envelope = self._envelope(root_id, evidence)
         try:
-            bundle = self.bridge(envelope)
+            bundle = self.bridge(envelope, self.bridge_timeout_seconds)
             checkpoint_ref, evidence_sha = self._verify_bundle(envelope, bundle)
             self.journal.acknowledge(
                 root_id=root_id,
