@@ -125,9 +125,8 @@ class ContainmentCoordinator:
         if self.quiesce_runtime is not None:
             try:
                 quiescence = dict(self.quiesce_runtime())
-                quiescence_sha = quiescence.get("receipt_sha256")
-                _require_sha(quiescence_sha, "runtime quiescence receipt")
-                if quiescence.get("decision") != "ALLOW" or quiescence.get("surviving_count") != 0:
+                quiescence_sha, complete = _validate_quiescence_receipt(quiescence)
+                if not complete:
                     failures.append("runtime_quiescence_incomplete")
             except Exception as exc:
                 failures.append(f"runtime_quiescence:{type(exc).__name__}")
@@ -206,6 +205,40 @@ def _validated_phase3_receipt(value: Mapping[str, Any]) -> str:
     sha = value.get("receipt_sha256")
     _require_sha(sha, "phase3 receipt")
     return sha
+
+
+def _validate_quiescence_receipt(value: Mapping[str, Any]) -> tuple[str, bool]:
+    """Normalize the two bounded process-containment receipt profiles.
+
+    Fine-grained lineage receipts expose ``decision/surviving_count`` while the
+    concrete execution-session supervisor exposes ``zero_survivors/survivor_count``.
+    Neither shape is trusted without its receipt digest being present and validly
+    shaped; native module verifiers remain responsible for cryptographic replay.
+    """
+    sha = value.get("receipt_sha256")
+    _require_sha(sha, "runtime quiescence receipt")
+
+    if "decision" in value or "surviving_count" in value:
+        if value.get("decision") not in {"ALLOW", "BLOCK"}:
+            raise ContainmentError("invalid lineage quiescence decision")
+        survivors = value.get("surviving_count")
+        if not isinstance(survivors, int) or isinstance(survivors, bool) or survivors < 0:
+            raise ContainmentError("invalid lineage surviving_count")
+        return sha, value["decision"] == "ALLOW" and survivors == 0
+
+    if "zero_survivors" in value or "survivor_count" in value:
+        zero = value.get("zero_survivors")
+        survivors = value.get("survivor_count")
+        if not isinstance(zero, bool):
+            raise ContainmentError("invalid session zero_survivors flag")
+        if not isinstance(survivors, int) or isinstance(survivors, bool) or survivors < 0:
+            raise ContainmentError("invalid session survivor_count")
+        failure_codes = value.get("failure_codes", [])
+        if not isinstance(failure_codes, (list, tuple)):
+            raise ContainmentError("invalid session failure_codes")
+        return sha, zero and survivors == 0 and not failure_codes
+
+    raise ContainmentError("unsupported runtime quiescence receipt profile")
 
 
 def _require_sha(value: Any, name: str) -> None:
