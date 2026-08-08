@@ -1,0 +1,41 @@
+name: Process Tree Active Containment
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_process_tree_containment/**'
+      - 'sdk/liminal_containment/**'
+      - 'tests/test_process_tree_active_containment.py'
+      - 'tests/test_containment_phase4.py'
+      - 'docs/PROCESS_TREE_ACTIVE_CONTAINMENT.md'
+      - '.github/workflows/process-tree-active-containment.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record exact head
+        run: echo "${GITHUB_SHA}"
+      - name: Run process-tree containment tests
+        run: python3 -m unittest tests/test_process_tree_active_containment.py -v
+      - name: Re-run Phase 4 containment tests
+        run: python3 -m unittest tests/test_containment_phase4.py -v
+      - name: Re-run escape trajectory benchmark
+        run: python3 -m unittest tests/test_escape_trajectory_benchmark.py -v
+      - name: Run full repository regression
+        run: make test
+      - name: Verify authority boundary
+        run: |
+          python3 - <<'PY'
+          from sdk.liminal_process_tree_containment import AUTHORITY
+          assert AUTHORITY['model_supplied_pid_authority'] is False
+          assert AUTHORITY['shell_execution'] is False
+          assert AUTHORITY['direct_kill_syscall'] is False
+          assert AUTHORITY['direct_container_runtime_access'] is False
+          assert AUTHORITY['trusted_backend_process_control'] is True
+          assert AUTHORITY['zero_survivor_required'] is True
+          PY
