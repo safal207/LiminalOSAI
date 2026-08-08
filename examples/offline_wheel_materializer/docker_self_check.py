@@ -72,16 +72,23 @@ def main() -> int:
         raise SystemExit("image-id must be immutable sha256")
 
     with tempfile.TemporaryDirectory(prefix="liminal-wheel-") as workspace:
+        # The container is intentionally non-root (uid/gid 65534). Stage the
+        # synthetic fixture as host-readable while retaining a read-only mount.
+        os.chmod(workspace, 0o755)
         wheel_bytes = make_wheel()
         artifact_sha = hashlib.sha256(wheel_bytes).hexdigest()
-        with open(os.path.join(workspace, WHEEL_NAME), "wb") as fh:
+        wheel_path = os.path.join(workspace, WHEEL_NAME)
+        with open(wheel_path, "wb") as fh:
             fh.write(wheel_bytes)
+        os.chmod(wheel_path, 0o444)
 
         dependency_plan = {"schema": DEPENDENCY_PLAN_SCHEMA, "dependencies": []}
         dependency_bytes = canonical_json(dependency_plan).encode("utf-8")
         dependency_sha = hashlib.sha256(dependency_bytes).hexdigest()
-        with open(os.path.join(workspace, "dependency-plan.json"), "wb") as fh:
+        dependency_path = os.path.join(workspace, "dependency-plan.json")
+        with open(dependency_path, "wb") as fh:
             fh.write(dependency_bytes)
+        os.chmod(dependency_path, 0o444)
 
         manifest = {
             "schema": MANIFEST_SCHEMA,
@@ -95,8 +102,10 @@ def main() -> int:
         }
         manifest_bytes = canonical_json(manifest).encode("utf-8")
         manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
-        with open(os.path.join(workspace, "manifest.json"), "wb") as fh:
+        manifest_path = os.path.join(workspace, "manifest.json")
+        with open(manifest_path, "wb") as fh:
             fh.write(manifest_bytes)
+        os.chmod(manifest_path, 0o444)
 
         capability = CapabilityBroker("cap-broker:wheel-docker-self-check")
         package_contract = CapabilityContract.build(
