@@ -1,9 +1,9 @@
 """Bound offline package installation governance for LiminalOS.
 
 This model-facing SDK never invokes a package manager, opens sockets, mutates the
-host filesystem or talks to Docker. It binds one exact staged package plan to a
-`package.install` capability and then requires the existing isolated execution
-stack to admit the deterministic installer process separately.
+host filesystem or talks to Docker. It binds one exact host-staged package plan
+to `package.install` and then requires the existing isolated execution stack to
+admit the deterministic installer process separately.
 """
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ MAX_DEPENDENCIES = 256
 
 _AUTHORITY_ITEMS = (
     ("mode", "bound_offline_package_install_governance"),
+    ("host_staged_plan_required", True),
     ("package_capability_required", True),
     ("isolated_process_capability_required", True),
     ("immutable_installer_image_required", True),
@@ -107,11 +108,21 @@ def _bounded_int(value: int, name: str, *, minimum: int, maximum: int) -> int:
     return value
 
 
+def _coordinate(package_name: str, version: str) -> str:
+    return f"{_package(package_name)}=={_version(version)}"
+
+
 @dataclass(frozen=True)
 class PackageWorkspaceBinding:
     binding_id: str
     host_workspace: str
+    registry: str
+    package_name: str
+    version: str
+    artifact_sha256: str
+    dependency_plan_sha256: str
     staged_manifest_sha256: str
+    dependency_count: int
     installer_image_id: str
     binding_sha256: str
 
@@ -121,7 +132,13 @@ class PackageWorkspaceBinding:
         *,
         binding_id: str,
         host_workspace: str,
+        registry: str,
+        package_name: str,
+        version: str,
+        artifact_sha256: str,
+        dependency_plan_sha256: str,
         staged_manifest_sha256: str,
+        dependency_count: int,
         installer_image_id: str,
     ) -> "PackageWorkspaceBinding":
         binding_id = _ident(binding_id, "binding_id")
@@ -129,24 +146,45 @@ class PackageWorkspaceBinding:
             raise PackageInstallError("host_workspace_must_be_absolute")
         if "\x00" in host_workspace or "," in host_workspace or len(host_workspace) > 4096:
             raise PackageInstallError("invalid_host_workspace")
+        registry = _registry(registry)
+        package_name = _package(package_name)
+        version = _version(version)
+        artifact_sha256 = _sha(artifact_sha256, "artifact_sha256")
+        dependency_plan_sha256 = _sha(dependency_plan_sha256, "dependency_plan_sha256")
         staged_manifest_sha256 = _sha(staged_manifest_sha256, "staged_manifest_sha256")
+        dependency_count = _bounded_int(dependency_count, "dependency_count", minimum=0, maximum=MAX_DEPENDENCIES)
         if not isinstance(installer_image_id, str) or not _IMAGE.fullmatch(installer_image_id):
             raise PackageInstallError("installer_image_must_be_immutable_digest")
         item = cls(
             binding_id=binding_id,
             host_workspace=host_workspace,
+            registry=registry,
+            package_name=package_name,
+            version=version,
+            artifact_sha256=artifact_sha256,
+            dependency_plan_sha256=dependency_plan_sha256,
             staged_manifest_sha256=staged_manifest_sha256,
+            dependency_count=dependency_count,
             installer_image_id=installer_image_id,
             binding_sha256="",
         )
         return cls(**{**item.__dict__, "binding_sha256": canonical_sha256(item.safe_body())})
+
+    @property
+    def package_coordinate(self) -> str:
+        return f"{self.package_name}=={self.version}"
 
     def safe_body(self) -> dict[str, Any]:
         return {
             "schema": BINDING_SCHEMA,
             "binding_id": self.binding_id,
             "host_workspace_sha256": canonical_sha256(self.host_workspace),
+            "registry": self.registry,
+            "package_coordinate": self.package_coordinate,
+            "artifact_sha256": self.artifact_sha256,
+            "dependency_plan_sha256": self.dependency_plan_sha256,
             "staged_manifest_sha256": self.staged_manifest_sha256,
+            "dependency_count": self.dependency_count,
             "installer_image_id": self.installer_image_id,
             "authority": _authority_document(),
         }
@@ -197,8 +235,6 @@ class PackageInstallRequest:
             "policy_sha256": r.policy_sha256,
             "workspace_binding_id": r.workspace_binding_id,
             "registry": r.registry,
-            "package_name": r.package_name,
-            "version": r.version,
             "package_coordinate": f"{r.package_name}=={r.version}",
             "artifact_sha256": r.artifact_sha256,
             "dependency_plan_sha256": r.dependency_plan_sha256,
@@ -278,9 +314,23 @@ class PackageInstallBroker:
         for item in workspace_bindings:
             if not isinstance(item, PackageWorkspaceBinding):
                 raise PackageInstallError("workspace_bindings_must_be_host_objects")
-            if item.binding_id in bindings:
+            rebuilt = PackageWorkspaceBinding.build(
+                binding_id=item.binding_id,
+                host_workspace=item.host_workspace,
+                registry=item.registry,
+                package_name=item.package_name,
+                version=item.version,
+                artifact_sha256=item.artifact_sha256,
+                dependency_plan_sha256=item.dependency_plan_sha256,
+                staged_manifest_sha256=item.staged_manifest_sha256,
+                dependency_count=item.dependency_count,
+                installer_image_id=item.installer_image_id,
+            )
+            if rebuilt.binding_sha256 != item.binding_sha256:
+                raise PackageInstallError("workspace_binding_digest_mismatch")
+            if rebuilt.binding_id in bindings:
                 raise PackageInstallError("duplicate_workspace_binding")
-            bindings[item.binding_id] = item
+            bindings[rebuilt.binding_id] = rebuilt
         if not bindings:
             raise PackageInstallError("workspace_binding_required")
         self._bindings = MappingProxyType(bindings)
@@ -295,17 +345,10 @@ class PackageInstallBroker:
             request_sha = canonical_sha256(req.safe_body())
             if req.call_id in self._seen_call_ids:
                 return self._finish(
-                    req=req,
-                    request_sha=request_sha,
-                    binding=None,
-                    package_plan_sha=ZERO_SHA256,
-                    capability_receipt_sha=ZERO_SHA256,
-                    package_decision="BLOCK",
-                    isolated_receipt_sha=ZERO_SHA256,
-                    process_admission="NOT_REQUESTED",
-                    execution_outcome="NOT_EXECUTED",
-                    reasons=("replayed_call_id",),
-                    now=now,
+                    req=req, request_sha=request_sha, binding=None, package_plan_sha=ZERO_SHA256,
+                    capability_receipt_sha=ZERO_SHA256, package_decision="BLOCK",
+                    isolated_receipt_sha=ZERO_SHA256, process_admission="NOT_REQUESTED",
+                    execution_outcome="NOT_EXECUTED", reasons=("replayed_call_id",), now=now,
                 )
             self._seen_call_ids.add(req.call_id)
             binding = self._bindings.get(req.workspace_binding_id)
@@ -316,12 +359,26 @@ class PackageInstallBroker:
                     isolated_receipt_sha=ZERO_SHA256, process_admission="NOT_REQUESTED",
                     execution_outcome="NOT_EXECUTED", reasons=("unknown_workspace_binding",), now=now,
                 )
+
+            mismatch_reasons: list[str] = []
+            if req.registry != binding.registry:
+                mismatch_reasons.append("registry_binding_mismatch")
+            if f"{req.package_name}=={req.version}" != binding.package_coordinate:
+                mismatch_reasons.append("package_coordinate_binding_mismatch")
+            if req.artifact_sha256 != binding.artifact_sha256:
+                mismatch_reasons.append("artifact_binding_mismatch")
+            if req.dependency_plan_sha256 != binding.dependency_plan_sha256:
+                mismatch_reasons.append("dependency_plan_binding_mismatch")
             if req.staged_manifest_sha256 != binding.staged_manifest_sha256:
+                mismatch_reasons.append("staged_manifest_mismatch")
+            if req.dependency_count != binding.dependency_count:
+                mismatch_reasons.append("dependency_count_binding_mismatch")
+            if mismatch_reasons:
                 return self._finish(
                     req=req, request_sha=request_sha, binding=binding, package_plan_sha=ZERO_SHA256,
                     capability_receipt_sha=ZERO_SHA256, package_decision="BLOCK",
                     isolated_receipt_sha=ZERO_SHA256, process_admission="NOT_REQUESTED",
-                    execution_outcome="NOT_EXECUTED", reasons=("staged_manifest_mismatch",), now=now,
+                    execution_outcome="NOT_EXECUTED", reasons=tuple(mismatch_reasons), now=now,
                 )
 
             package_plan = {
@@ -333,19 +390,19 @@ class PackageInstallBroker:
                 "install_target": INSTALL_TARGET,
             }
             package_plan_sha = canonical_sha256(package_plan)
-            package_coordinate = f"{req.package_name}=={req.version}"
             package_capability = self.capability_broker.authorize(
                 subject_id=req.subject_id,
                 capability_type="package.install",
                 policy_sha256=req.policy_sha256,
-                requested_scope={"registries": [req.registry], "packages": [package_coordinate]},
+                requested_scope={"registries": [binding.registry], "packages": [binding.package_coordinate]},
                 action={
                     "call_id": req.call_id,
-                    "package_coordinate": package_coordinate,
+                    "workspace_binding_sha256": binding.binding_sha256,
                     "package_plan_sha256": package_plan_sha,
-                    "artifact_sha256": req.artifact_sha256,
-                    "dependency_plan_sha256": req.dependency_plan_sha256,
-                    "staged_manifest_sha256": req.staged_manifest_sha256,
+                    "artifact_sha256": binding.artifact_sha256,
+                    "dependency_plan_sha256": binding.dependency_plan_sha256,
+                    "staged_manifest_sha256": binding.staged_manifest_sha256,
+                    "dependency_count": binding.dependency_count,
                 },
                 at_unix=now,
             )
@@ -360,7 +417,7 @@ class PackageInstallBroker:
             isolated_plan = IsolatedExecutionPlan.build(
                 operation_id=f"package-install:{req.call_id}",
                 image_id=binding.installer_image_id,
-                argv=self._installer_argv(req),
+                argv=self._installer_argv(binding),
                 host_workspace=binding.host_workspace,
                 timeout_seconds=60,
             )
@@ -378,23 +435,17 @@ class PackageInstallBroker:
                 at_unix=now,
             )
             isolated = self.isolated_execution_broker.execute(operation=operation, plan=isolated_plan)
-            reasons = ["package_capability_admitted"]
+            reasons = ["package_capability_admitted", "host_staged_plan_matched"]
             if isolated["admission_decision"] == "ALLOW" and isolated["execution_outcome"] == "SUCCEEDED":
                 reasons.extend(("process_capability_admitted", "isolated_install_succeeded"))
             else:
                 reasons.append("isolated_process_gate_blocked_or_failed")
             return self._finish(
-                req=req,
-                request_sha=request_sha,
-                binding=binding,
-                package_plan_sha=package_plan_sha,
-                capability_receipt_sha=package_capability["receipt_sha256"],
-                package_decision="ALLOW",
+                req=req, request_sha=request_sha, binding=binding, package_plan_sha=package_plan_sha,
+                capability_receipt_sha=package_capability["receipt_sha256"], package_decision="ALLOW",
                 isolated_receipt_sha=isolated["receipt_sha256"],
-                process_admission=isolated["admission_decision"],
-                execution_outcome=isolated["execution_outcome"],
-                reasons=tuple(reasons),
-                now=now,
+                process_admission=isolated["admission_decision"], execution_outcome=isolated["execution_outcome"],
+                reasons=tuple(reasons), now=now,
             )
 
     def receipts(self) -> tuple[dict[str, Any], ...]:
@@ -402,18 +453,17 @@ class PackageInstallBroker:
             return tuple(item.as_document() for item in self._receipts)
 
     @staticmethod
-    def _installer_argv(req: PackageInstallRequest) -> tuple[str, ...]:
-        r = req.normalized()
+    def _installer_argv(binding: PackageWorkspaceBinding) -> tuple[str, ...]:
         return (
             INSTALLER_EXECUTABLE,
             "--offline",
-            "--manifest-sha256", r.staged_manifest_sha256,
-            "--registry-provenance", r.registry,
-            "--package", r.package_name,
-            "--version", r.version,
-            "--artifact-sha256", r.artifact_sha256,
-            "--dependency-plan-sha256", r.dependency_plan_sha256,
-            "--dependency-count", str(r.dependency_count),
+            "--manifest-sha256", binding.staged_manifest_sha256,
+            "--registry-provenance", binding.registry,
+            "--package", binding.package_name,
+            "--version", binding.version,
+            "--artifact-sha256", binding.artifact_sha256,
+            "--dependency-plan-sha256", binding.dependency_plan_sha256,
+            "--dependency-count", str(binding.dependency_count),
             "--target", INSTALL_TARGET,
             "--no-execute-installed-code",
         )
