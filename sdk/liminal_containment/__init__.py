@@ -16,6 +16,7 @@ AUTHORITY = {
     "revoke_live_capabilities": True,
     "close_egress_via_host_callback": True,
     "active_process_quiescence_hook": True,
+    "quiescence_receipt_verification": True,
     "seal_trace": True,
     "bounded_snapshot": True,
     "human_release_required": True,
@@ -104,9 +105,12 @@ class ContainmentCoordinator:
         self._step("DETECT", at_unix, phase3_sha)
         try:
             self.freeze_runtime()
+        except Exception as exc:
+            failures.append(f"freeze:{type(exc).__name__}")
+        try:
             self.close_egress()
         except Exception as exc:
-            failures.append(f"freeze_or_egress:{type(exc).__name__}")
+            failures.append(f"egress:{type(exc).__name__}")
         self._step("FREEZE", at_unix, canonical_sha256({"failures": failures}))
 
         for cap in self.broker.state_document().get("capabilities", []):
@@ -208,35 +212,21 @@ def _validated_phase3_receipt(value: Mapping[str, Any]) -> str:
 
 
 def _validate_quiescence_receipt(value: Mapping[str, Any]) -> tuple[str, bool]:
-    """Normalize the two bounded process-containment receipt profiles.
+    """Cryptographically verify and normalize supported process receipts."""
+    schema = value.get("schema")
+    if schema == "liminal-process-lineage-containment-receipt-v0.1":
+        from sdk.liminal_process_lineage import verify_receipt
 
-    Fine-grained lineage receipts expose ``decision/surviving_count`` while the
-    concrete execution-session supervisor exposes ``zero_survivors/survivor_count``.
-    Neither shape is trusted without its receipt digest being present and validly
-    shaped; native module verifiers remain responsible for cryptographic replay.
-    """
-    sha = value.get("receipt_sha256")
-    _require_sha(sha, "runtime quiescence receipt")
+        verified = verify_receipt(value)
+        sha = verified["receipt_sha256"]
+        return sha, verified["decision"] == "ALLOW" and verified["surviving_count"] == 0
 
-    if "decision" in value or "surviving_count" in value:
-        if value.get("decision") not in {"ALLOW", "BLOCK"}:
-            raise ContainmentError("invalid lineage quiescence decision")
-        survivors = value.get("surviving_count")
-        if not isinstance(survivors, int) or isinstance(survivors, bool) or survivors < 0:
-            raise ContainmentError("invalid lineage surviving_count")
-        return sha, value["decision"] == "ALLOW" and survivors == 0
+    if schema == "liminal-process-tree-containment-receipt-v0.1":
+        from sdk.liminal_process_tree import verify_receipt
 
-    if "zero_survivors" in value or "survivor_count" in value:
-        zero = value.get("zero_survivors")
-        survivors = value.get("survivor_count")
-        if not isinstance(zero, bool):
-            raise ContainmentError("invalid session zero_survivors flag")
-        if not isinstance(survivors, int) or isinstance(survivors, bool) or survivors < 0:
-            raise ContainmentError("invalid session survivor_count")
-        failure_codes = value.get("failure_codes", [])
-        if not isinstance(failure_codes, (list, tuple)):
-            raise ContainmentError("invalid session failure_codes")
-        return sha, zero and survivors == 0 and not failure_codes
+        verified = verify_receipt(value)
+        sha = verified["receipt_sha256"]
+        return sha, verified["zero_survivors"] and verified["survivor_count"] == 0 and not verified["failure_codes"]
 
     raise ContainmentError("unsupported runtime quiescence receipt profile")
 
