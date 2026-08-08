@@ -22,6 +22,8 @@ checkpointed governance transition evidence
 Every mutating store call follows this order:
 
 ```text
+validate caller-controlled generation/digests/world
+        ↓
 mirror journal PENDING
         ↓
 primary CAS mutation
@@ -30,12 +32,14 @@ exact transition envelope from actual before/after state
         ↓
 trusted LiminalDB bridge
         ↓
-verify exact bundle bindings
+verify exact bundle + optional signer pin
         ↓
 mirror journal ACKED / CLEAR
 ```
 
-The `PENDING` marker is written **before** the primary mutation. This is intentionally conservative. If the process dies, the primary mutation fails, or the LiminalDB bridge is unavailable, restart still sees `PENDING` and refuses subsequent mirrored mutations until an explicit trusted reconciliation receipt clears the mirror guard.
+Caller-controlled digests and world documents are validated before `PENDING` is written. This avoids poisoning the mirror guard for requests that are locally malformed before any primary mutation is attempted.
+
+The `PENDING` marker is otherwise written **before** the primary mutation. This is intentionally conservative. If the process dies, a valid primary CAS fails, or the LiminalDB bridge becomes unavailable, restart still sees `PENDING` and refuses subsequent mirrored mutations until an explicit trusted reconciliation receipt clears the mirror guard.
 
 There is no automatic timeout. Time passing is not evidence that the primary mutation or physical effect did not occur.
 
@@ -84,14 +88,16 @@ The adapter verifies structural and exact-binding evidence from the bundle:
 
 - echoed envelope body is exact;
 - bridge receipt is `LOCAL_SIGNATURE_VERIFIED`;
-- root/generation/world/reservation/operation/upstream fields match;
+- root/generation/world/reservation/operation/upstream fields are present and match;
 - checkpoint reference matches the receipt;
 - checkpoint storage-root identity matches the LiminalOSAI root;
-- event head, sequence, projection and snapshot digests match;
+- event hash, event head, sequence, projection and snapshot digests are present and bound into local mirror evidence;
 - signer/key identities match the trusted public-key record;
 - checkpoint declares Ed25519 and correctly shaped signature/public-key material.
 
-Cryptographic Ed25519 verification remains the trusted bridge's responsibility. The pinned LiminalDB implementation signs and calls its native `verify_signed_checkpoint` before returning success. LiminalOSAI does not duplicate Ed25519 verification with a second cryptographic implementation.
+`CheckpointingGovernanceStore` also accepts an optional `pinned_trusted_keys` allowlist of exact `(signer_id, key_id, public_key_hex)` identities. When pins are configured, a bridge bundle using any other key is rejected and the mirror remains `PENDING`. Production deployments should configure pins or another equivalent authenticated bridge identity mechanism.
+
+Cryptographic Ed25519 verification remains the trusted bridge's responsibility. The pinned LiminalDB implementation signs and calls its native `verify_signed_checkpoint` before returning success. LiminalOSAI does not duplicate Ed25519 verification with a second cryptographic implementation. If no key pins are configured, trust reduces to the authenticated callback boundary plus exact bundle-binding checks; this is weaker and is documented rather than silently treated as independent key trust.
 
 ## Bridge failure after primary success
 
@@ -119,7 +125,9 @@ CI pins LiminalDB commit:
 
 `0cd6e77d52787bb36a97b75ba1a37cb027268eb3`
 
-and invokes its real `liminalosai_governance_checkpoint_bridge` example as the trusted callback while exercising the Python adapter. The reference bridge therefore proves the actual chain:
+and invokes its real `liminalosai_governance_checkpoint_bridge` example as the trusted callback while exercising the Python adapter. CI also pins the expected public key derived from its fixed conformance seed, so changing the returned signer key fails the adapter gate.
+
+The reference bridge proves the actual chain:
 
 ```text
 Python DurableGovernanceStore
@@ -129,9 +137,11 @@ Python DurableGovernanceStore
 → snapshot
 → signed checkpoint
 → native signature verification
-→ bundle verification in LiminalOSAI
+→ exact bundle + signer-pin verification in LiminalOSAI
 → mirror ACKED
 ```
+
+The workflow's third-party GitHub Actions are pinned to immutable commit SHAs, and the Rust toolchain is pinned to an explicit version. Dependency-path triggers include the shared durable-governance, effect-commit and post-sandbox contract modules used by this adapter.
 
 ## Nonclaims
 
