@@ -50,12 +50,23 @@ class CapturingBackend:
 class PackageInstallBrokerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.clock = Clock()
-        self.binding = PackageWorkspaceBinding.build(
-            binding_id="pkg-workspace:1",
-            host_workspace="/trusted/staged-packages",
-            staged_manifest_sha256=MANIFEST,
-            installer_image_id=IMAGE,
-        )
+        self.binding = self._binding()
+
+    def _binding(self, **overrides) -> PackageWorkspaceBinding:
+        values = {
+            "binding_id": "pkg-workspace:1",
+            "host_workspace": "/trusted/staged-packages",
+            "registry": "pypi.org",
+            "package_name": "demo_pkg",
+            "version": "1.2.3",
+            "artifact_sha256": ARTIFACT,
+            "dependency_plan_sha256": DEPENDENCIES,
+            "staged_manifest_sha256": MANIFEST,
+            "dependency_count": 3,
+            "installer_image_id": IMAGE,
+        }
+        values.update(overrides)
+        return PackageWorkspaceBinding.build(**values)
 
     def _stack(
         self,
@@ -64,6 +75,7 @@ class PackageInstallBrokerTests(unittest.TestCase):
         registry: str = "pypi.org",
         package_max_uses: int = 20,
         include_process_capability: bool = True,
+        binding: PackageWorkspaceBinding | None = None,
     ):
         capability = CapabilityBroker("cap-broker:package-tests")
         package_contract = CapabilityContract.build(
@@ -107,7 +119,7 @@ class PackageInstallBrokerTests(unittest.TestCase):
         broker = PackageInstallBroker(
             capability_broker=capability,
             isolated_execution_broker=isolated,
-            workspace_bindings=[self.binding],
+            workspace_bindings=[binding or self.binding],
             clock=self.clock,
         )
         return capability, backend, broker
@@ -148,18 +160,34 @@ class PackageInstallBrokerTests(unittest.TestCase):
         self.assertEqual(len(backend.plans), 1)
         verify_receipt(receipt)
 
-    def test_exact_version_is_part_of_package_capability_scope(self):
+    def test_exact_version_is_pinned_by_binding_and_capability(self):
         _, backend, broker = self._stack(package_coordinate="demo-pkg==1.2.3")
         receipt = broker.install(self._request(version="1.2.4"))
         self.assertEqual(receipt["package_decision"], "BLOCK")
+        self.assertIn("package_coordinate_binding_mismatch", receipt["reason_codes"])
         self.assertEqual(len(backend.plans), 0)
 
-    def test_registry_mismatch_blocks_before_process_gate(self):
-        _, backend, broker = self._stack(registry="pypi.org")
-        receipt = broker.install(self._request(registry="packages.example.com"))
-        self.assertEqual(receipt["package_decision"], "BLOCK")
-        self.assertEqual(receipt["process_admission_decision"], "NOT_REQUESTED")
-        self.assertEqual(len(backend.plans), 0)
+    def test_every_host_staged_materialization_input_is_pinned(self):
+        cases = [
+            ("registry", {"registry": "packages.example.com"}, "registry_binding_mismatch"),
+            ("package", {"package_name": "other-pkg"}, "package_coordinate_binding_mismatch"),
+            ("artifact", {"artifact_sha256": "f" * 64}, "artifact_binding_mismatch"),
+            ("dependency-plan", {"dependency_plan_sha256": "1" * 64}, "dependency_plan_binding_mismatch"),
+            ("manifest", {"staged_manifest_sha256": "2" * 64}, "staged_manifest_mismatch"),
+            ("dependency-count", {"dependency_count": 4}, "dependency_count_binding_mismatch"),
+        ]
+        for label, overrides, reason in cases:
+            with self.subTest(label=label):
+                capability, backend, broker = self._stack(package_max_uses=1)
+                blocked = broker.install(self._request(call_id=f"call:{label}", **overrides))
+                self.assertEqual(blocked["package_decision"], "BLOCK")
+                self.assertIn(reason, blocked["reason_codes"])
+                self.assertEqual(len(backend.plans), 0)
+                allowed = broker.install(self._request(call_id=f"call:{label}:good"))
+                self.assertEqual(allowed["package_decision"], "ALLOW")
+                state = capability.state_document()
+                package_state = next(item for item in state["capabilities"] if item["capability_id"] == "cap:package")
+                self.assertEqual(package_state["use_count"], 1)
 
     def test_process_capability_is_separate_and_mandatory(self):
         _, backend, broker = self._stack(include_process_capability=False)
@@ -182,30 +210,19 @@ class PackageInstallBrokerTests(unittest.TestCase):
         self.assertEqual(plan.argv[0], INSTALLER_EXECUTABLE)
         self.assertIn("--offline", plan.argv)
         self.assertIn("--no-execute-installed-code", plan.argv)
-        target_index = plan.argv.index("--target")
-        self.assertEqual(plan.argv[target_index + 1], INSTALL_TARGET)
+        self.assertEqual(plan.argv[plan.argv.index("--target") + 1], INSTALL_TARGET)
         self.assertNotIn("pip", plan.argv)
         self.assertNotIn("npm", plan.argv)
         self.assertNotIn("apt", plan.argv)
 
-    def test_artifact_and_dependency_digests_are_bound_to_argv(self):
+    def test_staged_digests_are_bound_to_installer_argv(self):
         _, backend, broker = self._stack()
         broker.install(self._request())
         argv = backend.plans[0].argv
         self.assertEqual(argv[argv.index("--artifact-sha256") + 1], ARTIFACT)
         self.assertEqual(argv[argv.index("--dependency-plan-sha256") + 1], DEPENDENCIES)
         self.assertEqual(argv[argv.index("--manifest-sha256") + 1], MANIFEST)
-
-    def test_workspace_manifest_mismatch_blocks_without_consuming_package_capability(self):
-        capability, backend, broker = self._stack(package_max_uses=1)
-        blocked = broker.install(self._request(call_id="call:bad-manifest", staged_manifest_sha256="f" * 64))
-        self.assertEqual(blocked["package_decision"], "BLOCK")
-        self.assertEqual(len(backend.plans), 0)
-        allowed = broker.install(self._request(call_id="call:good"))
-        self.assertEqual(allowed["package_decision"], "ALLOW")
-        state = capability.state_document()
-        package_state = next(item for item in state["capabilities"] if item["capability_id"] == "cap:package")
-        self.assertEqual(package_state["use_count"], 1)
+        self.assertEqual(argv[argv.index("--dependency-count") + 1], "3")
 
     def test_unknown_workspace_binding_blocks(self):
         _, backend, broker = self._stack()
@@ -263,11 +280,20 @@ class PackageInstallBrokerTests(unittest.TestCase):
 
     def test_workspace_binding_requires_immutable_installer_image(self):
         with self.assertRaises(PackageInstallError):
-            PackageWorkspaceBinding.build(
-                binding_id="bad",
-                host_workspace="/trusted/staged-packages",
-                staged_manifest_sha256=MANIFEST,
-                installer_image_id="python:latest",
+            self._binding(installer_image_id="python:latest")
+
+    def test_forged_binding_digest_is_rejected_at_broker_construction(self):
+        valid = self.binding
+        forged = PackageWorkspaceBinding(**{**valid.__dict__, "binding_sha256": "0" * 64})
+        capability = CapabilityBroker("cap-broker:forged-binding")
+        backend = CapturingBackend()
+        isolated = IsolatedExecutionBroker(mediator=RuntimeMediator(broker=capability), backend=backend)
+        with self.assertRaises(PackageInstallError):
+            PackageInstallBroker(
+                capability_broker=capability,
+                isolated_execution_broker=isolated,
+                workspace_bindings=[forged],
+                clock=self.clock,
             )
 
     def test_receipts_are_digest_only_and_exact_schema(self):
@@ -275,7 +301,7 @@ class PackageInstallBrokerTests(unittest.TestCase):
         receipt = broker.install(self._request())
         serialized = json.dumps(receipt, sort_keys=True)
         self.assertNotIn("/trusted/staged-packages", serialized)
-        self.assertNotIn("demo_pkg", serialized)
+        self.assertNotIn("demo-pkg", serialized)
         verify_receipt(receipt)
         tampered = dict(receipt)
         tampered["raw_workspace"] = "/trusted/staged-packages"
