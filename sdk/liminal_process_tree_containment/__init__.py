@@ -183,6 +183,7 @@ class ProcessTreeContainmentSupervisor:
         self.backend = backend
         self._before: ProcessTreeObservation | None = None
         self._frozen: ProcessTreeObservation | None = None
+        self._freeze_evidence_sha256: str | None = None
         self._receipt: ProcessTreeContainmentReceipt | None = None
 
     def snapshot(self) -> ProcessTreeObservation:
@@ -205,11 +206,15 @@ class ProcessTreeContainmentSupervisor:
             expected_action="freeze",
         )
         frozen = self.snapshot()
+        _require_same_lineage(before, frozen)
+        if action["result_tree_sha256"] != frozen.tree_sha256:
+            raise ProcessTreeError("freeze action is not bound to the resulting process tree")
+        if action["affected_count"] != len(before.live_nodes):
+            raise ProcessTreeError("freeze affected_count does not match live process count")
         if any(node.state == "running" for node in frozen.nodes):
             raise ProcessTreeError("freeze left a running process in the execution session")
-        if {n.process_id for n in before.nodes} != {n.process_id for n in frozen.nodes}:
-            raise ProcessTreeError("process lineage changed while session was being frozen")
         self._before, self._frozen = before, frozen
+        self._freeze_evidence_sha256 = action["evidence_sha256"]
         return {
             "session_id": self.session_id,
             "before_tree_sha256": before.tree_sha256,
@@ -219,10 +224,11 @@ class ProcessTreeContainmentSupervisor:
         }
 
     def quiesce(self) -> dict[str, Any]:
-        if self._before is None or self._frozen is None:
+        if self._before is None or self._frozen is None or self._freeze_evidence_sha256 is None:
             raise ProcessTreeError("quiescence requires a previously frozen execution session")
         if self._receipt is not None:
             return self._receipt.as_document()
+        live_before_terminate = self._frozen.live_nodes
         action = _validate_action(
             self.backend.terminate(self.session_id),
             expected_session_id=self.session_id,
@@ -231,13 +237,14 @@ class ProcessTreeContainmentSupervisor:
             expected_action="terminate",
         )
         after = self.snapshot()
-        before_ids = {n.process_id for n in self._before.nodes}
-        after_ids = {n.process_id for n in after.nodes}
-        if not after_ids.issubset(before_ids):
-            raise ProcessTreeError("new process appeared after execution-session freeze")
-        survivors = tuple(node for node in after.nodes if node.state != "terminated")
-        terminated_count = len(before_ids) - len(survivors)
-        decision = "ALLOW" if not survivors else "BLOCK"
+        _require_same_lineage(self._before, after)
+        if action["result_tree_sha256"] != after.tree_sha256:
+            raise ProcessTreeError("terminate action is not bound to the resulting process tree")
+        if action["affected_count"] > len(live_before_terminate):
+            raise ProcessTreeError("terminate affected_count exceeds frozen live process count")
+        survivors = after.live_nodes
+        terminated_count = sum(node.state == "terminated" for node in after.nodes)
+        decision = "ALLOW" if not survivors and action["affected_count"] == len(live_before_terminate) else "BLOCK"
         base = ProcessTreeContainmentReceipt(
             session_id=self.session_id,
             root_process_id=self.root_process_id,
@@ -248,13 +255,11 @@ class ProcessTreeContainmentSupervisor:
             observed_count=len(self._before.nodes),
             terminated_count=terminated_count,
             surviving_count=len(survivors),
-            freeze_evidence_sha256=_action_evidence_from_freeze(self.backend, self.session_id, self.root_process_id, self.backend_binding_sha256, self._frozen),
+            freeze_evidence_sha256=self._freeze_evidence_sha256,
             terminate_evidence_sha256=action["evidence_sha256"],
             decision=decision,
             receipt_sha256="",
         )
-        # Do not call backend.freeze twice. The helper above derives a stable evidence root
-        # from the validated frozen state when a backend does not retain action receipts.
         receipt = ProcessTreeContainmentReceipt(**{**base.__dict__, "receipt_sha256": canonical_sha256(base.body())})
         self._receipt = receipt
         return receipt.as_document()
@@ -263,19 +268,6 @@ class ProcessTreeContainmentSupervisor:
         if self._receipt is None:
             raise ProcessTreeError("no process-tree containment receipt")
         return self._receipt.as_document()
-
-
-def _action_evidence_from_freeze(backend: ProcessTreeBackend, session_id: str, root_process_id: str, binding: str, frozen: ProcessTreeObservation) -> str:
-    # The actual freeze action was already validated before the frozen snapshot. We bind
-    # its evidence deterministically to the resulting frozen tree without invoking it again.
-    return canonical_sha256({
-        "schema": ACTION_SCHEMA,
-        "session_id": session_id,
-        "root_process_id": root_process_id,
-        "backend_binding_sha256": binding,
-        "action": "freeze",
-        "result_tree_sha256": frozen.tree_sha256,
-    })
 
 
 def _validate_action(raw: Mapping[str, Any], *, expected_session_id: str, expected_root_process_id: str, expected_backend_binding_sha256: str, expected_action: str) -> dict[str, Any]:
@@ -319,6 +311,13 @@ def _validate_lineage(nodes: tuple[ProcessNode, ...], root_process_id: str) -> N
             raise ProcessTreeError("process is not descended from the bound root")
 
 
+def _require_same_lineage(left: ProcessTreeObservation, right: ProcessTreeObservation) -> None:
+    left_map = {n.process_id: (n.parent_process_id, n.identity_sha256) for n in left.nodes}
+    right_map = {n.process_id: (n.parent_process_id, n.identity_sha256) for n in right.nodes}
+    if left_map != right_map:
+        raise ProcessTreeError("process lineage or trusted identity changed during containment")
+
+
 def verify_receipt(document: Mapping[str, Any]) -> dict[str, Any]:
     raw = dict(document)
     digest = raw.pop("receipt_sha256", None)
@@ -328,8 +327,11 @@ def verify_receipt(document: Mapping[str, Any]) -> dict[str, Any]:
         _require_sha(raw.get(key), key)
     if raw.get("decision") not in {"ALLOW", "BLOCK"}:
         raise ProcessTreeError("unsupported process-tree containment decision")
-    if not isinstance(raw.get("surviving_count"), int) or raw["surviving_count"] < 0:
-        raise ProcessTreeError("invalid surviving_count")
+    for key in ("observed_count", "terminated_count", "surviving_count"):
+        if not isinstance(raw.get(key), int) or isinstance(raw[key], bool) or raw[key] < 0:
+            raise ProcessTreeError(f"invalid {key}")
+    if raw["terminated_count"] + raw["surviving_count"] != raw["observed_count"]:
+        raise ProcessTreeError("process counts do not reconcile")
     if raw["decision"] == "ALLOW" and raw["surviving_count"] != 0:
         raise ProcessTreeError("ALLOW receipt cannot contain surviving processes")
     if digest != canonical_sha256(raw):
