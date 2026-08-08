@@ -6,27 +6,39 @@ A governed execution session must not leave a surviving descendant process after
 
 ```text
 process.execute
-→ trusted host creates execution-session identity
-→ root process identity is bound outside model context
-→ descendants remain in one verified lineage
+→ trusted execution-session identity
+→ root + descendants observed outside model authority
 → DETECT / CONTAIN
-→ freeze session tree + close egress
+→ freeze execution session(s) + independently close egress
 → revoke live capabilities
-→ quiesce/terminate session tree
+→ terminate/quiesce frozen session(s)
 → verify zero survivors
+→ verify containment receipt
 → seal evidence
 → REVIEW
 ```
 
-## Why this exists
+A policy decision that blocks future API calls is insufficient if an already-running child or background descendant can continue acting. The control plane therefore requires post-revocation process evidence, not merely `blocked=true`.
 
-A policy decision that blocks future API calls is insufficient if an already-running child or background descendant can continue acting. The containment boundary therefore needs a post-revocation process-tree proof, not just a boolean `frozen=true` claim.
+## Two complementary process profiles
 
-## Trust boundary
+### 1. `liminal_process_tree` — execution-session control
 
-The SDK never accepts an OS PID, process handle, command line, environment, signal target or container-runtime operation from the model. It receives only opaque trusted-host process identities and digest-safe observations from a backend bound to one execution session.
+This layer tracks opaque governed execution sessions and coordinates trusted host callbacks across one or more sessions. Its key invariant is temporal:
 
-A backend observation contains:
+```text
+FREEZE only
+→ capability REVOKE
+→ QUIESCE / TERMINATE
+```
+
+`freeze_all()` is forbidden from terminating the workload. `quiesce_all()` is the post-revocation path and fails closed if a session is still executing because the FREEZE stage was skipped. Emergency exact-session cleanup used for timeout/adapter failure remains a separate `quiesce_session()` path.
+
+The session receipt records only bounded counts and digests: active sessions before containment, terminated sessions, already-absent sessions, survivors, before/after roots and failure codes.
+
+### 2. `liminal_process_lineage` — explicit root/descendant proof
+
+For trusted backends capable of exposing fine-grained process lineage, this stronger profile binds:
 
 - execution-session ID;
 - bound root process identity;
@@ -34,13 +46,15 @@ A backend observation contains:
 - opaque process identity + parent relation;
 - trusted identity digest;
 - state: `running | frozen | terminated`;
-- deterministic process-tree digest and evidence digest.
+- deterministic tree digest and backend evidence digest.
 
-The same process identities must remain visible as tombstones through termination. A backend cannot prove success by silently removing a process from the final snapshot.
+The same opaque process identities must remain visible as terminated tombstones through the final observation. A backend cannot prove success merely by deleting a node from the snapshot.
 
-## Fail-closed invariants
+`liminal_process_tree_containment` remains only as a compatibility import shim to the lineage profile; it defines no competing schema or authority surface.
 
-The supervisor rejects:
+## Fail-closed lineage invariants
+
+The lineage verifier rejects:
 
 - duplicate identities;
 - missing or parented root;
@@ -50,57 +64,70 @@ The supervisor rejects:
 - cross-session observations/actions;
 - backend-binding drift;
 - trusted process-identity drift between snapshots;
-- action evidence whose digest is invalid;
+- forged action evidence;
 - action receipts not bound to the exact resulting tree digest;
-- freeze that leaves any process `running`;
-- termination that reports impossible affected counts;
+- freeze that leaves a process executing;
+- impossible affected counts;
 - any final surviving process.
+
+## Concrete Docker backend
+
+The trusted Docker adapter assigns an opaque container/session identity and, for a running governed container, derives explicit root/child lineage from trusted host observations. Raw host PIDs stay inside the adapter and are converted to session-bound opaque process IDs before reaching the verifier.
+
+The Docker backend supports:
+
+```text
+inspect exact named session
+→ derive opaque root/child lineage
+→ docker pause exact session
+→ verify frozen lineage
+→ docker rm -f exact session
+→ retain terminated tombstones
+→ verify container absence
+→ digest-only lineage receipt
+```
+
+Timeout cleanup also targets the exact trusted container name and verifies that it no longer exists.
 
 ## Phase 4 integration
 
-`ContainmentCoordinator` keeps the existing state machine:
+`ContainmentCoordinator` preserves the state machine:
 
 ```text
 DETECT → FREEZE → REVOKE → SEAL → SNAPSHOT → REVIEW
 ```
 
-When a process-tree quiescence hook is configured, the concrete ordering inside the boundary is:
+Inside those states, process enforcement is ordered as:
 
 ```text
+DETECT
+
 FREEZE:
-  freeze process tree
-  close egress
+  attempt process/session freeze
+  independently attempt egress closure
 
 REVOKE:
-  revoke all live capabilities
+  revoke all live sensitive capabilities
 
 between REVOKE and SEAL:
-  terminate/quiesce frozen process tree
-  require decision=ALLOW
-  require surviving_count=0
+  terminate/quiesce frozen process state
+  cryptographically verify supported quiescence receipt
+  require zero survivors
 
 SEAL:
-  bind the process-tree containment receipt digest into incident evidence
+  bind the verified quiescence receipt digest into incident evidence
 ```
 
-A surviving or unverifiable descendant becomes a containment partial failure. Phase 4 therefore remains in `REVIEW`, and explicit human release is blocked until the failure is resolved.
+Freeze and egress closure are attempted independently: failure of one does not suppress the other. A surviving process, missing freeze, unverifiable receipt, backend mismatch or other quiescence failure becomes a containment partial failure. The coordinator remains in `REVIEW`, and explicit human release is blocked while partial failures remain.
 
-## Receipt
+## Authority boundary
 
-The process-tree containment receipt is digest-only and includes:
+The model-facing SDK never receives OS PIDs, process handles, command lines, environment variables, signal targets or direct Docker/container-runtime authority. Concrete OS/container control belongs to a trusted host backend.
 
-- session/root identity;
-- backend-binding digest;
-- before/frozen/after tree digests;
-- observed, terminated and surviving counts;
-- freeze/terminate backend evidence digests;
-- `ALLOW | BLOCK` decision;
-- canonical receipt SHA-256.
+This work does **not** claim kernel sandboxing, eBPF/seccomp enforcement, container-runtime exploit resistance, malware detection or proof that a compromised host kernel can be contained by user-space receipts.
 
-It deliberately excludes raw PIDs, command lines, environment variables, stdout/stderr and secrets.
+## Security invariant
 
-## Explicit nonclaims
+> Once an execution session loses authority, no process descended from that governed session may continue operating without the containment evidence recording the failure and blocking release.
 
-This layer is not a kernel sandbox, eBPF/seccomp implementation, container-runtime exploit defense, malware detector or proof that the host kernel cannot be compromised. Concrete OS/container process control belongs to the trusted host backend. The SDK defines and verifies the bounded evidence contract and integrates its result into containment.
-
-Refs: #103, #131, #140, #152, #153.
+Refs: #103, #131, #140, #152, #153, #134.
