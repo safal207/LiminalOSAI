@@ -32,10 +32,14 @@ class Clock:
 class FakeBridge:
     def __init__(self):
         self.calls = []
+        self.timeouts = []
         self.fail = False
         self.tamper = None
 
-    def __call__(self, envelope):
+    def __call__(self, envelope, timeout_seconds):
+        if timeout_seconds <= 0:
+            raise RuntimeError("bridge timeout contract violated")
+        self.timeouts.append(timeout_seconds)
         if self.fail:
             raise RuntimeError("bridge unavailable with sensitive detail")
         self.calls.append(dict(envelope))
@@ -142,6 +146,7 @@ class LiminalDBGovernanceCheckpointAdapterTests(unittest.TestCase):
             delegate=self.primary,
             journal=self.journal,
             bridge=self.bridge,
+            bridge_timeout_seconds=5.0,
             clock_ms=self.clock,
             pinned_trusted_keys=(PIN,),
         )
@@ -154,6 +159,7 @@ class LiminalDBGovernanceCheckpointAdapterTests(unittest.TestCase):
         self.assertTrue(AUTHORITY["checkpoint_evidence_only"])
         self.assertTrue(AUTHORITY["pending_before_primary_mutation"])
         self.assertTrue(AUTHORITY["fail_closed_on_bridge_failure"])
+        self.assertTrue(AUTHORITY["bounded_bridge_timeout_required"])
         self.assertFalse(AUTHORITY["primary_cas_authority"])
         self.assertFalse(AUTHORITY["automatic_mirror_expiry"])
         self.assertFalse(AUTHORITY["capability_grant"])
@@ -162,9 +168,21 @@ class LiminalDBGovernanceCheckpointAdapterTests(unittest.TestCase):
         self.assertFalse(AUTHORITY["credential_authority"])
         self.assertFalse(AUTHORITY["distributed_consensus"])
 
+    def test_invalid_timeout_contract_is_rejected_at_construction(self):
+        with self.assertRaisesRegex(LiminalDBMirrorError, "invalid_bridge_timeout_seconds"):
+            CheckpointingGovernanceStore(
+                delegate=self.primary,
+                journal=self.journal,
+                bridge=self.bridge,
+                bridge_timeout_seconds=0,
+                clock_ms=self.clock,
+                pinned_trusted_keys=(PIN,),
+            )
+
     def test_initialize_and_mutate_are_checkpointed_and_clear(self):
         first = self.store.initialize(root_id=self.root, world=world("1").as_document())
         self.assertEqual(first["generation"], 0)
+        self.assertEqual(self.bridge.timeouts, [5.0])
         mirror = self.store.mirror_state_document(root_id=self.root)
         self.assertEqual(mirror["status"], "CLEAR")
         self.assertNotEqual(
@@ -188,6 +206,7 @@ class LiminalDBGovernanceCheckpointAdapterTests(unittest.TestCase):
         self.assertEqual(self.bridge.calls[-1]["transition_kind"], "mutate")
         self.assertEqual(self.bridge.calls[-1]["generation_before"], 0)
         self.assertEqual(self.bridge.calls[-1]["generation_after"], 1)
+        self.assertEqual(self.bridge.timeouts, [5.0, 5.0])
 
     def test_reserve_and_commit_bind_reservation_payload_and_receipt(self):
         state = self.store.initialize(root_id=self.root, world=world("1").as_document())
@@ -262,6 +281,7 @@ class LiminalDBGovernanceCheckpointAdapterTests(unittest.TestCase):
             delegate=SQLiteGovernanceStore(self.primary_path),
             journal=SQLiteCheckpointMirrorJournal(self.mirror_path),
             bridge=FakeBridge(),
+            bridge_timeout_seconds=5.0,
             clock_ms=self.clock,
             pinned_trusted_keys=(PIN,),
         )
