@@ -30,7 +30,7 @@ primary CAS mutation
         ↓
 exact transition envelope from actual before/after state
         ↓
-trusted LiminalDB bridge
+trusted LiminalDB bridge with bounded timeout
         ↓
 verify exact bundle + optional signer pin
         ↓
@@ -39,9 +39,9 @@ mirror journal ACKED / CLEAR
 
 Caller-controlled digests and world documents are validated before `PENDING` is written. This avoids poisoning the mirror guard for requests that are locally malformed before any primary mutation is attempted.
 
-The `PENDING` marker is otherwise written **before** the primary mutation. This is intentionally conservative. If the process dies, a valid primary CAS fails, or the LiminalDB bridge becomes unavailable, restart still sees `PENDING` and refuses subsequent mirrored mutations until an explicit trusted reconciliation receipt clears the mirror guard.
+The `PENDING` marker is otherwise written **before** the primary mutation. This is intentionally conservative. If the process dies, a valid primary CAS fails, the LiminalDB bridge times out, or the bridge becomes unavailable, restart still sees `PENDING` and refuses subsequent mirrored mutations until an explicit trusted reconciliation receipt clears the mirror guard.
 
-There is no automatic timeout. Time passing is not evidence that the primary mutation or physical effect did not occur.
+There is no automatic timeout for the durable PENDING state. Time passing is not evidence that the primary mutation or physical effect did not occur.
 
 ## Local mirror journal
 
@@ -52,6 +52,8 @@ There is no automatic timeout. Time passing is not evidence that the primary mut
 - exact pending-intent SHA-256;
 - last accepted LiminalDB checkpoint reference;
 - last evidence/reconciliation SHA-256.
+
+The append-only history has an index on `(root_id, id)` so per-root replay/inspection does not require a full history-table scan as the journal grows.
 
 A restart reconstructs the current guard from the same database. A pending guard cannot be cleared by a clock or model decision.
 
@@ -76,13 +78,15 @@ For `reserve` and `commit`, `operation_sha256` is the durable reservation-payloa
 
 ## Trusted bridge boundary
 
-The SDK receives an injected callback:
+The SDK receives an injected callback with an explicit timeout budget:
 
 ```text
-bridge(envelope) -> LiminalDB checkpoint bundle
+bridge(envelope, timeout_seconds) -> LiminalDB checkpoint bundle
 ```
 
-The SDK itself does not spawn a process, open a socket, read a signing key or write the LiminalDB ledger. Deployment decides how to connect to the trusted bridge.
+`CheckpointingGovernanceStore` requires `bridge_timeout_seconds` to be positive and at most 300 seconds, and passes that budget on every bridge call. The bridge implementation is responsible for enforcing the supplied timeout on its I/O primitive. The pinned CI bridge passes it directly to `subprocess.run(..., timeout=timeout_seconds)`. A timeout/failure leaves the mirror `PENDING` and therefore fail closed.
+
+The SDK itself does not spawn a process, open a socket, read a signing key or write the LiminalDB ledger. Deployment decides how to connect to the trusted bridge, but a bridge implementation that ignores the timeout argument violates this adapter contract.
 
 The adapter verifies structural and exact-binding evidence from the bundle:
 
@@ -104,7 +108,7 @@ Cryptographic Ed25519 verification remains the trusted bridge's responsibility. 
 ```text
 PENDING
 → primary mutation succeeds
-→ bridge fails / bundle mismatch
+→ bridge timeout / failure / bundle mismatch
 → PENDING remains
 → all later mirrored mutations BLOCK
 ```
@@ -133,6 +137,7 @@ The reference bridge proves the actual chain:
 Python DurableGovernanceStore
 → mirror PENDING
 → exact envelope
+→ bounded Rust bridge subprocess
 → Rust TrustworthyTransitionLedger
 → snapshot
 → signed checkpoint
