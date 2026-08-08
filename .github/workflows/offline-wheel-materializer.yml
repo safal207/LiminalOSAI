@@ -1,0 +1,100 @@
+name: Concrete Offline Wheel Materializer
+
+on:
+  pull_request:
+    paths:
+      - 'adapters/packages/**'
+      - 'tests/test_offline_wheel_materializer.py'
+      - 'examples/offline_wheel_materializer/**'
+      - 'docs/OFFLINE_WHEEL_MATERIALIZER.md'
+      - 'sdk/liminal_package_install_broker/**'
+      - 'sdk/liminal_isolated_execution/**'
+      - 'sdk/liminal_runtime_mediation/**'
+      - 'sdk/liminal_capability_broker/**'
+      - 'sdk/liminal_post_sandbox_contracts/**'
+      - 'adapters/docker/**'
+      - '.github/workflows/offline-wheel-materializer.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run wheel materializer adversarial tests
+        run: python3 -m unittest tests/test_offline_wheel_materializer.py -v
+
+      - name: Re-run Bound Package Install Broker
+        run: python3 -m unittest tests/test_bound_package_install_broker.py -v
+
+      - name: Re-run Isolated Execution Broker
+        run: python3 -m unittest tests/test_isolated_execution_broker.py -v
+
+      - name: Re-run Runtime Mediation
+        run: python3 -m unittest tests/test_runtime_mediation_v1_3.py -v
+
+      - name: Re-run Capability Broker
+        run: python3 -m unittest tests/test_capability_broker_phase1.py -v
+
+      - name: Re-run Egress Gateway
+        run: python3 -m unittest tests/test_egress_gateway_phase2.py -v
+
+      - name: Re-run Causal Escalation
+        run: python3 -m unittest tests/test_causal_escalation_phase3.py -v
+
+      - name: Re-run Containment
+        run: python3 -m unittest tests/test_containment_phase4.py -v
+
+      - name: Re-run Bound Credential Broker
+        run: python3 -m unittest tests/test_bound_credential_broker.py -v
+
+      - name: Re-run Atomic File Mutation Broker
+        run: python3 -m unittest tests/test_atomic_file_mutation_broker.py -v
+
+      - name: Verify materializer has no network or subprocess imports
+        run: |
+          set -euo pipefail
+          test -f adapters/packages/liminal_wheel_materializer.py
+          ! grep -nE '(^|[[:space:]])(import|from)[[:space:]]+(socket|subprocess|urllib|http|requests)([[:space:].]|$)' adapters/packages/liminal_wheel_materializer.py
+          ! grep -nE '(__import__|importlib\.import_module)' adapters/packages/liminal_wheel_materializer.py
+
+      - name: Verify explicit materializer authority boundary
+        run: |
+          python3 - <<'PY'
+          from adapters.packages.liminal_wheel_materializer import AUTHORITY
+          assert AUTHORITY['network_access'] is False
+          assert AUTHORITY['registry_access'] is False
+          assert AUTHORITY['dependency_resolution'] is False
+          assert AUTHORITY['subprocess_execution'] is False
+          assert AUTHORITY['package_code_execution'] is False
+          assert AUTHORITY['build_hooks'] is False
+          assert AUTHORITY['record_hash_verification'] is True
+          assert AUTHORITY['symlink_follow'] is False
+          assert AUTHORITY['wheel_scripts_materialization'] is False
+          assert AUTHORITY['pth_execution_vector_materialization'] is False
+          assert AUTHORITY['output_files_executable'] is False
+          PY
+
+      - name: Build concrete installer image
+        run: |
+          docker build -f adapters/packages/Dockerfile.wheel-materializer -t liminal-wheel-materializer:test .
+          IMAGE_ID="$(docker image inspect liminal-wheel-materializer:test --format '{{.Id}}')"
+          case "$IMAGE_ID" in sha256:*) ;; *) echo "image is not immutable sha256 id" >&2; exit 1 ;; esac
+          echo "LIMINAL_WHEEL_IMAGE_ID=$IMAGE_ID" >> "$GITHUB_ENV"
+
+      - name: Re-run container isolation probes on installer image
+        run: python3 adapters/docker/liminal_docker_executor.py --self-test "$LIMINAL_WHEEL_IMAGE_ID" "$PWD"
+
+      - name: Run real governed Docker wheel materialization
+        run: python3 examples/offline_wheel_materializer/docker_self_check.py --image-id "$LIMINAL_WHEEL_IMAGE_ID"
+
+      - name: Build production kernel fixture
+        run: make
+
+      - name: Run full repository regression
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
