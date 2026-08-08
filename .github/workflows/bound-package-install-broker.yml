@@ -1,0 +1,82 @@
+name: Bound Package Install Broker
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_package_install_broker/**'
+      - 'tests/test_bound_package_install_broker.py'
+      - 'docs/BOUND_PACKAGE_INSTALL_BROKER.md'
+      - 'sdk/liminal_capability_broker/**'
+      - 'sdk/liminal_isolated_execution/**'
+      - 'sdk/liminal_runtime_mediation/**'
+      - 'sdk/liminal_post_sandbox_contracts/**'
+      - '.github/workflows/bound-package-install-broker.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run bound package install tests
+        run: python3 -m unittest tests/test_bound_package_install_broker.py -v
+
+      - name: Re-run Capability Broker
+        run: python3 -m unittest tests/test_capability_broker_phase1.py -v
+
+      - name: Re-run Egress Gateway
+        run: python3 -m unittest tests/test_egress_gateway_phase2.py -v
+
+      - name: Re-run Causal Escalation
+        run: python3 -m unittest tests/test_causal_escalation_phase3.py -v
+
+      - name: Re-run Containment
+        run: python3 -m unittest tests/test_containment_phase4.py -v
+
+      - name: Re-run Runtime Mediation
+        run: python3 -m unittest tests/test_runtime_mediation_v1_3.py -v
+
+      - name: Re-run Isolated Execution Broker
+        run: python3 -m unittest tests/test_isolated_execution_broker.py -v
+
+      - name: Re-run Bound Credential Broker
+        run: python3 -m unittest tests/test_bound_credential_broker.py -v
+
+      - name: Re-run Atomic File Mutation Broker
+        run: python3 -m unittest tests/test_atomic_file_mutation_broker.py -v
+
+      - name: Verify package SDK has no direct effect imports
+        run: |
+          set -euo pipefail
+          test -d sdk/liminal_package_install_broker
+          ! grep -R -nE '(^|[[:space:]])(import|from)[[:space:]]+(os|pathlib|shutil|tempfile|subprocess|socket)([[:space:].]|$)' sdk/liminal_package_install_broker
+          ! grep -R -nE '(__import__|importlib\.import_module|pip([[:space:]."]|$)|npm([[:space:]."]|$)|apt(-get)?([[:space:]."]|$))' sdk/liminal_package_install_broker
+
+      - name: Verify package authority boundary
+        run: |
+          python3 - <<'PY'
+          from sdk.liminal_package_install_broker import AUTHORITY
+          assert AUTHORITY['package_capability_required'] is True
+          assert AUTHORITY['isolated_process_capability_required'] is True
+          assert AUTHORITY['immutable_installer_image_required'] is True
+          assert AUTHORITY['registry_provenance_only'] is True
+          assert AUTHORITY['live_registry_fetch'] is False
+          assert AUTHORITY['direct_network_access'] is False
+          assert AUTHORITY['direct_package_manager_access'] is False
+          assert AUTHORITY['direct_docker_access'] is False
+          assert AUTHORITY['direct_host_filesystem_mutation'] is False
+          assert AUTHORITY['persistent_environment_mutation'] is False
+          assert AUTHORITY['ephemeral_tmpfs_materialization'] is True
+          assert AUTHORITY['installed_package_execution'] is False
+          PY
+
+      - name: Build production kernel fixture
+        run: make
+
+      - name: Run full repository regression
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
