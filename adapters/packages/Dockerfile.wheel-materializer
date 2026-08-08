@@ -1,0 +1,6 @@
+FROM python:3.12-alpine
+
+COPY adapters/packages/liminal_wheel_materializer.py /usr/local/bin/liminal-pkg-installer
+RUN chmod 0555 /usr/local/bin/liminal-pkg-installer
+
+ENTRYPOINT []
