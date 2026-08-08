@@ -1,6 +1,6 @@
 # LiminalDB Governance Checkpoint Adapter
 
-Issues: LiminalOSAI #171, LiminalDB #112  
+Issues: LiminalOSAI #171, LiminalDB #112
 Pinned reference bridge: `safal207/LiminalDB@0cd6e77d52787bb36a97b75ba1a37cb027268eb3`
 
 ## Purpose
