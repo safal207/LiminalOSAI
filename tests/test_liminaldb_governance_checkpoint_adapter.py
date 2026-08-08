@@ -14,6 +14,12 @@ from sdk.liminal_liminaldb_governance_checkpoint import (
 )
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
 
+PIN = {
+    "signer_id": "liminalosai-governance-bridge",
+    "key_id": "conformance-key-v0.1",
+    "public_key_hex": "cd" * 32,
+}
+
 
 class Clock:
     def __init__(self, now=2_300_000_000_000):
@@ -83,7 +89,10 @@ class FakeBridge:
         }
         bundle = {
             "envelope": {"body": dict(envelope), "envelope_ref": envelope_ref},
-            "receipt": {"body": receipt_body, "receipt_ref": "sha256:" + f"{6000+n:064x}"},
+            "receipt": {
+                "body": receipt_body,
+                "receipt_ref": "sha256:" + f"{6000+n:064x}",
+            },
             "checkpoint": {
                 "body": checkpoint_body,
                 "manifest_ref": checkpoint_ref,
@@ -102,7 +111,13 @@ class FakeBridge:
         if self.tamper == "world_after":
             bundle["receipt"]["body"]["world_after_sha256"] = "f" * 64
         if self.tamper == "checkpoint_root":
-            bundle["checkpoint"]["body"]["storage_root_identity"] = "sha256:" + "e" * 64
+            bundle["checkpoint"]["body"]["storage_root_identity"] = (
+                "sha256:" + "e" * 64
+            )
+        if self.tamper == "missing_snapshot_digest":
+            del bundle["checkpoint"]["body"]["snapshot_digest"]
+        if self.tamper == "trusted_key":
+            bundle["trusted_key"]["public_key_hex"] = "ef" * 32
         return bundle
 
 
@@ -128,6 +143,7 @@ class LiminalDBGovernanceCheckpointAdapterTests(unittest.TestCase):
             journal=self.journal,
             bridge=self.bridge,
             clock_ms=self.clock,
+            pinned_trusted_keys=(PIN,),
         )
         self.root = "governance:test"
 
@@ -151,8 +167,13 @@ class LiminalDBGovernanceCheckpointAdapterTests(unittest.TestCase):
         self.assertEqual(first["generation"], 0)
         mirror = self.store.mirror_state_document(root_id=self.root)
         self.assertEqual(mirror["status"], "CLEAR")
-        self.assertNotEqual(mirror["last_checkpoint_ref"], "sha256:" + ZERO_SHA256)
-        self.assertEqual([x["event_kind"] for x in self.journal.history(root_id=self.root)], ["PENDING", "ACKED"])
+        self.assertNotEqual(
+            mirror["last_checkpoint_ref"], "sha256:" + ZERO_SHA256
+        )
+        self.assertEqual(
+            [x["event_kind"] for x in self.journal.history(root_id=self.root)],
+            ["PENDING", "ACKED"],
+        )
 
         second_world = world("4")
         second = self.store.mutate_world(
@@ -180,7 +201,9 @@ class LiminalDBGovernanceCheckpointAdapterTests(unittest.TestCase):
             reservation_payload_sha256=reservation_payload,
         )
         reserve_envelope = self.bridge.calls[-1]
-        self.assertEqual(reserve_envelope["reservation_sha256"], canonical_sha256(reservation_id))
+        self.assertEqual(
+            reserve_envelope["reservation_sha256"], canonical_sha256(reservation_id)
+        )
         self.assertEqual(reserve_envelope["operation_sha256"], reservation_payload)
         self.assertTrue(reserved["reservation_active"])
 
@@ -195,14 +218,33 @@ class LiminalDBGovernanceCheckpointAdapterTests(unittest.TestCase):
         )
         commit_envelope = self.bridge.calls[-1]
         self.assertEqual(commit_envelope["transition_kind"], "commit")
-        self.assertEqual(commit_envelope["upstream_receipt_sha256"], "7" * 64)
+        self.assertEqual(
+            commit_envelope["upstream_receipt_sha256"], "7" * 64
+        )
         self.assertEqual(after["generation"], 1)
         self.assertFalse(after["reservation_active"])
+
+    def test_invalid_digest_is_rejected_before_pending_or_primary_mutation(self):
+        state = self.store.initialize(root_id=self.root, world=world("1").as_document())
+        before_history = self.journal.history(root_id=self.root)
+        with self.assertRaisesRegex(LiminalDBMirrorError, "invalid_transition_receipt_sha256"):
+            self.store.mutate_world(
+                root_id=self.root,
+                expected_generation=state["generation"],
+                expected_world_sha256=state["world_sha256"],
+                new_world=world("4").as_document(),
+                transition_receipt_sha256="not-a-digest",
+            )
+        self.assertEqual(self.primary.read_state(root_id=self.root)["generation"], 0)
+        self.assertEqual(self.journal.state_document(root_id=self.root)["status"], "CLEAR")
+        self.assertEqual(self.journal.history(root_id=self.root), before_history)
 
     def test_bridge_failure_after_primary_success_stays_pending_across_restart(self):
         state = self.store.initialize(root_id=self.root, world=world("1").as_document())
         self.bridge.fail = True
-        with self.assertRaisesRegex(LiminalDBMirrorError, "liminaldb_checkpoint_failed_mirror_stuck"):
+        with self.assertRaisesRegex(
+            LiminalDBMirrorError, "liminaldb_checkpoint_failed_mirror_stuck"
+        ):
             self.store.mutate_world(
                 root_id=self.root,
                 expected_generation=state["generation"],
@@ -212,13 +254,16 @@ class LiminalDBGovernanceCheckpointAdapterTests(unittest.TestCase):
             )
         primary_after = self.primary.read_state(root_id=self.root)
         self.assertEqual(primary_after["generation"], 1)
-        self.assertEqual(self.journal.state_document(root_id=self.root)["status"], "PENDING")
+        self.assertEqual(
+            self.journal.state_document(root_id=self.root)["status"], "PENDING"
+        )
 
         restarted = CheckpointingGovernanceStore(
             delegate=SQLiteGovernanceStore(self.primary_path),
             journal=SQLiteCheckpointMirrorJournal(self.mirror_path),
             bridge=FakeBridge(),
             clock_ms=self.clock,
+            pinned_trusted_keys=(PIN,),
         )
         with self.assertRaisesRegex(LiminalDBMirrorError, "liminaldb_mirror_pending"):
             restarted.mutate_world(
@@ -229,18 +274,26 @@ class LiminalDBGovernanceCheckpointAdapterTests(unittest.TestCase):
                 transition_receipt_sha256="a" * 64,
             )
         self.clock.now += 10_000_000
-        self.assertEqual(restarted.mirror_state_document(root_id=self.root)["status"], "PENDING")
+        self.assertEqual(
+            restarted.mirror_state_document(root_id=self.root)["status"], "PENDING"
+        )
         restarted.reconcile_mirror(
             root_id=self.root, trusted_reconciliation_receipt_sha256="b" * 64
         )
-        self.assertEqual(restarted.mirror_state_document(root_id=self.root)["status"], "CLEAR")
-        self.assertEqual(self.journal.history(root_id=self.root)[-1]["event_kind"], "RECONCILED")
+        self.assertEqual(
+            restarted.mirror_state_document(root_id=self.root)["status"], "CLEAR"
+        )
+        self.assertEqual(
+            self.journal.history(root_id=self.root)[-1]["event_kind"], "RECONCILED"
+        )
 
     def test_tampered_bridge_bundle_fails_closed_and_keeps_pending(self):
         self.store.initialize(root_id=self.root, world=world("1").as_document())
         state = self.primary.read_state(root_id=self.root)
         self.bridge.tamper = "world_after"
-        with self.assertRaisesRegex(LiminalDBMirrorError, "bridge_receipt_world_after_sha256_mismatch"):
+        with self.assertRaisesRegex(
+            LiminalDBMirrorError, "bridge_receipt_world_after_sha256_mismatch"
+        ):
             self.store.mutate_world(
                 root_id=self.root,
                 expected_generation=state["generation"],
@@ -248,11 +301,33 @@ class LiminalDBGovernanceCheckpointAdapterTests(unittest.TestCase):
                 new_world=world("4").as_document(),
                 transition_receipt_sha256="9" * 64,
             )
-        self.assertEqual(self.journal.state_document(root_id=self.root)["status"], "PENDING")
+        self.assertEqual(
+            self.journal.state_document(root_id=self.root)["status"], "PENDING"
+        )
+
+    def test_missing_checkpoint_evidence_is_rejected_without_type_error(self):
+        self.bridge.tamper = "missing_snapshot_digest"
+        with self.assertRaisesRegex(
+            LiminalDBMirrorError, "bridge_checkpoint_snapshot_digest_missing"
+        ):
+            self.store.initialize(root_id=self.root, world=world("1").as_document())
+        self.assertEqual(
+            self.journal.state_document(root_id=self.root)["status"], "PENDING"
+        )
+
+    def test_unpinned_trusted_key_is_rejected(self):
+        self.bridge.tamper = "trusted_key"
+        with self.assertRaisesRegex(LiminalDBMirrorError, "bridge_trusted_key_not_pinned"):
+            self.store.initialize(root_id=self.root, world=world("1").as_document())
+        self.assertEqual(
+            self.journal.state_document(root_id=self.root)["status"], "PENDING"
+        )
 
     def test_primary_failure_is_conservatively_stuck(self):
         state = self.store.initialize(root_id=self.root, world=world("1").as_document())
-        with self.assertRaisesRegex(LiminalDBMirrorError, "primary_mutate_failed_mirror_stuck"):
+        with self.assertRaisesRegex(
+            LiminalDBMirrorError, "primary_mutate_failed_mirror_stuck"
+        ):
             self.store.mutate_world(
                 root_id=self.root,
                 expected_generation=99,
@@ -261,13 +336,17 @@ class LiminalDBGovernanceCheckpointAdapterTests(unittest.TestCase):
                 transition_receipt_sha256="9" * 64,
             )
         self.assertEqual(self.primary.read_state(root_id=self.root)["generation"], 0)
-        self.assertEqual(self.journal.state_document(root_id=self.root)["status"], "PENDING")
+        self.assertEqual(
+            self.journal.state_document(root_id=self.root)["status"], "PENDING"
+        )
 
     def test_checkpoint_root_tamper_is_rejected(self):
         self.bridge.tamper = "checkpoint_root"
         with self.assertRaisesRegex(LiminalDBMirrorError, "bridge_checkpoint_root_mismatch"):
             self.store.initialize(root_id=self.root, world=world("1").as_document())
-        self.assertEqual(self.journal.state_document(root_id=self.root)["status"], "PENDING")
+        self.assertEqual(
+            self.journal.state_document(root_id=self.root)["status"], "PENDING"
+        )
 
 
 if __name__ == "__main__":
