@@ -5,10 +5,15 @@ import argparse
 import base64
 import hashlib
 import io
-import json
 import os
+from pathlib import Path
+import sys
 import tempfile
 import zipfile
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from adapters.packages.liminal_wheel_docker_backend import WheelMaterializingDockerExecutor
 from adapters.packages.liminal_wheel_materializer import (
