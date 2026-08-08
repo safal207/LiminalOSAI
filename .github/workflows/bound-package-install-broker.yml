@@ -61,6 +61,7 @@ jobs:
         run: |
           python3 - <<'PY'
           from sdk.liminal_package_install_broker import AUTHORITY
+          assert AUTHORITY['host_staged_plan_required'] is True
           assert AUTHORITY['package_capability_required'] is True
           assert AUTHORITY['isolated_process_capability_required'] is True
           assert AUTHORITY['immutable_installer_image_required'] is True
