@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""Trusted Docker backend for LiminalOS isolated process execution.
+"""Trusted Docker backend for LiminalOS isolated execution and containment.
 
-This adapter is intentionally outside the model-facing SDK. It is the trusted
-host boundary that may invoke Docker after RuntimeMediator and
-IsolatedExecutionBroker have admitted the exact plan.
-
-Each governed execution receives a unique trusted container/session identity.
-The attached ProcessTreeSupervisor can freeze, remove and verify every active
-session, so timeout or containment cannot silently leave a Docker process tree
-behind.
+The model-facing SDK never receives Docker/container authority or raw host PIDs.
+This trusted adapter assigns opaque session identities, can expose a bounded
+process-tree backend to the canonical containment supervisor, and guarantees
+that timeout cleanup verifies the named container no longer exists.
 """
 from __future__ import annotations
 
@@ -18,20 +14,23 @@ import re
 import secrets
 import subprocess
 import sys
-from typing import Sequence
+from typing import Any, Sequence
 
-# Support direct `python adapters/docker/liminal_docker_executor.py ...` execution
-# while keeping normal imports rooted at the repository package boundary.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from sdk.liminal_isolated_execution import IsolatedExecutionPlan
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
-from sdk.liminal_process_tree import ProcessTreeError, ProcessTreeSupervisor, ZERO_SHA256
+from sdk.liminal_process_tree_containment import (
+    ACTION_SCHEMA,
+    OBSERVATION_SCHEMA,
+    ProcessTreeContainmentSupervisor,
+)
 from sdk.liminal_runtime_mediation import ExecutionObservation
 
 _CONTAINER = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
+ZERO_SHA256 = "0" * 64
 
 
 class DockerExecutionError(RuntimeError):
@@ -56,45 +55,99 @@ def build_docker_argv(
     if container_name is not None:
         out += ["--name", _validate_container_name(container_name)]
     out += [
-        "--network",
-        p.network_mode,
+        "--network", p.network_mode,
         "--read-only",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges:true",
-        "--user",
-        f"{p.uid}:{p.gid}",
-        "--pids-limit",
-        str(p.pids_limit),
-        "--memory",
-        f"{p.memory_mb}m",
-        "--cpus",
-        p.cpus,
-        "--tmpfs",
-        p.tmpfs,
-        "--workdir",
-        "/workspace",
-        "--mount",
-        f"type=bind,src={plan.host_workspace},dst=/workspace,readonly",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges:true",
+        "--user", f"{p.uid}:{p.gid}",
+        "--pids-limit", str(p.pids_limit),
+        "--memory", f"{p.memory_mb}m",
+        "--cpus", p.cpus,
+        "--tmpfs", p.tmpfs,
+        "--workdir", "/workspace",
+        "--mount", f"type=bind,src={plan.host_workspace},dst=/workspace,readonly",
         plan.image_id,
         *plan.argv,
     ]
     return out
 
 
-class DockerProcessTreeHost:
-    """Trusted Docker callbacks consumed by ProcessTreeSupervisor."""
+class DockerProcessTreeBackend:
+    """Concrete trusted backend for one already-running governed container.
 
-    def __init__(self, docker_binary: str = "docker") -> None:
-        if not isinstance(docker_binary, str) or not docker_binary.strip():
-            raise DockerExecutionError("docker_binary must be non-empty")
+    Raw host PIDs never leave this adapter. They are converted to opaque,
+    session-bound process identities and retained as terminated tombstones after
+    removal so the supervisor can prove that nodes did not merely disappear.
+    """
+
+    def __init__(self, *, session_id: str, docker_binary: str = "docker") -> None:
+        self.session_id = _validate_container_name(session_id)
         self.docker_binary = docker_binary
+        self.backend_binding_sha256 = canonical_sha256(
+            {"backend": "docker-process-tree-v1", "session_id": self.session_id}
+        )
+        self._raw_to_opaque: dict[str, str] = {}
+        self._parents: dict[str, str | None] = {}
+        self._identities: dict[str, str] = {}
+        self._root_process_id: str | None = None
+        self._terminated = False
 
-    def inspect(self, session_id: str) -> dict[str, object]:
-        _validate_container_name(session_id)
+    @property
+    def root_process_id(self) -> str:
+        if self._root_process_id is None:
+            self._observe_live_nodes()
+        if self._root_process_id is None:
+            raise DockerExecutionError("governed container has no observable root process")
+        return self._root_process_id
+
+    def supervisor(self) -> ProcessTreeContainmentSupervisor:
+        return ProcessTreeContainmentSupervisor(
+            session_id=self.session_id,
+            root_process_id=self.root_process_id,
+            backend_binding_sha256=self.backend_binding_sha256,
+            backend=self,
+        )
+
+    def snapshot(self, session_id: str) -> dict[str, Any]:
+        self._require_session(session_id)
+        if self._terminated or not self._container_exists():
+            if not self._raw_to_opaque:
+                raise DockerExecutionError("cannot attest an execution session that was never observed")
+            nodes = self._tombstones()
+        else:
+            nodes = self._observe_live_nodes()
+        return self._observation(nodes)
+
+    def freeze(self, session_id: str) -> dict[str, Any]:
+        self._require_session(session_id)
+        before = self.snapshot(session_id)
+        live_count = sum(node["state"] != "terminated" for node in before["nodes"])
         proc = subprocess.run(
-            [self.docker_binary, "inspect", "--format", "{{.State.Running}} {{.State.Paused}}", session_id],
+            [self.docker_binary, "pause", self.session_id],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=False,
+            shell=False,
+        )
+        if proc.returncode != 0:
+            raise DockerExecutionError("docker pause failed for governed execution session")
+        frozen_nodes = [dict(node, state="frozen") for node in before["nodes"]]
+        return self._action("freeze", live_count, frozen_nodes)
+
+    def terminate(self, session_id: str) -> dict[str, Any]:
+        self._require_session(session_id)
+        before = self.snapshot(session_id)
+        live_count = sum(node["state"] != "terminated" for node in before["nodes"])
+        _remove_container_verified(self.session_id, docker_binary=self.docker_binary)
+        self._terminated = True
+        return self._action("terminate", live_count, self._tombstones())
+
+    def _observe_live_nodes(self) -> list[dict[str, Any]]:
+        inspect = subprocess.run(
+            [self.docker_binary, "inspect", "--format", "{{.State.Pid}} {{.State.Running}} {{.State.Paused}}", self.session_id],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -103,44 +156,115 @@ class DockerProcessTreeHost:
             check=False,
             shell=False,
         )
-        if proc.returncode != 0:
-            if _is_not_found(proc.stderr):
-                return {"exists": False, "running": False, "descendant_count": 0, "tree_sha256": ZERO_SHA256}
-            raise DockerExecutionError("docker inspect failed for supervised session")
+        if inspect.returncode != 0:
+            raise DockerExecutionError("docker inspect failed for governed execution session")
+        fields = inspect.stdout.strip().split()
+        if len(fields) != 3 or not fields[0].isdigit() or fields[1] not in {"true", "false"} or fields[2] not in {"true", "false"}:
+            raise DockerExecutionError("docker inspect returned invalid process state")
+        root_raw = fields[0]
+        state = "frozen" if fields[2] == "true" else "running"
+        if fields[1] != "true" and fields[2] != "true":
+            raise DockerExecutionError("governed container is not running")
 
-        fields = proc.stdout.strip().split()
-        if len(fields) != 2 or fields[0] not in {"true", "false"} or fields[1] not in {"true", "false"}:
-            raise DockerExecutionError("docker inspect returned invalid state")
-        running = fields[0] == "true"
-        paused = fields[1] == "true"
-        pids: list[str] = []
-        if running or paused:
-            top = subprocess.run(
-                [self.docker_binary, "top", session_id, "-eo", "pid="],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=10,
-                check=False,
-                shell=False,
+        top = subprocess.run(
+            [self.docker_binary, "top", self.session_id, "-eo", "pid=,ppid="],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=False,
+            shell=False,
+        )
+        if top.returncode != 0:
+            raise DockerExecutionError("docker top failed for governed execution session")
+        pairs: list[tuple[str, str]] = []
+        for line in top.stdout.splitlines():
+            parts = line.split()
+            if len(parts) != 2 or not all(part.isdigit() for part in parts):
+                if line.strip():
+                    raise DockerExecutionError("docker top returned invalid pid lineage")
+                continue
+            pairs.append((parts[0], parts[1]))
+        raw_ids = {pid for pid, _ in pairs}
+        if root_raw not in raw_ids:
+            raise DockerExecutionError("container root PID missing from docker top")
+
+        for raw_pid, raw_parent in pairs:
+            opaque = self._opaque(raw_pid)
+            if raw_pid == root_raw:
+                parent = None
+            else:
+                if raw_parent not in raw_ids:
+                    raise DockerExecutionError("container process has parent outside observed session")
+                parent = self._opaque(raw_parent)
+            existing = self._parents.get(opaque)
+            if existing is not None and existing != parent:
+                raise DockerExecutionError("trusted process lineage changed during session")
+            self._parents[opaque] = parent
+        self._root_process_id = self._opaque(root_raw)
+
+        nodes = []
+        for raw_pid, _ in sorted(pairs, key=lambda item: int(item[0])):
+            opaque = self._opaque(raw_pid)
+            nodes.append({
+                "process_id": opaque,
+                "parent_process_id": self._parents[opaque],
+                "identity_sha256": self._identities[opaque],
+                "state": state,
+            })
+        return nodes
+
+    def _opaque(self, raw_pid: str) -> str:
+        item = self._raw_to_opaque.get(raw_pid)
+        if item is None:
+            item = "proc:" + canonical_sha256({"session": self.session_id, "host_pid": raw_pid})[:32]
+            self._raw_to_opaque[raw_pid] = item
+            self._identities[item] = canonical_sha256(
+                {"session": self.session_id, "opaque_process_id": item}
             )
-            if top.returncode != 0:
-                raise DockerExecutionError("docker top failed for supervised session")
-            pids = sorted(line.strip() for line in top.stdout.splitlines() if line.strip())
-        return {
-            "exists": True,
-            "running": running or paused,
-            "descendant_count": max(0, len(pids) - 1),
-            "tree_sha256": canonical_sha256(pids),
-        }
+        return item
 
-    def freeze(self, session_id: str) -> None:
-        state = self.inspect(session_id)
-        if not state["exists"] or not state["running"]:
-            return
+    def _tombstones(self) -> list[dict[str, Any]]:
+        ordered = sorted(self._parents)
+        return [{
+            "process_id": pid,
+            "parent_process_id": self._parents[pid],
+            "identity_sha256": self._identities[pid],
+            "state": "terminated",
+        } for pid in ordered]
+
+    def _observation(self, nodes: list[dict[str, Any]]) -> dict[str, Any]:
+        if self._root_process_id is None:
+            raise DockerExecutionError("missing root process identity")
+        canonical_nodes = sorted(nodes, key=lambda n: n["process_id"])
+        tree_sha = canonical_sha256(canonical_nodes)
+        body = {
+            "schema": OBSERVATION_SCHEMA,
+            "session_id": self.session_id,
+            "root_process_id": self._root_process_id,
+            "backend_binding_sha256": self.backend_binding_sha256,
+            "nodes": canonical_nodes,
+            "tree_sha256": tree_sha,
+        }
+        return {**body, "evidence_sha256": canonical_sha256(body)}
+
+    def _action(self, action: str, affected_count: int, nodes: list[dict[str, Any]]) -> dict[str, Any]:
+        result_tree_sha = canonical_sha256(sorted(nodes, key=lambda n: n["process_id"]))
+        body = {
+            "schema": ACTION_SCHEMA,
+            "session_id": self.session_id,
+            "root_process_id": self.root_process_id,
+            "backend_binding_sha256": self.backend_binding_sha256,
+            "action": action,
+            "affected_count": affected_count,
+            "result_tree_sha256": result_tree_sha,
+        }
+        return {**body, "evidence_sha256": canonical_sha256(body)}
+
+    def _container_exists(self) -> bool:
         proc = subprocess.run(
-            [self.docker_binary, "pause", session_id],
+            [self.docker_binary, "inspect", self.session_id],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -149,56 +273,25 @@ class DockerProcessTreeHost:
             check=False,
             shell=False,
         )
-        if proc.returncode != 0:
-            # A natural exit racing the freeze is safe if the container is now absent/stopped.
-            after = self.inspect(session_id)
-            if after["exists"] and after["running"]:
-                raise DockerExecutionError("docker pause failed for live supervised session")
+        if proc.returncode == 0:
+            return True
+        if _is_not_found(proc.stderr):
+            return False
+        raise DockerExecutionError("docker inspect failed during survivor verification")
 
-    def terminate(self, session_id: str) -> None:
-        _validate_container_name(session_id)
-        proc = subprocess.run(
-            [self.docker_binary, "rm", "-f", session_id],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=15,
-            check=False,
-            shell=False,
-        )
-        if proc.returncode != 0 and not _is_not_found(proc.stderr):
-            raise DockerExecutionError("docker remove failed for supervised session")
+    def _require_session(self, session_id: str) -> None:
+        if session_id != self.session_id:
+            raise DockerExecutionError("cross-session Docker process control is forbidden")
 
 
 class DockerExecutor:
-    def __init__(
-        self,
-        docker_binary: str = "docker",
-        *,
-        supervisor: ProcessTreeSupervisor | None = None,
-        process_host: DockerProcessTreeHost | None = None,
-    ) -> None:
+    def __init__(self, docker_binary: str = "docker") -> None:
         if not isinstance(docker_binary, str) or not docker_binary.strip():
             raise DockerExecutionError("docker_binary must be non-empty")
         self.docker_binary = docker_binary
-        self.process_host = process_host or DockerProcessTreeHost(docker_binary)
-        self.supervisor = supervisor or ProcessTreeSupervisor(
-            inspect_session=self.process_host.inspect,
-            freeze_session=self.process_host.freeze,
-            terminate_session=self.process_host.terminate,
-        )
 
     def __call__(self, plan: IsolatedExecutionPlan) -> ExecutionObservation:
         session_id = _new_session_id(plan)
-        binding = self.supervisor.register_session(
-            session_id=session_id,
-            operation_id=plan.operation_id,
-            plan_sha256=plan.plan_sha256,
-            backend_identity_sha256=canonical_sha256(
-                {"backend": "docker", "session_id_sha256": canonical_sha256(session_id)}
-            ),
-        )
         argv = build_docker_argv(plan, docker_binary=self.docker_binary, container_name=session_id)
         try:
             proc = subprocess.run(
@@ -211,58 +304,76 @@ class DockerExecutor:
                 shell=False,
             )
         except subprocess.TimeoutExpired as exc:
-            cleanup = self.supervisor.quiesce_session(
-                session_id,
-                incident_id=f"timeout:{canonical_sha256(plan.operation_id)[:16]}",
-            )
-            if not cleanup["zero_survivors"]:
-                raise DockerExecutionError("isolated container timed out and cleanup verification failed") from exc
+            _remove_container_verified(session_id, docker_binary=self.docker_binary)
             raise DockerExecutionError("isolated container timed out; process tree removed") from exc
-        except Exception:
-            # If Docker launched anything before the adapter faulted, fail closed by
-            # attempting the same exact-session cleanup before re-raising.
-            try:
-                self.supervisor.quiesce_session(
-                    session_id,
-                    incident_id=f"adapter-failure:{canonical_sha256(plan.operation_id)[:16]}",
-                )
-            except Exception:
-                pass
-            raise
 
-        try:
-            self.supervisor.mark_complete(session_id)
-        except ProcessTreeError as exc:
-            cleanup = self.supervisor.quiesce_session(
-                session_id,
-                incident_id=f"completion-verification:{canonical_sha256(plan.operation_id)[:16]}",
-            )
-            if not cleanup["zero_survivors"]:
-                raise DockerExecutionError("completed docker run left a surviving session") from exc
+        # `docker run --rm` should have removed the container. Verify the exact
+        # trusted name rather than assuming client exit means process-tree exit.
+        if _container_exists(session_id, docker_binary=self.docker_binary):
+            _remove_container_verified(session_id, docker_binary=self.docker_binary)
+            raise DockerExecutionError("completed docker run left a surviving execution session")
 
-        return ExecutionObservation.success(
-            {
-                "backend": "docker",
-                "plan_sha256": plan.plan_sha256,
-                "image_id": plan.image_id,
-                "exit_code": proc.returncode,
-                "workload_status": "zero" if proc.returncode == 0 else "nonzero",
-                "execution_session_binding_sha256": binding["binding_sha256"],
-                "stdout": "discarded",
-                "stderr": "discarded",
-            }
-        )
+        return ExecutionObservation.success({
+            "backend": "docker",
+            "plan_sha256": plan.plan_sha256,
+            "image_id": plan.image_id,
+            "exit_code": proc.returncode,
+            "workload_status": "zero" if proc.returncode == 0 else "nonzero",
+            "execution_session_sha256": canonical_sha256(session_id),
+            "stdout": "discarded",
+            "stderr": "discarded",
+        })
+
+
+def build_process_tree_supervisor(*, session_id: str, docker_binary: str = "docker") -> ProcessTreeContainmentSupervisor:
+    """Attach the canonical supervisor to one trusted, already-running session."""
+    backend = DockerProcessTreeBackend(session_id=session_id, docker_binary=docker_binary)
+    return backend.supervisor()
 
 
 def _new_session_id(plan: IsolatedExecutionPlan) -> str:
-    return _validate_container_name(
-        f"liminal-{plan.plan_sha256[:16]}-{secrets.token_hex(8)}"
-    )
+    return _validate_container_name(f"liminal-{plan.plan_sha256[:16]}-{secrets.token_hex(8)}")
 
 
 def _is_not_found(stderr: str) -> bool:
     text = (stderr or "").lower()
     return "no such object" in text or "no such container" in text
+
+
+def _container_exists(session_id: str, *, docker_binary: str = "docker") -> bool:
+    proc = subprocess.run(
+        [docker_binary, "inspect", _validate_container_name(session_id)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+        check=False,
+        shell=False,
+    )
+    if proc.returncode == 0:
+        return True
+    if _is_not_found(proc.stderr):
+        return False
+    raise DockerExecutionError("docker inspect failed during survivor verification")
+
+
+def _remove_container_verified(session_id: str, *, docker_binary: str = "docker") -> None:
+    name = _validate_container_name(session_id)
+    proc = subprocess.run(
+        [docker_binary, "rm", "-f", name],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=15,
+        check=False,
+        shell=False,
+    )
+    if proc.returncode != 0 and not _is_not_found(proc.stderr):
+        raise DockerExecutionError("failed to terminate governed execution session")
+    if _container_exists(name, docker_binary=docker_binary):
+        raise DockerExecutionError("governed execution session survived forced removal")
 
 
 def _probe(plan: IsolatedExecutionPlan, argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -275,7 +386,6 @@ def _probe(plan: IsolatedExecutionPlan, argv: Sequence[str]) -> subprocess.Compl
         profile=plan.profile,
     )
     session_id = _new_session_id(probe_plan)
-    host = DockerProcessTreeHost()
     try:
         return subprocess.run(
             build_docker_argv(probe_plan, container_name=session_id),
@@ -288,10 +398,7 @@ def _probe(plan: IsolatedExecutionPlan, argv: Sequence[str]) -> subprocess.Compl
             shell=False,
         )
     except subprocess.TimeoutExpired:
-        host.terminate(session_id)
-        state = host.inspect(session_id)
-        if state["exists"]:
-            raise DockerExecutionError("timed-out isolation probe survived cleanup")
+        _remove_container_verified(session_id)
         raise
 
 
