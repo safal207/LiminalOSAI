@@ -1,0 +1,75 @@
+name: Epoch-Bound Capability Contracts
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_epoch_bound_capability/**'
+      - 'sdk/liminal_capability_broker/**'
+      - 'sdk/liminal_runtime_config/**'
+      - 'sdk/liminal_runtime_mediation/**'
+      - 'tests/test_epoch_bound_capability.py'
+      - 'tests/test_capability_broker_phase1.py'
+      - 'tests/test_bound_runtime_config_broker.py'
+      - 'tests/test_runtime_mediation_v1_3.py'
+      - 'docs/EPOCH_BOUND_CAPABILITIES.md'
+      - '.github/workflows/epoch-bound-capabilities.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record exact head
+        run: echo "${GITHUB_SHA}"
+
+      - name: Run epoch-bound capability tests
+        run: python3 -m unittest tests/test_epoch_bound_capability.py -v
+
+      - name: Re-run capability broker tests
+        run: python3 -m unittest tests/test_capability_broker_phase1.py -v
+
+      - name: Re-run bound runtime configuration tests
+        run: python3 -m unittest tests/test_bound_runtime_config_broker.py -v
+
+      - name: Re-run runtime mediation tests
+        run: python3 -m unittest tests/test_runtime_mediation_v1_3.py -v
+
+      - name: Re-run containment and process-tree tests
+        run: |
+          python3 -m unittest tests/test_containment_phase4.py -v
+          python3 -m unittest tests/test_process_tree_active_containment.py -v
+
+      - name: Re-run isolated execution and package tests
+        run: |
+          python3 -m unittest tests/test_isolated_execution_broker.py -v
+          python3 -m unittest tests/test_bound_package_install_broker.py -v
+          python3 -m unittest tests/test_offline_wheel_materializer.py -v
+
+      - name: Re-run escape trajectory benchmark
+        run: python3 -m unittest tests/test_escape_trajectory_benchmark_v1.py -v
+
+      - name: Run full repository regression
+        run: make test
+
+      - name: Verify authority boundary
+        run: |
+          python3 - <<'PY'
+          from sdk.liminal_epoch_bound_capability import AUTHORITY
+          assert AUTHORITY['trusted_runtime_state_required'] is True
+          assert AUTHORITY['admission_epoch_check'] is True
+          assert AUTHORITY['use_epoch_check'] is True
+          assert AUTHORITY['stale_authority_revocation'] is True
+          assert AUTHORITY['unbound_authority_revocation'] is True
+          assert AUTHORITY['new_effect_grant'] is False
+          assert AUTHORITY['runtime_mutation'] is False
+          assert AUTHORITY['process_execution'] is False
+          assert AUTHORITY['network_access'] is False
+          assert AUTHORITY['credential_access'] is False
+          assert AUTHORITY['kernel_enforcement'] is False
+          PY
