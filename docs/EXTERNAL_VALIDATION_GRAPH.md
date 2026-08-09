@@ -86,6 +86,37 @@ Canonical machine-readable state for this graph:
 - [`external_validation_graph.v0.1.yaml`](./external_validation_graph.v0.1.yaml)
 - [`EXTERNAL_REVIEW_LEDGER.md`](./EXTERNAL_REVIEW_LEDGER.md)
 
+The `.yaml` file is intentionally serialized as **JSON-compatible YAML**. JSON is a valid YAML 1.2 subset, so the repository can validate the canonical state with the Python standard library only and avoid installing a parser dependency inside the evidence gate.
+
+## Automated validation gate
+
+The repository includes:
+
+- [`tools/validate_external_graph.py`](../tools/validate_external_graph.py) — deterministic validator and EEW recomputation;
+- [`tests/test_external_validation_graph.py`](../tests/test_external_validation_graph.py) — positive and negative regression tests;
+- [`.github/workflows/external-validation-graph-gate.yml`](../.github/workflows/external-validation-graph-gate.yml) — pull-request and `main` CI gate.
+
+The validator rejects:
+
+1. unknown or duplicate status definitions;
+2. non-monotonic maturity weights;
+3. target `status_weight` values that do not match the canonical status model;
+4. stale `target_count`, `weighted_sum`, or `score_percent` values;
+5. duplicate review-target IDs;
+6. review targets without an evidence reference and repository linkage;
+7. `TECHNICAL_FEEDBACK` without `technical_feedback_reference`;
+8. `REPRODUCED` without external reproduction evidence;
+9. `VALIDATED` without technical feedback, independent reproduction evidence, and explicit validation evidence.
+
+That means changing a label is not enough to increase EEW. The graph must contain the evidence structure required by the target state, and CI recomputes the score independently.
+
+Run locally:
+
+```bash
+python3 tools/validate_external_graph.py
+python3 -m unittest tests/test_external_validation_graph.py -v
+```
+
 ## ProofPath mapping
 
 Every external-review transition can become a ProofPath evidence event:
