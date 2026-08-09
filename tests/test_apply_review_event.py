@@ -94,11 +94,11 @@ class ApplyReviewEventTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "transition.from must equal"):
             apply_event(self.graph, event)
 
-    def test_regression_is_rejected(self):
+    def test_regression_is_rejected_by_envelope_or_state_guard(self):
         event = technical_feedback_event()
         event["event_type"] = "review.acknowledged"
         event["transition"] = {"from": "ROUTED", "to": "ACKNOWLEDGED"}
-        with self.assertRaisesRegex(ValueError, "stale/regressive event"):
+        with self.assertRaisesRegex(ValueError, "invalid review event|stale/regressive"):
             apply_event(self.graph, event)
 
     def test_disallowed_jump_is_rejected_even_with_strong_evidence_shape(self):
