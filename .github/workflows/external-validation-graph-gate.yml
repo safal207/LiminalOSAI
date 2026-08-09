@@ -7,12 +7,15 @@ on:
       - 'docs/EXTERNAL_VALIDATION_GRAPH.md'
       - 'docs/EXTERNAL_REVIEW_LEDGER.md'
       - 'docs/REVIEW_EVENT_ENVELOPE.md'
+      - 'docs/APPLY_REVIEW_EVENT.md'
       - 'docs/review_event_envelope.v0.1.schema.json'
       - 'examples/review_events/**'
       - 'tools/validate_external_graph.py'
       - 'tools/validate_review_event.py'
+      - 'tools/apply_review_event.py'
       - 'tests/test_external_validation_graph.py'
       - 'tests/test_review_event_envelope.py'
+      - 'tests/test_apply_review_event.py'
       - '.github/workflows/external-validation-graph-gate.yml'
   push:
     branches:
@@ -20,12 +23,15 @@ on:
     paths:
       - 'docs/external_validation_graph.v0.1.yaml'
       - 'docs/REVIEW_EVENT_ENVELOPE.md'
+      - 'docs/APPLY_REVIEW_EVENT.md'
       - 'docs/review_event_envelope.v0.1.schema.json'
       - 'examples/review_events/**'
       - 'tools/validate_external_graph.py'
       - 'tools/validate_review_event.py'
+      - 'tools/apply_review_event.py'
       - 'tests/test_external_validation_graph.py'
       - 'tests/test_review_event_envelope.py'
+      - 'tests/test_apply_review_event.py'
       - '.github/workflows/external-validation-graph-gate.yml'
   workflow_dispatch:
 
@@ -50,11 +56,21 @@ jobs:
             examples/review_events/openai_routed.v0.1.json \
             examples/review_events/meta_sent.v0.1.json
 
+      - name: Verify idempotent historical replay is dry-run only
+        run: |
+          python3 tools/apply_review_event.py \
+            examples/review_events/openai_routed.v0.1.json \
+            --json
+          git diff --exit-code -- docs/external_validation_graph.v0.1.yaml
+
       - name: Run graph-gate regression tests
         run: python3 -m unittest tests/test_external_validation_graph.py -v
 
       - name: Run review-event regression tests
         run: python3 -m unittest tests/test_review_event_envelope.py -v
+
+      - name: Run review-event apply regression tests
+        run: python3 -m unittest tests/test_apply_review_event.py -v
 
       - name: State non-claim boundary
         run: |
