@@ -10,6 +10,33 @@ Experimental C11 sandbox combining many small cognitive-leaning subsystems (awar
 - [Experimental Scope](docs/EXPERIMENTAL_SCOPE.md) — clarifies that LiminalOSAI is an experimental cognitive-runtime sandbox, not a production OS, AGI claim, safety enforcement layer, or mature agent runtime.
 - Validation: `make`, `make check`, `make test`
 
+## External review / falsification trail
+
+The post-sandbox governance work is being shared for adversarial review rather than presented as externally validated.
+
+| External target | Current evidence state | What the state means |
+|---|---|---|
+| OpenAI | **ROUTED** | Support case #12892239 was explicitly passed to an appropriate internal team for review. |
+| Anthropic Safeguards | **ACKNOWLEDGED** | Intake was acknowledged; technical review is not confirmed. |
+| Meta | **SENT** | Post-sandbox governance one-pager, reproducible benchmark context, and review trail were sent to the public Muse Spark Safety & Preparedness correspondence contact. |
+| Hugging Face Security | **ACKNOWLEDGED** | Security report #41899 was received via an automated acknowledgement. |
+| OpenSSF AI/ML Security WG | **SENT** | Adversarial review request sent. |
+| OWASP agentic-security / AI-testing contacts | **SENT** | Causal Transition Guard / Agent Trust Runtime material sent for review. |
+| Invariant Labs | **SENT** | Multi-agent trust-runtime technical review requested. |
+| AVERI-related third-party verification outreach | **SENT** | Open-source evidence-layer material sent for independent-review consideration. |
+
+**Important:** `SENT`, `ACKNOWLEDGED`, and `ROUTED` are review-process states — not endorsements, reproductions, or validation claims.
+
+Review evidence is tracked as a falsification-first state machine:
+
+`external response → Review Event Envelope → validated transition → External Validation Graph / EEW → Git/CI → ProofPath / CML`
+
+- [External Review Ledger](docs/EXTERNAL_REVIEW_LEDGER.md)
+- [External Validation Graph v0.1](docs/EXTERNAL_VALIDATION_GRAPH.md)
+- [Review Event Envelope v0.1](docs/REVIEW_EVENT_ENVELOPE.md)
+- [Apply Review Event v0.1](docs/APPLY_REVIEW_EVENT.md)
+- [Post-sandbox governance case study](docs/OPENAI_HF_INCIDENT_CASE_STUDY.md)
+
 ## Build
 
 - Dependencies: gcc, make, python3
