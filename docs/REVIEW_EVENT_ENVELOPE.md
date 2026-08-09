@@ -83,6 +83,14 @@ Review Event Envelope
       +--> target / claim binding
       |
       v
+apply_review_event.py
+      |
+      +--> exact canonical-current-state check
+      +--> allowed-transition check
+      +--> EEW recomputation from canonical weights
+      +--> post-apply graph validation
+      |
+      v
 ProofPath evidence event
       |
       v
@@ -92,6 +100,16 @@ CML append-only transition
 External Validation Graph / EEW recomputation
 ```
 
+The applier is **dry-run by default**. An explicit `--write` is required to modify the checked-out graph, and the resulting change remains subject to Git review and CI.
+
+See [`APPLY_REVIEW_EVENT.md`](./APPLY_REVIEW_EVENT.md) and [`../tools/apply_review_event.py`](../tools/apply_review_event.py).
+
+## Replay semantics
+
+Historical events may be replayed safely. If an event's destination state is already canonical, it becomes an idempotent no-op only when its evidence reference is already represented by the target. This prevents a repeated event from increasing EEW twice.
+
+A stale, regressive, mismatched-source, or disallowed transition is rejected fail-closed.
+
 ## Privacy boundary
 
 `evidence.public=false` means the public repository records only the minimum attributable reference needed to justify the state transition. Private email bodies, addresses, message IDs, credentials, or confidential reviewer material should not be copied into the public event artifact.
@@ -100,6 +118,8 @@ External Validation Graph / EEW recomputation
 
 - Schema: [`review_event_envelope.v0.1.schema.json`](./review_event_envelope.v0.1.schema.json)
 - Validator: [`../tools/validate_review_event.py`](../tools/validate_review_event.py)
+- Applier: [`../tools/apply_review_event.py`](../tools/apply_review_event.py)
+- Apply semantics: [`APPLY_REVIEW_EVENT.md`](./APPLY_REVIEW_EVENT.md)
 - Examples: [`../examples/review_events/`](../examples/review_events/)
 
 ## Non-claims
