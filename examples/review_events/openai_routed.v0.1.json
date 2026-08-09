@@ -1,0 +1,30 @@
+{
+  "schema_version": "review-event-envelope/v0.1",
+  "event_id": "rev-openai-20260808-routed-001",
+  "event_type": "review.routed",
+  "occurred_at": "2026-08-08T18:46:59Z",
+  "claim_id": "PSAG-001",
+  "subject": {
+    "organization": "OpenAI",
+    "target_id": "openai-preparedness"
+  },
+  "transition": {
+    "from": "SENT",
+    "to": "ROUTED"
+  },
+  "evidence": {
+    "kind": "external_correspondence",
+    "reference": "OpenAI Support case #12892239",
+    "summary": "Support explicitly stated that the material would be passed to the appropriate internal team for review.",
+    "public": false
+  },
+  "repository": {
+    "repository": "safal207/LiminalOSAI",
+    "pr": 174,
+    "commit": null
+  },
+  "provenance": {
+    "recorded_by": "Alexey Safonov",
+    "source": "external_correspondence"
+  }
+}
