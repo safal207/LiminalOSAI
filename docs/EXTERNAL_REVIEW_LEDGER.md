@@ -19,6 +19,15 @@ The purpose is **not** to imply endorsement. It is to make the review trail audi
 | `REPRODUCED` | An external reviewer independently reproduced a test, failure trace, or benchmark result. |
 | `VALIDATED` | Reserved for explicit, evidence-backed external validation. **Not currently claimed for any entry below.** |
 
+## Machine-readable validation graph
+
+The same review trail is represented as a causal state-transition graph:
+
+- [`EXTERNAL_VALIDATION_GRAPH.md`](./EXTERNAL_VALIDATION_GRAPH.md) — Mermaid visualization and transition semantics;
+- [`external_validation_graph.v0.1.yaml`](./external_validation_graph.v0.1.yaml) — machine-readable state for ProofPath/CML integration.
+
+The graph introduces **EEW-v0.1 (External Evidence Weight)** as a conservative review-maturity score. It is not a safety-confidence percentage, probability, endorsement score, or scientific effect size. Current EEW is **7.86 / 100** because outreach and routing intentionally carry low weight until technical feedback and independent reproduction exist.
+
 ## Current review trail
 
 | Date (UTC) | Organization / review target | Material / request | Status | Evidence / current state | Requested falsification |
