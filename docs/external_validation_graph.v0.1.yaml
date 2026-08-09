@@ -1,196 +1,176 @@
-schema_version: external-validation-graph/v0.1
-updated_at: 2026-08-09
-project: LiminalOSAI
-related_projects:
-  - LiminalDB
-
-claim:
-  id: PSAG-001
-  text: >-
-    A sandbox escape should not automatically become durable permission for an
-    agent to continue accumulating and exercising authority.
-  scope: post-sandbox authority accumulation and governed external effects
-  nonclaims:
-    - does not claim to prevent sandbox escape itself
-    - does not claim universal agent safety
-    - does not treat outreach, acknowledgement, or routing as validation
-
-status_model:
-  SENT:
-    weight: 0.05
-    meaning: Review material was sent to a relevant external target.
-  ACKNOWLEDGED:
-    weight: 0.10
-    meaning: Receipt or intake was acknowledged; technical review is not confirmed.
-  ROUTED:
-    weight: 0.20
-    meaning: The recipient explicitly stated that material was passed internally for review.
-  TECHNICAL_FEEDBACK:
-    weight: 0.40
-    meaning: Substantive technical feedback or a counterexample was received.
-  REPRODUCED:
-    weight: 0.75
-    meaning: An external reviewer independently reproduced a test, failure trace, or benchmark result.
-  VALIDATED:
-    weight: 1.00
-    meaning: Explicit evidence-backed external validation. Not currently claimed.
-
-weighting_note: >-
-  Weights are conservative operational weights for the maturity of the external
-  review trail. They are not probabilities, safety-confidence estimates,
-  endorsements, or scientific effect sizes. A sent email contributes only a
-  small amount of weight; independent reproduction contributes substantially more.
-
-score:
-  id: EEW-v0.1
-  name: External Evidence Weight
-  formula: 100 * sum(target.status_weight) / count(targets)
-  target_count: 7
-  weighted_sum: 0.55
-  score_percent: 7.86
-  interpretation: >-
-    External review outreach exists and one target has explicitly routed the work,
-    but no external reproduction or validation is currently recorded.
-
-allowed_transitions:
-  - from: SENT
-    to: ACKNOWLEDGED
-    evidence_required: explicit acknowledgement of receipt or intake
-  - from: SENT
-    to: TECHNICAL_FEEDBACK
-    evidence_required: direct substantive technical response
-  - from: ACKNOWLEDGED
-    to: ROUTED
-    evidence_required: explicit statement of internal routing
-  - from: ACKNOWLEDGED
-    to: TECHNICAL_FEEDBACK
-    evidence_required: substantive technical response
-  - from: ROUTED
-    to: TECHNICAL_FEEDBACK
-    evidence_required: substantive technical response or counterexample
-  - from: TECHNICAL_FEEDBACK
-    to: REPRODUCED
-    evidence_required: independent reproduction of a linked trace or benchmark
-  - from: REPRODUCED
-    to: VALIDATED
-    evidence_required: explicit evidence-backed validation with reproducible artifact linkage
-
-review_targets:
-  - id: openai-preparedness
-    organization: OpenAI
-    target: Preparedness / agent-security routing request
-    date_utc: 2026-08-08
-    status: ROUTED
-    status_weight: 0.20
-    evidence: OpenAI Support case #12892239; support stated the material would be passed to the appropriate internal team for review.
-    requested_falsification: >-
-      Identify a failure trace where stale, drifted, or ambiguous authority can
-      still produce a governed physical effect.
-    next_high_value_state: TECHNICAL_FEEDBACK
-
-  - id: anthropic-safeguards
-    organization: Anthropic
-    target: Safeguards / containment research
-    date_utc: 2026-08-08
-    status: ACKNOWLEDGED
-    status_weight: 0.10
-    evidence: Safeguards intake acknowledged receipt; no technical review is confirmed.
-    requested_falsification: >-
-      Find a containment or recovery sequence in which authority survives a state
-      transition that should invalidate it.
-    next_high_value_state: TECHNICAL_FEEDBACK
-
-  - id: meta-preparedness-ai-security
-    organization: Meta
-    target: Preparedness / AI Security correspondence contact for Muse Spark safety work
-    date_utc: 2026-08-09
-    status: SENT
-    status_weight: 0.05
-    evidence: Reproducible benchmark, external review trail, and post-sandbox governance one-pager sent.
-    requested_falsification: >-
-      Provide one Meta-shaped loss-of-control, monitorability, agent-robustness,
-      or prompt-injection failure trace that the control model should fail closed on.
-    next_high_value_state: TECHNICAL_FEEDBACK
-
-  - id: openssf-ai-ml-security
-    organization: OpenSSF
-    target: AI/ML Security Working Group
-    date_utc: 2026-08-01
-    status: SENT
-    status_weight: 0.05
-    evidence: Adversarial review request sent; no substantive technical response recorded yet.
-    requested_falsification: >-
-      Break evidence-bound delegation, recovery lineage, or explicit human-authority assumptions.
-    next_high_value_state: TECHNICAL_FEEDBACK
-
-  - id: owasp-agentic-ai-testing
-    organization: OWASP
-    target: agentic-security / AI-testing contacts
-    date_utc: 2026-08-01/2026-08-04
-    status: SENT
-    status_weight: 0.05
-    evidence: Adversarial review packets sent; no substantive technical response recorded yet.
-    requested_falsification: >-
-      Construct an authority-escalation path where forged reasoning, stale state,
-      or tool-side effects bypass the guard.
-    next_high_value_state: TECHNICAL_FEEDBACK
-
-  - id: invariant-labs
-    organization: Invariant Labs
-    target: multi-agent technical review
-    date_utc: 2026-08-01
-    status: SENT
-    status_weight: 0.05
-    evidence: Technical review request sent; no substantive technical response recorded yet.
-    requested_falsification: >-
-      Break stale-worker rejection, recovery lineage, or delegation-state
-      consistency under multi-agent execution.
-    next_high_value_state: TECHNICAL_FEEDBACK
-
-  - id: averi-third-party-verification
-    organization: AVERI-related outreach
-    target: third-party AI verification
-    date_utc: 2026-08-04
-    status: SENT
-    status_weight: 0.05
-    evidence: Open-source evidence-layer material sent; no substantive technical response recorded yet.
-    requested_falsification: >-
-      Challenge whether the evidence trail is sufficient for independent
-      third-party verification of an agent action.
-    next_high_value_state: TECHNICAL_FEEDBACK
-
-invariants:
-  - id: EVG-I1
-    text: No status may advance without explicit evidence supporting that transition.
-  - id: EVG-I2
-    text: Silence never advances a status.
-  - id: EVG-I3
-    text: SENT, ACKNOWLEDGED, and ROUTED must not be represented as endorsement or validation.
-  - id: EVG-I4
-    text: VALIDATED requires explicit external evidence and a reproducible artifact link.
-  - id: EVG-I5
-    text: A counterexample that narrows or changes the claim increases review value even if it lowers apparent confidence.
-
-proofpath_mapping:
-  claim_node: PSAG-001
-  evidence_event_types:
-    - review.sent
-    - review.acknowledged
-    - review.routed
-    - review.technical_feedback
-    - review.reproduced
-    - review.validated
-  required_fields:
-    - organization
-    - target
-    - timestamp
-    - status
-    - evidence_reference
-    - claim_id
-    - repository_commit_or_pr
-
-cml_mapping:
-  state_key: external_validation.PSAG-001
-  transition_key: review_status_transition
-  persistence_rule: append_only_evidence_events
-  recomputation_rule: derive_current_status_from_latest_evidence_backed_transition
+{
+  "schema_version": "external-validation-graph/v0.1",
+  "updated_at": "2026-08-09",
+  "project": "LiminalOSAI",
+  "related_projects": ["LiminalDB"],
+  "claim": {
+    "id": "PSAG-001",
+    "text": "A sandbox escape should not automatically become durable permission for an agent to continue accumulating and exercising authority.",
+    "scope": "post-sandbox authority accumulation and governed external effects",
+    "nonclaims": [
+      "does not claim to prevent sandbox escape itself",
+      "does not claim universal agent safety",
+      "does not treat outreach, acknowledgement, or routing as validation"
+    ]
+  },
+  "status_model": {
+    "SENT": {"weight": 0.05, "meaning": "Review material was sent to a relevant external target."},
+    "ACKNOWLEDGED": {"weight": 0.10, "meaning": "Receipt or intake was acknowledged; technical review is not confirmed."},
+    "ROUTED": {"weight": 0.20, "meaning": "The recipient explicitly stated that material was passed internally for review."},
+    "TECHNICAL_FEEDBACK": {"weight": 0.40, "meaning": "Substantive technical feedback or a counterexample was received."},
+    "REPRODUCED": {"weight": 0.75, "meaning": "An external reviewer independently reproduced a test, failure trace, or benchmark result."},
+    "VALIDATED": {"weight": 1.00, "meaning": "Explicit evidence-backed external validation. Not currently claimed."}
+  },
+  "weighting_note": "Weights are conservative operational weights for the maturity of the external review trail. They are not probabilities, safety-confidence estimates, endorsements, or scientific effect sizes. A sent email contributes only a small amount of weight; independent reproduction contributes substantially more.",
+  "score": {
+    "id": "EEW-v0.1",
+    "name": "External Evidence Weight",
+    "formula": "100 * sum(target.status_weight) / count(targets)",
+    "target_count": 7,
+    "weighted_sum": 0.55,
+    "score_percent": 7.86,
+    "interpretation": "External review outreach exists and one target has explicitly routed the work, but no external reproduction or validation is currently recorded."
+  },
+  "allowed_transitions": [
+    {"from": "SENT", "to": "ACKNOWLEDGED", "evidence_required": "explicit acknowledgement of receipt or intake"},
+    {"from": "SENT", "to": "TECHNICAL_FEEDBACK", "evidence_required": "direct substantive technical response"},
+    {"from": "ACKNOWLEDGED", "to": "ROUTED", "evidence_required": "explicit statement of internal routing"},
+    {"from": "ACKNOWLEDGED", "to": "TECHNICAL_FEEDBACK", "evidence_required": "substantive technical response"},
+    {"from": "ROUTED", "to": "TECHNICAL_FEEDBACK", "evidence_required": "substantive technical response or counterexample"},
+    {"from": "TECHNICAL_FEEDBACK", "to": "REPRODUCED", "evidence_required": "independent reproduction of a linked trace or benchmark"},
+    {"from": "REPRODUCED", "to": "VALIDATED", "evidence_required": "explicit evidence-backed validation with reproducible artifact linkage"}
+  ],
+  "review_targets": [
+    {
+      "id": "openai-preparedness",
+      "claim_id": "PSAG-001",
+      "organization": "OpenAI",
+      "target": "Preparedness / agent-security routing request",
+      "date_utc": "2026-08-08",
+      "status": "ROUTED",
+      "status_weight": 0.20,
+      "evidence": "OpenAI Support case #12892239; support stated the material would be passed to the appropriate internal team for review.",
+      "evidence_reference": "OpenAI Support case #12892239; source email retained privately",
+      "repository_commit_or_pr": "https://github.com/safal207/LiminalOSAI/pull/174",
+      "requested_falsification": "Identify a failure trace where stale, drifted, or ambiguous authority can still produce a governed physical effect.",
+      "next_high_value_state": "TECHNICAL_FEEDBACK"
+    },
+    {
+      "id": "anthropic-safeguards",
+      "claim_id": "PSAG-001",
+      "organization": "Anthropic",
+      "target": "Safeguards / containment research",
+      "date_utc": "2026-08-08",
+      "status": "ACKNOWLEDGED",
+      "status_weight": 0.10,
+      "evidence": "Safeguards intake acknowledged receipt; no technical review is confirmed.",
+      "evidence_reference": "Anthropic Safeguards acknowledgement; source email retained privately",
+      "repository_commit_or_pr": "https://github.com/safal207/LiminalOSAI/pull/174",
+      "requested_falsification": "Find a containment or recovery sequence in which authority survives a state transition that should invalidate it.",
+      "next_high_value_state": "TECHNICAL_FEEDBACK"
+    },
+    {
+      "id": "meta-preparedness-ai-security",
+      "claim_id": "PSAG-001",
+      "organization": "Meta",
+      "target": "Preparedness / AI Security correspondence contact for Muse Spark safety work",
+      "date_utc": "2026-08-09",
+      "status": "SENT",
+      "status_weight": 0.05,
+      "evidence": "Reproducible benchmark, external review trail, and post-sandbox governance one-pager sent.",
+      "evidence_reference": "Outbound correspondence to public Muse Spark Safety & Preparedness report contact; source email retained privately",
+      "repository_commit_or_pr": "https://github.com/safal207/LiminalOSAI/pull/174",
+      "requested_falsification": "Provide one Meta-shaped loss-of-control, monitorability, agent-robustness, or prompt-injection failure trace that the control model should fail closed on.",
+      "next_high_value_state": "TECHNICAL_FEEDBACK"
+    },
+    {
+      "id": "openssf-ai-ml-security",
+      "claim_id": "PSAG-001",
+      "organization": "OpenSSF",
+      "target": "AI/ML Security Working Group",
+      "date_utc": "2026-08-01",
+      "status": "SENT",
+      "status_weight": 0.05,
+      "evidence": "Adversarial review request sent; no substantive technical response recorded yet.",
+      "evidence_reference": "Outbound adversarial-review correspondence retained privately",
+      "repository_commit_or_pr": "https://github.com/safal207/LiminalOSAI/pull/174",
+      "requested_falsification": "Break evidence-bound delegation, recovery lineage, or explicit human-authority assumptions.",
+      "next_high_value_state": "TECHNICAL_FEEDBACK"
+    },
+    {
+      "id": "owasp-agentic-ai-testing",
+      "claim_id": "PSAG-001",
+      "organization": "OWASP",
+      "target": "agentic-security / AI-testing contacts",
+      "date_utc": "2026-08-01/2026-08-04",
+      "status": "SENT",
+      "status_weight": 0.05,
+      "evidence": "Adversarial review packets sent; no substantive technical response recorded yet.",
+      "evidence_reference": "Outbound adversarial-review correspondence retained privately",
+      "repository_commit_or_pr": "https://github.com/safal207/LiminalOSAI/pull/174",
+      "requested_falsification": "Construct an authority-escalation path where forged reasoning, stale state, or tool-side effects bypass the guard.",
+      "next_high_value_state": "TECHNICAL_FEEDBACK"
+    },
+    {
+      "id": "invariant-labs",
+      "claim_id": "PSAG-001",
+      "organization": "Invariant Labs",
+      "target": "multi-agent technical review",
+      "date_utc": "2026-08-01",
+      "status": "SENT",
+      "status_weight": 0.05,
+      "evidence": "Technical review request sent; no substantive technical response recorded yet.",
+      "evidence_reference": "Outbound technical-review correspondence retained privately",
+      "repository_commit_or_pr": "https://github.com/safal207/LiminalOSAI/pull/174",
+      "requested_falsification": "Break stale-worker rejection, recovery lineage, or delegation-state consistency under multi-agent execution.",
+      "next_high_value_state": "TECHNICAL_FEEDBACK"
+    },
+    {
+      "id": "averi-third-party-verification",
+      "claim_id": "PSAG-001",
+      "organization": "AVERI-related outreach",
+      "target": "third-party AI verification",
+      "date_utc": "2026-08-04",
+      "status": "SENT",
+      "status_weight": 0.05,
+      "evidence": "Open-source evidence-layer material sent; no substantive technical response recorded yet.",
+      "evidence_reference": "Outbound third-party verification correspondence retained privately",
+      "repository_commit_or_pr": "https://github.com/safal207/LiminalOSAI/pull/174",
+      "requested_falsification": "Challenge whether the evidence trail is sufficient for independent third-party verification of an agent action.",
+      "next_high_value_state": "TECHNICAL_FEEDBACK"
+    }
+  ],
+  "invariants": [
+    {"id": "EVG-I1", "text": "No status may advance without explicit evidence supporting that transition."},
+    {"id": "EVG-I2", "text": "Silence never advances a status."},
+    {"id": "EVG-I3", "text": "SENT, ACKNOWLEDGED, and ROUTED must not be represented as endorsement or validation."},
+    {"id": "EVG-I4", "text": "VALIDATED requires explicit external evidence and a reproducible artifact link."},
+    {"id": "EVG-I5", "text": "A counterexample that narrows or changes the claim increases review value even if it lowers apparent confidence."}
+  ],
+  "proofpath_mapping": {
+    "claim_node": "PSAG-001",
+    "evidence_event_types": [
+      "review.sent",
+      "review.acknowledged",
+      "review.routed",
+      "review.technical_feedback",
+      "review.reproduced",
+      "review.validated"
+    ],
+    "required_fields": [
+      "organization",
+      "target",
+      "timestamp",
+      "status",
+      "evidence_reference",
+      "claim_id",
+      "repository_commit_or_pr"
+    ]
+  },
+  "cml_mapping": {
+    "state_key": "external_validation.PSAG-001",
+    "transition_key": "review_status_transition",
+    "persistence_rule": "append_only_evidence_events",
+    "recomputation_rule": "derive_current_status_from_latest_evidence_backed_transition"
+  }
+}
