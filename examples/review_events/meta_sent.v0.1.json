@@ -1,0 +1,30 @@
+{
+  "schema_version": "review-event-envelope/v0.1",
+  "event_id": "rev-meta-20260809-sent-001",
+  "event_type": "review.sent",
+  "occurred_at": "2026-08-09T13:16:36Z",
+  "claim_id": "PSAG-001",
+  "subject": {
+    "organization": "Meta",
+    "target_id": "meta-preparedness-ai-security"
+  },
+  "transition": {
+    "from": null,
+    "to": "SENT"
+  },
+  "evidence": {
+    "kind": "outbound_review_request",
+    "reference": "Post-sandbox agent control: reproducible benchmark + external review trail",
+    "summary": "Review packet and one-pager were sent to the public correspondence contact associated with the relevant Meta safety work.",
+    "public": false
+  },
+  "repository": {
+    "repository": "safal207/LiminalOSAI",
+    "pr": 174,
+    "commit": null
+  },
+  "provenance": {
+    "recorded_by": "Alexey Safonov",
+    "source": "external_correspondence"
+  }
+}
