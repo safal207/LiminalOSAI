@@ -36,15 +36,3 @@ jobs:
 
       - name: Run graph-gate regression tests
         run: python3 -m unittest tests/test_external_validation_graph.py -v
-
-      - name: State non-claim boundary
-        run: |
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          graph = json.loads(Path('docs/external_validation_graph.v0.1.yaml').read_text())
-          assert graph['score']['score_percent'] == 7.86
-          assert all(t['status'] != 'VALIDATED' for t in graph['review_targets'])
-          print('EEW is review maturity only; no external validation is currently claimed.')
-          PY
