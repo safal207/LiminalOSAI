@@ -464,6 +464,8 @@ class TRCPSimulator:
     def verify(self, *, reproduced: bool) -> dict[str, Any]:
         if self.state != "VERIFYING":
             raise TRCPError("verification requires VERIFYING state")
+        if self.verification is not None:
+            raise TRCPError("verification has already been recorded for this finding")
         if self.finding is None:
             self._transition("CLOSED", "no_finding_to_verify")
             return {}
@@ -515,7 +517,7 @@ class TRCPSimulator:
             "verification": self.verification,
             "disclosure": None,
             "trace": list(self.trace),
-            "authority": AUTHORITY,
+            "authority": dict(AUTHORITY),
         }
         return {**body, "report_sha256": canonical_sha256(body)}
 
