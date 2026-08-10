@@ -128,7 +128,7 @@ def _check_state_transitions(bundle: dict[str, Any]) -> CheckResult:
     if not transitions:
         return CheckResult("STATE_TRANSITION", "PASS", "no transitions in bundle")
 
-    first_from, first_to, _ = transitions[0]
+    first_from, _first_to, _ = transitions[0]
     if first_from != "NEW":
         return CheckResult(
             "STATE_TRANSITION",
@@ -418,7 +418,12 @@ def _check_failover_decision(bundle: dict[str, Any]) -> CheckResult:
         if kind == "PROVIDER_RUN_RECORDED":
             payload = event.get("payload") or {}
             run_id = payload.get("run_id", "")
-            if run_id and run_id != primary_run_id and run_id in fallback_run_ids:
+            if (
+                run_id
+                and run_id != primary_run_id
+                and run_id in fallback_run_ids
+                and fallback_run_seq is None
+            ):
                 fallback_run_seq = seq
 
     if failover_event_seq is None:
@@ -451,14 +456,14 @@ def _check_task_identity(bundle: dict[str, Any]) -> CheckResult:
         return CheckResult("TASK_IDENTITY", "PASS", "single provider run")
 
     primary_hash = provider_runs[0].get("normalized_task_hash", "")
-    fallback_hash = provider_runs[-1].get("normalized_task_hash", "")
 
-    if primary_hash != fallback_hash:
-        return CheckResult(
-            "TASK_IDENTITY",
-            "FAIL",
-            "fallback normalized_task_hash differs from primary",
-        )
+    for index, run in enumerate(provider_runs[1:], start=2):
+        if run.get("normalized_task_hash", "") != primary_hash:
+            return CheckResult(
+                "TASK_IDENTITY",
+                "FAIL",
+                f"provider run {index} normalized_task_hash differs from primary",
+            )
 
     return CheckResult("TASK_IDENTITY", "PASS")
 

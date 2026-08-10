@@ -13,6 +13,7 @@ Exit codes:
 """
 import json
 import sys
+import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +38,7 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
         print(f"error: {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         sys.exit(2)

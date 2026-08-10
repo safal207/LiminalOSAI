@@ -297,6 +297,56 @@ class FallbackRunIdentityTests(unittest.TestCase):
         causal_check = next(c for c in receipt["checks"] if c["id"] == "CAUSAL_ORDER")
         self.assertEqual(causal_check["result"], "PASS")
 
+    def test_early_fallback_run_before_decision_fails(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        failover_run_id = bundle["provider_runs"][1].get("run_id")
+        trace = bundle["trace"]
+        decision_idx = next(
+            i for i, e in enumerate(trace) if e["kind"] == "FAILOVER_DECISION_RECORDED"
+        )
+        decision_event = trace[decision_idx]
+        early_run_event = {
+            "kind": "PROVIDER_RUN_RECORDED",
+            "observed_at_unix": decision_event["observed_at_unix"],
+            "payload": {
+                "run_id": failover_run_id,
+                "scope_id": decision_event["payload"].get("scope_id"),
+            },
+        }
+        trace.insert(decision_idx, early_run_event)
+        _rebuild_trace_hashes(trace)
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        failover_check = next(
+            c for c in receipt["checks"] if c["id"] == "FAILOVER_DECISION_REQUIRED"
+        )
+        self.assertEqual(failover_check["result"], "FAIL")
+
+    def test_three_runs_middle_task_hash_mismatch_fails(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        self.assertEqual(len(bundle["provider_runs"]), 2)
+        middle_run = copy.deepcopy(bundle["provider_runs"][1])
+        middle_run["run_id"] = "run:mismatch"
+        middle_run["normalized_task_hash"] = "0" * 64
+        bundle["provider_runs"].insert(1, middle_run)
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "TASK_IDENTITY")
+
+    def test_three_runs_all_matching_hashes_pass(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        self.assertEqual(len(bundle["provider_runs"]), 2)
+        extra_run = copy.deepcopy(bundle["provider_runs"][1])
+        extra_run["run_id"] = "run:extra"
+        bundle["provider_runs"].append(extra_run)
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "PASS")
+        task_check = next(c for c in receipt["checks"] if c["id"] == "TASK_IDENTITY")
+        self.assertEqual(task_check["result"], "PASS")
+
 
 class ProhibitedActionSeparateScopeTests(unittest.TestCase):
     def test_initial_scope_overlap_fails(self):
@@ -663,6 +713,7 @@ class CliExitCodeTests(unittest.TestCase):
             text=True,
             cwd=str(ROOT),
         )
+        self.assertEqual(result.returncode, 0, "stderr: " + result.stderr)
         receipt = json.loads(result.stdout)
         self.assertEqual(receipt["result"], "PASS")
 
