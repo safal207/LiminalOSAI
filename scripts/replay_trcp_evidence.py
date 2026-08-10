@@ -26,19 +26,19 @@ from sdk.liminal_trcp.replay import verify_evidence_bundle
 
 
 def main() -> int:
-    report = run_default_scenario()
-    bundle = build_evidence_bundle(report)
-    receipt = verify_evidence_bundle(bundle)
-    print(json.dumps(receipt, sort_keys=True, indent=2))
-    if receipt["result"] != "PASS":
-        return 1
-    return 0
-
-
-if __name__ == "__main__":
     try:
-        sys.exit(main())
+        report = run_default_scenario()
+        bundle = build_evidence_bundle(report)
+        receipt = verify_evidence_bundle(bundle)
+        print(json.dumps(receipt, sort_keys=True, indent=2))
+        if receipt["result"] != "PASS":
+            return 1
+        return 0
     except Exception as exc:  # noqa: BLE001 - CLI boundary
         print(f"error: {exc}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
-        sys.exit(2)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

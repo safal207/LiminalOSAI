@@ -72,9 +72,9 @@ def _build_causal_lineage(report: dict[str, Any]) -> list[dict[str, Any]]:
         add_edge(EFFECTIVE_SCOPE_NODE, FALLBACK_RUN_NODE, "AUTHORIZES", f"sha256:{fallback_ref}")
 
     finding = report.get("finding")
-    if finding is not None and last_node == FALLBACK_RUN_NODE:
+    if finding is not None and last_node is not None:
         finding_ref = finding.get("record_sha256", "unknown")
-        add_edge(FALLBACK_RUN_NODE, FINDING_NODE, "CAUSES", f"sha256:{finding_ref}")
+        add_edge(last_node, FINDING_NODE, "CAUSES", f"sha256:{finding_ref}")
 
     verification = report.get("verification")
     if verification is not None and last_node == FINDING_NODE:
@@ -83,10 +83,8 @@ def _build_causal_lineage(report: dict[str, Any]) -> list[dict[str, Any]]:
         add_edge(VERIFICATION_NODE, CLOSED_NODE, "VERIFIES", f"sha256:{verification_ref}")
     elif finding is not None and last_node == FINDING_NODE:
         add_edge(FINDING_NODE, CLOSED_NODE, "CAUSES", "ref:no-verification")
-    elif last_node == FALLBACK_RUN_NODE:
-        add_edge(FALLBACK_RUN_NODE, CLOSED_NODE, "CAUSES", "ref:no-finding")
     elif last_node is not None:
-        add_edge(last_node, CLOSED_NODE, "CAUSES", "ref:incomplete-path")
+        add_edge(last_node, CLOSED_NODE, "CAUSES", "ref:terminus")
 
     return edges
 

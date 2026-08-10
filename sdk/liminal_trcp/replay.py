@@ -516,6 +516,24 @@ def _check_verification_consistency(bundle: dict[str, Any]) -> CheckResult:
     verification = bundle.get("verification")
     finding = bundle.get("finding")
 
+    trace = bundle.get("trace") or []
+    trace_has_finding = any(e.get("kind") == "FINDING_RECORDED" for e in trace)
+    trace_has_verification = any(e.get("kind") == "VERIFICATION_RECORDED" for e in trace)
+
+    if finding is None and trace_has_finding:
+        return CheckResult(
+            "VERIFICATION_CONSISTENCY",
+            "FAIL",
+            "FINDING_RECORDED in trace but finding record is missing",
+        )
+
+    if verification is None and trace_has_verification:
+        return CheckResult(
+            "VERIFICATION_CONSISTENCY",
+            "FAIL",
+            "VERIFICATION_RECORDED in trace but verification record is missing",
+        )
+
     if verification is None and finding is None:
         return CheckResult("VERIFICATION_CONSISTENCY", "PASS", "no verification or finding")
 

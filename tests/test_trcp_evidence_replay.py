@@ -644,6 +644,16 @@ class ReplayIndependenceTests(unittest.TestCase):
         self.assertNotIn("TRCPSimulator", replay_names)
         self.assertNotIn("execute_primary", replay_names)
         self.assertNotIn("execute_fallback", replay_names)
+        imported_module_names = {
+            value.__name__
+            for value in replay.__dict__.values()
+            if isinstance(value, type(sys))
+        }
+        self.assertFalse(
+            any(name == "sdk.liminal_trcp" or name.startswith("sdk.liminal_trcp.")
+                for name in imported_module_names),
+            "replay imports the simulator package: " + repr(sorted(imported_module_names)),
+        )
 
     def test_replay_uses_only_bundle_data(self):
         bundle = build_evidence_bundle(run_default_scenario())
@@ -748,11 +758,25 @@ class FailoverWithoutFindingTests(unittest.TestCase):
         report_no_finding = copy.deepcopy(report)
         report_no_finding["finding"] = None
         report_no_finding["verification"] = None
+        report_no_finding["trace"] = [
+            e
+            for e in report_no_finding["trace"]
+            if e["kind"] not in ("FINDING_RECORDED", "FINDING_STATUS_UPDATED", "VERIFICATION_RECORDED")
+        ]
+        _rebuild_trace_hashes(report_no_finding["trace"])
         body = {k: v for k, v in report_no_finding.items() if k != "report_sha256"}
         report_no_finding["report_sha256"] = canonical_sha256(body)
         bundle = build_evidence_bundle(report_no_finding)
         receipt = verify_evidence_bundle(bundle)
         self.assertEqual(receipt["result"], "PASS")
+
+    def test_finding_trace_event_without_record_fails(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        bundle["finding"] = None
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "VERIFICATION_CONSISTENCY")
 
 
 class CliExitCodeTests(unittest.TestCase):
@@ -775,6 +799,37 @@ class CliExitCodeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, "stderr: " + result.stderr)
         receipt = json.loads(result.stdout)
         self.assertEqual(receipt["result"], "PASS")
+
+    def test_cli_returns_one_on_fail(self):
+        cli = __import__("scripts.replay_trcp_evidence", fromlist=["main"])
+        original = cli.verify_evidence_bundle
+        cli.verify_evidence_bundle = lambda bundle: {
+            "schema": "liminal-trcp-replay-receipt-v0.2",
+            "result": "FAIL",
+            "source_bundle_sha256": "",
+            "checks": [],
+            "failed_check": "BUNDLE_INTEGRITY",
+            "receipt_sha256": "0" * 64,
+        }
+        try:
+            exit_code = cli.main()
+        finally:
+            cli.verify_evidence_bundle = original
+        self.assertEqual(exit_code, 1)
+
+    def test_cli_returns_two_on_unexpected_error(self):
+        cli = __import__("scripts.replay_trcp_evidence", fromlist=["main"])
+        original = cli.verify_evidence_bundle
+
+        def sdk_replay_fail(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        cli.verify_evidence_bundle = sdk_replay_fail
+        try:
+            exit_code = cli.main()
+        finally:
+            cli.verify_evidence_bundle = original
+        self.assertEqual(exit_code, 2)
 
 
 if __name__ == "__main__":
