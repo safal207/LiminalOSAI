@@ -1,5 +1,6 @@
 import unittest
 
+from sdk.liminal_post_sandbox_contracts import canonical_sha256
 from sdk.liminal_trcp import (
     AuthorizationRecord,
     MockProvider,
@@ -150,6 +151,16 @@ class TRCPSimulatorTests(unittest.TestCase):
         with self.assertRaisesRegex(TRCPError, "without reproduced verification"):
             simulator.confirm_finding()
 
+    def test_verification_cannot_be_overwritten_or_reversed(self):
+        fixture, simulator = self._ready_for_failover()
+        simulator.record_failover(fixture["fallback"])
+        simulator.execute_fallback(fixture["task"], fixture["fallback"])
+        first = simulator.verify(reproduced=False)
+        with self.assertRaisesRegex(TRCPError, "already been recorded"):
+            simulator.verify(reproduced=True)
+        self.assertEqual(simulator.verification, first)
+        self.assertEqual(simulator.finding["status"], "NOT_REPRODUCED")
+
     def test_trace_is_hash_chained(self):
         report = run_default_scenario()
         previous = "0" * 64
@@ -157,6 +168,8 @@ class TRCPSimulatorTests(unittest.TestCase):
             self.assertEqual(event["sequence"], index)
             self.assertEqual(event["previous_event_sha256"], previous)
             self.assertEqual(len(event["event_sha256"]), 64)
+            core = {key: value for key, value in event.items() if key != "event_sha256"}
+            self.assertEqual(event["event_sha256"], canonical_sha256(core))
             previous = event["event_sha256"]
 
     def test_scope_requires_local_only(self):
