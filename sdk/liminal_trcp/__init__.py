@@ -1,8 +1,8 @@
 """Local-only deterministic Trusted Research Continuity Protocol simulator.
 
 This module is intentionally non-networked and non-operational. It models
-authorization, scope, provider failover, verification, and evidence lineage
-using fixed mock providers and synthetic fixtures only.
+provider continuity with synthetic fixtures while preserving authorization,
+effective scope, verification, and hash-chained evidence lineage.
 """
 from __future__ import annotations
 
@@ -40,6 +40,28 @@ AUTHORITY = {
     "exploit_execution": False,
     "provider_api_calls": False,
     "automatic_disclosure": False,
+    "data_handling_class": "SYNTHETIC_ONLY",
+}
+
+_ALLOWED_TRANSITIONS = {
+    "NEW": frozenset({"AUTHORIZED"}),
+    "AUTHORIZED": frozenset({"ACTIVE"}),
+    "ACTIVE": frozenset({"VERIFYING", "DEGRADED", "ABORTED"}),
+    "DEGRADED": frozenset({"FAILOVER_PENDING"}),
+    "FAILOVER_PENDING": frozenset({
+        "ACTIVE_ON_FALLBACK",
+        "AUTH_EXPIRED",
+        "SCOPE_INVALID",
+        "HUMAN_REVIEW_REQUIRED",
+        "ABORTED",
+    }),
+    "ACTIVE_ON_FALLBACK": frozenset({"VERIFYING", "AUTH_EXPIRED", "SCOPE_INVALID", "ABORTED"}),
+    "VERIFYING": frozenset({"CLOSED"}),
+    "AUTH_EXPIRED": frozenset(),
+    "SCOPE_INVALID": frozenset(),
+    "HUMAN_REVIEW_REQUIRED": frozenset(),
+    "ABORTED": frozenset(),
+    "CLOSED": frozenset(),
 }
 
 
@@ -107,11 +129,28 @@ class ScopeEnvelope:
         if authorization.asset_id not in self.allowed_targets:
             raise TRCPError("authorized asset is not inside scope")
         if self.network_mode != "LOCAL_ONLY":
-            raise TRCPError("initial TRCP simulator requires LOCAL_ONLY network mode")
+            raise TRCPError("TRCP v0.1 requires LOCAL_ONLY network mode")
+        if self.data_handling_class != "SYNTHETIC_ONLY":
+            raise TRCPError("TRCP v0.1 requires SYNTHETIC_ONLY data handling")
+        if not self.allowed_environments or any(env != "LOCAL_FIXTURE" for env in self.allowed_environments):
+            raise TRCPError("TRCP v0.1 requires LOCAL_FIXTURE environments")
         if now_unix > self.expires_at:
             raise TRCPError("scope has expired")
         if not self.allowed_actions:
             raise TRCPError("scope must allow at least one action")
+
+    def permission_view(self) -> dict[str, Any]:
+        """Return permission semantics excluding record identity such as scope_id."""
+        return {
+            "authorization_id": self.authorization_id,
+            "allowed_targets": sorted(self.allowed_targets),
+            "allowed_environments": sorted(self.allowed_environments),
+            "allowed_actions": sorted(self.allowed_actions),
+            "prohibited_actions": sorted(self.prohibited_actions),
+            "data_handling_class": self.data_handling_class,
+            "network_mode": self.network_mode,
+            "expires_at": self.expires_at,
+        }
 
     def is_equal_or_narrower_than(self, parent: "ScopeEnvelope") -> bool:
         return (
@@ -174,6 +213,7 @@ class TRCPSimulator:
         now_unix: int = 1000,
     ) -> None:
         self.authorization = authorization
+        self.initial_scope = scope
         self.scope = scope
         self.now_unix = now_unix
         self.state = "NEW"
@@ -197,9 +237,15 @@ class TRCPSimulator:
         self.trace.append({**core, "event_sha256": canonical_sha256(core)})
 
     def _transition(self, new_state: str, reason: str) -> None:
+        if new_state not in _ALLOWED_TRANSITIONS.get(self.state, frozenset()):
+            raise TRCPError(f"invalid TRCP transition: {self.state} -> {new_state}")
         previous = self.state
         self.state = new_state
         self._append("STATE_TRANSITION", {"from": previous, "to": new_state, "reason": reason})
+
+    def _fail_failover(self, new_state: str, reason: str, message: str) -> None:
+        self._transition(new_state, reason)
+        raise TRCPError(message)
 
     def advance_time(self, now_unix: int) -> None:
         if now_unix < self.now_unix:
@@ -276,15 +322,60 @@ class TRCPSimulator:
         fallback: MockProvider,
         *,
         fallback_scope: ScopeEnvelope | None = None,
+        data_handling_approved: bool = True,
+        sensitive_artifacts_minimized: bool = True,
+        require_human_approval: bool = False,
+        human_approval_reference: str | None = None,
     ) -> dict[str, Any]:
         if self.state != "FAILOVER_PENDING":
             raise TRCPError("failover decision requires FAILOVER_PENDING state")
-        self.authorization.validate(self.now_unix)
+
+        try:
+            self.authorization.validate(self.now_unix)
+        except TRCPError as exc:
+            self._fail_failover("AUTH_EXPIRED", "authorization_revalidation_failed", str(exc))
+
         candidate = fallback_scope or self.scope
-        candidate.validate(self.authorization, self.now_unix)
+        if candidate.network_mode != "LOCAL_ONLY" or candidate.data_handling_class != "SYNTHETIC_ONLY":
+            self._fail_failover(
+                "HUMAN_REVIEW_REQUIRED",
+                "fallback_outside_v0_1_data_boundary",
+                "TRCP v0.1 failover supports only LOCAL_ONLY SYNTHETIC_ONLY data",
+            )
+        try:
+            candidate.validate(self.authorization, self.now_unix)
+        except TRCPError as exc:
+            self._fail_failover("SCOPE_INVALID", "fallback_scope_revalidation_failed", str(exc))
         if not candidate.is_equal_or_narrower_than(self.scope):
-            raise TRCPError("fallback scope would broaden permissions")
-        permission_delta = "UNCHANGED" if candidate.as_dict() == self.scope.as_dict() else "NARROWER"
+            self._fail_failover(
+                "SCOPE_INVALID",
+                "fallback_scope_would_broaden_permissions",
+                "fallback scope would broaden permissions",
+            )
+        if not data_handling_approved:
+            self._fail_failover(
+                "HUMAN_REVIEW_REQUIRED",
+                "data_handling_not_approved",
+                "fallback data handling requires human review",
+            )
+        if not sensitive_artifacts_minimized:
+            self._fail_failover(
+                "HUMAN_REVIEW_REQUIRED",
+                "sensitive_artifacts_not_minimized",
+                "sensitive artifacts must be minimized before failover",
+            )
+        if require_human_approval and not human_approval_reference:
+            self._fail_failover(
+                "HUMAN_REVIEW_REQUIRED",
+                "required_human_approval_missing",
+                "required human approval is missing",
+            )
+
+        permission_delta = (
+            "UNCHANGED"
+            if candidate.permission_view() == self.scope.permission_view()
+            else "NARROWER"
+        )
         previous_run_id = self.provider_runs[-1]["run_id"]
         body = {
             "failover_id": f"failover:{len(self.provider_runs)}",
@@ -295,12 +386,16 @@ class TRCPSimulator:
             "new_provider_id": fallback.provider_id,
             "new_model_id": fallback.model_id,
             "permission_delta": permission_delta,
-            "human_approval_required": False,
-            "human_approval_reference": None,
+            "data_handling_approved": data_handling_approved,
+            "sensitive_artifacts_minimized": sensitive_artifacts_minimized,
+            "human_approval_required": require_human_approval,
+            "human_approval_reference": human_approval_reference if require_human_approval else None,
             "created_at": 1200,
         }
         self.failover_record = {**body, "record_sha256": canonical_sha256(body)}
         self._append("FAILOVER_DECISION_RECORDED", self.failover_record)
+        self.scope = candidate
+        self._append("EFFECTIVE_SCOPE_UPDATED", {"scope_id": self.scope.scope_id})
         return self.failover_record
 
     def execute_fallback(self, task: Mapping[str, Any], provider: MockProvider) -> dict[str, Any]:
@@ -312,11 +407,21 @@ class TRCPSimulator:
             provider.provider_id != self.failover_record["new_provider_id"]
             or provider.model_id != self.failover_record["new_model_id"]
         ):
-            raise TRCPError("fallback provider does not match FailoverDecisionRecord")
-        self.authorization.validate(self.now_unix)
-        normalized_task_hash = self._validate_task(task)
+            self._fail_failover("ABORTED", "fallback_provider_mismatch", "fallback provider does not match FailoverDecisionRecord")
+        try:
+            self.authorization.validate(self.now_unix)
+        except TRCPError as exc:
+            self._fail_failover("AUTH_EXPIRED", "authorization_expired_before_fallback", str(exc))
+        try:
+            normalized_task_hash = self._validate_task(task, self.scope)
+        except TRCPError as exc:
+            self._fail_failover("SCOPE_INVALID", "fallback_task_outside_effective_scope", str(exc))
         if normalized_task_hash != self.provider_runs[-1]["normalized_task_hash"]:
-            raise TRCPError("fallback must execute the same normalized task")
+            self._fail_failover(
+                "SCOPE_INVALID",
+                "fallback_task_changed",
+                "fallback must execute the same normalized task",
+            )
         self._transition("ACTIVE_ON_FALLBACK", "recorded_failover_started")
         output = provider.run(normalized_task_hash)
         run = self._provider_run_record(provider, normalized_task_hash, output)
@@ -384,6 +489,8 @@ class TRCPSimulator:
         return self.verification
 
     def confirm_finding(self) -> None:
+        if self.state != "VERIFYING":
+            raise TRCPError("finding confirmation requires VERIFYING state")
         if self.finding is None:
             raise TRCPError("no finding exists")
         if self.verification is None or self.verification["result"] != "REPRODUCED":
@@ -400,11 +507,13 @@ class TRCPSimulator:
             "protocol_schema": SCHEMA,
             "final_state": self.state,
             "authorization": self.authorization.as_dict(),
+            "initial_scope": self.initial_scope.as_dict(),
             "scope": self.scope.as_dict(),
             "provider_runs": list(self.provider_runs),
             "failover_record": self.failover_record,
             "finding": self.finding,
             "verification": self.verification,
+            "disclosure": None,
             "trace": list(self.trace),
             "authority": AUTHORITY,
         }
