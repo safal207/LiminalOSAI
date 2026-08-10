@@ -1,7 +1,7 @@
 """TRCP v0.2 — Independent replay verifier.
 
-Validates a provider-neutral evidence bundle WITHOUT re-running the
-TRCPSimulator. The verifier checks invariants from the bundle alone:
+Validates a provider-neutral evidence bundle without re-running the
+originating simulator. The verifier checks invariants from the bundle alone:
 causal order, scope monotonicity, authorization continuity, state
 transition legality, temporal monotonicity, task identity, finding
 trustworthiness, and verification closure.
@@ -47,10 +47,6 @@ TERMINAL_STATES = frozenset({
 })
 
 
-class ReplayVerificationError(Exception):
-    """Raised when an evidence bundle fails replay verification."""
-
-
 class CheckResult:
     def __init__(self, check_id: str, result: str, detail: str = "") -> None:
         self.check_id = check_id
@@ -62,6 +58,13 @@ class CheckResult:
         if self.detail:
             out["detail"] = self.detail
         return out
+
+
+def _get_primary_run_id(bundle: dict[str, Any]) -> str | None:
+    provider_runs = bundle.get("provider_runs") or []
+    if not provider_runs:
+        return None
+    return provider_runs[0].get("run_id")
 
 
 def _check_bundle_integrity(bundle: dict[str, Any]) -> CheckResult:
@@ -125,12 +128,22 @@ def _check_state_transitions(bundle: dict[str, Any]) -> CheckResult:
     if not transitions:
         return CheckResult("STATE_TRANSITION", "PASS", "no transitions in bundle")
 
-    seen_states: set[str] = set()
-    from_state, to_state, _ = transitions[0]
-    seen_states.add(from_state)
-    seen_states.add(to_state)
+    first_from, first_to, _ = transitions[0]
+    if first_from != "NEW":
+        return CheckResult(
+            "STATE_TRANSITION",
+            "FAIL",
+            f"first transition must start from NEW, got {first_from}",
+        )
 
-    for from_s, to_s, event in transitions:
+    prev_to: str | None = None
+    for from_s, to_s, _event in transitions:
+        if prev_to is not None and from_s != prev_to:
+            return CheckResult(
+                "STATE_TRANSITION",
+                "FAIL",
+                f"disconnected state chain: expected from={prev_to}, got from={from_s}",
+            )
         allowed = ALLOWED_TRANSITIONS.get(from_s, frozenset())
         if to_s not in allowed:
             return CheckResult(
@@ -138,55 +151,58 @@ def _check_state_transitions(bundle: dict[str, Any]) -> CheckResult:
                 "FAIL",
                 f"illegal transition: {from_s} -> {to_s}",
             )
+        prev_to = to_s
 
     return CheckResult("STATE_TRANSITION", "PASS")
 
 
+def _get_trace_event_sequences(trace: list[dict[str, Any]]) -> dict[str, list[int]]:
+    result: dict[str, list[int]] = {}
+    for event in trace:
+        kind = event.get("kind", "")
+        seq = event.get("sequence", 0)
+        result.setdefault(kind, []).append(seq)
+    return result
+
+
 def _check_causal_order(bundle: dict[str, Any]) -> CheckResult:
     trace = bundle.get("trace") or []
-    event_kind_indices: dict[str, list[int]] = {}
-    for idx, event in enumerate(trace):
-        kind = event.get("kind", "")
-        seq = event.get("sequence", idx + 1)
-        event_kind_indices.setdefault(kind, []).append(seq)
+    event_seqs = _get_trace_event_sequences(trace)
 
-    state_transitions = _extract_transition_sequence(bundle)
-    if state_transitions:
-        first_transition_seq = None
-        for event in trace:
-            if event.get("kind") == "STATE_TRANSITION":
-                first_transition_seq = event.get("sequence")
-                break
-        if first_transition_seq is not None:
-            sim_created = event_kind_indices.get("SIMULATOR_CREATED", [])
-            if sim_created and sim_created[0] > first_transition_seq:
-                return CheckResult(
-                    "CAUSAL_ORDER",
-                    "FAIL",
-                    "SIMULATOR_CREATED after first STATE_TRANSITION",
-                )
+    state_transition_seqs = event_seqs.get("STATE_TRANSITION", [])
+    if state_transition_seqs:
+        sim_created_seqs = event_seqs.get("SIMULATOR_CREATED", [])
+        if sim_created_seqs and sim_created_seqs[0] > state_transition_seqs[0]:
+            return CheckResult(
+                "CAUSAL_ORDER",
+                "FAIL",
+                "SIMULATOR_CREATED after first STATE_TRANSITION",
+            )
 
-    failover_indices = event_kind_indices.get("FAILOVER_DECISION_RECORDED", [])
-    fallback_run_indices = []
+    primary_run_id = _get_primary_run_id(bundle)
+    fallback_run_ids = {run.get("run_id") for run in (bundle.get("provider_runs") or [])[1:]}
+
+    failover_seqs = event_seqs.get("FAILOVER_DECISION_RECORDED", [])
+    fallback_run_seqs: list[int] = []
     for event in trace:
         if event.get("kind") == "PROVIDER_RUN_RECORDED":
             payload = event.get("payload") or {}
             run_id = payload.get("run_id", "")
-            if not run_id.startswith("run:1"):
-                fallback_run_indices.append(event.get("sequence", 0))
+            if run_id and run_id != primary_run_id and run_id in fallback_run_ids:
+                fallback_run_seqs.append(event.get("sequence", 0))
 
-    if failover_indices and fallback_run_indices:
-        if failover_indices[0] > fallback_run_indices[0]:
+    if failover_seqs and fallback_run_seqs:
+        if failover_seqs[0] > fallback_run_seqs[0]:
             return CheckResult(
                 "CAUSAL_ORDER",
                 "FAIL",
                 "FAILOVER_DECISION_RECORDED after fallback PROVIDER_RUN_RECORDED",
             )
 
-    finding_indices = event_kind_indices.get("FINDING_RECORDED", [])
-    verification_indices = event_kind_indices.get("VERIFICATION_RECORDED", [])
-    if finding_indices and verification_indices:
-        if finding_indices[0] > verification_indices[0]:
+    finding_seqs = event_seqs.get("FINDING_RECORDED", [])
+    verification_seqs = event_seqs.get("VERIFICATION_RECORDED", [])
+    if finding_seqs and verification_seqs:
+        if finding_seqs[0] > verification_seqs[0]:
             return CheckResult(
                 "CAUSAL_ORDER",
                 "FAIL",
@@ -339,28 +355,30 @@ def _check_scope_monotonicity(bundle: dict[str, Any]) -> CheckResult:
     return CheckResult("SCOPE_MONOTONICITY", "PASS")
 
 
-def _check_prohibited_actions(bundle: dict[str, Any]) -> CheckResult:
-    initial_scope = bundle.get("initial_scope") or {}
-    effective_scope = bundle.get("effective_scope") or {}
-
-    prohibited: set[str] = set()
-    prohibited.update(initial_scope.get("prohibited_actions") or [])
-    prohibited.update(effective_scope.get("prohibited_actions") or [])
-
-    if not prohibited:
-        return CheckResult("PROHIBITED_ACTION", "PASS", "no prohibited actions defined")
-
-    allowed_actions: set[str] = set()
-    allowed_actions.update(effective_scope.get("allowed_actions") or [])
-    allowed_actions.update(initial_scope.get("allowed_actions") or [])
-
-    overlap = allowed_actions & prohibited
+def _check_scope_overlap(scope: dict[str, Any], scope_name: str) -> CheckResult | None:
+    allowed = set(scope.get("allowed_actions") or [])
+    prohibited = set(scope.get("prohibited_actions") or [])
+    overlap = allowed & prohibited
     if overlap:
         return CheckResult(
             "PROHIBITED_ACTION",
             "FAIL",
-            f"prohibited actions present in allowed set: {sorted(overlap)}",
+            f"{scope_name} scope has allowed and prohibited overlap: {sorted(overlap)}",
         )
+    return None
+
+
+def _check_prohibited_actions(bundle: dict[str, Any]) -> CheckResult:
+    initial_scope = bundle.get("initial_scope") or {}
+    effective_scope = bundle.get("effective_scope") or {}
+
+    result = _check_scope_overlap(initial_scope, "initial")
+    if result is not None:
+        return result
+
+    result = _check_scope_overlap(effective_scope, "effective")
+    if result is not None:
+        return result
 
     return CheckResult("PROHIBITED_ACTION", "PASS")
 
@@ -370,6 +388,12 @@ def _check_failover_decision(bundle: dict[str, Any]) -> CheckResult:
     failover = bundle.get("failover_decision")
 
     if failover is None:
+        if len(provider_runs) >= 2:
+            return CheckResult(
+                "FAILOVER_DECISION_REQUIRED",
+                "FAIL",
+                "multiple provider runs but failover decision is missing",
+            )
         return CheckResult("FAILOVER_DECISION_REQUIRED", "PASS", "no failover in bundle")
 
     if len(provider_runs) < 2:
@@ -380,6 +404,10 @@ def _check_failover_decision(bundle: dict[str, Any]) -> CheckResult:
         )
 
     trace = bundle.get("trace") or []
+    primary_run_id = _get_primary_run_id(bundle)
+
+    fallback_run_ids = {run.get("run_id") for run in provider_runs[1:]}
+
     failover_event_seq = None
     fallback_run_seq = None
     for event in trace:
@@ -390,16 +418,29 @@ def _check_failover_decision(bundle: dict[str, Any]) -> CheckResult:
         if kind == "PROVIDER_RUN_RECORDED":
             payload = event.get("payload") or {}
             run_id = payload.get("run_id", "")
-            if not run_id.startswith("run:1") and fallback_run_seq is None:
+            if run_id and run_id != primary_run_id and run_id in fallback_run_ids:
                 fallback_run_seq = seq
 
-    if failover_event_seq is not None and fallback_run_seq is not None:
-        if failover_event_seq > fallback_run_seq:
-            return CheckResult(
-                "FAILOVER_DECISION_REQUIRED",
-                "FAIL",
-                "failover decision recorded after fallback execution",
-            )
+    if failover_event_seq is None:
+        return CheckResult(
+            "FAILOVER_DECISION_REQUIRED",
+            "FAIL",
+            "failover decision exists but FAILOVER_DECISION_RECORDED is missing from trace",
+        )
+
+    if fallback_run_seq is None:
+        return CheckResult(
+            "FAILOVER_DECISION_REQUIRED",
+            "FAIL",
+            "failover decision exists but no identified fallback provider run in trace",
+        )
+
+    if failover_event_seq > fallback_run_seq:
+        return CheckResult(
+            "FAILOVER_DECISION_REQUIRED",
+            "FAIL",
+            "failover decision recorded after fallback execution",
+        )
 
     return CheckResult("FAILOVER_DECISION_REQUIRED", "PASS")
 
@@ -416,7 +457,7 @@ def _check_task_identity(bundle: dict[str, Any]) -> CheckResult:
         return CheckResult(
             "TASK_IDENTITY",
             "FAIL",
-            f"fallback normalized_task_hash differs from primary",
+            "fallback normalized_task_hash differs from primary",
         )
 
     return CheckResult("TASK_IDENTITY", "PASS")
@@ -507,7 +548,7 @@ CHECK_ORDER = (
     "FINAL_STATE",
 )
 
-CHECK_FUNCTIONS = {
+CHECK_FUNCTIONS: dict[str, Any] = {
     "BUNDLE_INTEGRITY": _check_bundle_integrity,
     "TRACE_HASH_CHAIN": _check_trace_hash_chain,
     "TEMPORAL_ORDER": _check_temporal_order,
@@ -561,5 +602,5 @@ __all__ = [
     "RECEIPT_SCHEMA",
     "CHECK_ORDER",
     "verify_evidence_bundle",
-    "ReplayVerificationError",
+    "CheckResult",
 ]

@@ -5,6 +5,11 @@ Runs the default TRCP v0.2 scenario end-to-end:
 TRCP simulator -> report -> evidence adapter -> replay verifier -> JSON receipt.
 
 LOCAL_ONLY / SYNTHETIC_ONLY. No network, no providers, no real targets.
+
+Exit codes:
+  0 - verification PASS
+  1 - verification FAIL
+  2 - unexpected error
 """
 import json
 import sys
@@ -19,12 +24,19 @@ from sdk.liminal_trcp.evidence import build_evidence_bundle
 from sdk.liminal_trcp.replay import verify_evidence_bundle
 
 
-def main() -> None:
+def main() -> int:
     report = run_default_scenario()
     bundle = build_evidence_bundle(report)
     receipt = verify_evidence_bundle(bundle)
     print(json.dumps(receipt, sort_keys=True, indent=2))
+    if receipt["result"] != "PASS":
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)

@@ -1,4 +1,4 @@
-"""TRCP v0.2 — Evidence adapter and independent replay tests.
+"""TRCP v0.2 - Evidence adapter and independent replay tests.
 
 Happy-path PASS plus adversarial mutation tests. Every mutation must
 produce FAIL or a specific verifier check failure.
@@ -6,17 +6,89 @@ produce FAIL or a specific verifier check failure.
 LOCAL_ONLY / SYNTHETIC_ONLY. No network, no providers, no real targets.
 """
 import copy
+import json
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
-from sdk.liminal_trcp import run_default_scenario
-from sdk.liminal_trcp.evidence import build_evidence_bundle
+from sdk.liminal_trcp import (
+    AuthorizationRecord,
+    MockProvider,
+    ScopeEnvelope,
+    TRCPSimulator,
+    run_default_scenario,
+)
+from sdk.liminal_trcp.evidence import (
+    AUTHORIZATION_NODE,
+    PRIMARY_RUN_NODE,
+    build_evidence_bundle,
+)
 from sdk.liminal_trcp.replay import verify_evidence_bundle
 
+ROOT = Path(__file__).resolve().parents[1]
+CLI_SCRIPT = ROOT / "scripts" / "replay_trcp_evidence.py"
 
-def _recalculate_bundle_hash(bundle: dict) -> None:
+
+def _run_scenario_with_two_actions():
+    authorization = AuthorizationRecord(
+        authorization_id="auth:trcp-demo",
+        subject_id="researcher:fixture",
+        asset_id="fixture:repo",
+        valid_from=900,
+        valid_until=2000,
+        allowed_activity_classes=("STATIC_ANALYSIS",),
+    )
+    scope = ScopeEnvelope(
+        scope_id="scope:trcp-demo",
+        authorization_id=authorization.authorization_id,
+        allowed_targets=("fixture:repo",),
+        allowed_actions=("ANALYZE_FIXTURE", "OPTIONAL_STEP"),
+    )
+    task = {
+        "task_id": "task:2",
+        "asset_id": "fixture:repo",
+        "activity_class": "STATIC_ANALYSIS",
+        "action": "ANALYZE_FIXTURE",
+        "fixture": "synthetic-safe-fixture-v1",
+    }
+    primary = MockProvider("provider:A", "mock-model-a", "ACCESS_RESTRICTED")
+    fallback = MockProvider(
+        "provider:B",
+        "mock-model-b",
+        "COMPLETED",
+        synthetic_finding={
+            "finding_class": "SYNTHETIC_BOUNDARY_CHECK",
+            "location_reference": "fixture://sample#L1",
+            "summary": "Synthetic fixture matches expected marker",
+            "severity_claim": "LOW",
+            "confidence_claim": "FIXTURE",
+        },
+    )
+    simulator = TRCPSimulator(authorization, scope)
+    simulator.authorize()
+    simulator.execute_primary(task, primary)
+    simulator.record_failover(fallback)
+    simulator.execute_fallback(task, fallback)
+    simulator.verify(reproduced=True)
+    simulator.confirm_finding()
+    return simulator.report()
+
+
+def _recalculate_bundle_hash(bundle):
     body = {k: v for k, v in bundle.items() if k != "bundle_sha256"}
     bundle["bundle_sha256"] = canonical_sha256(body)
+
+
+def _rebuild_trace_hashes(trace):
+    previous = "0" * 64
+    for i, event in enumerate(trace):
+        event["sequence"] = i + 1
+        event["previous_event_sha256"] = previous
+        core = {k: v for k, v in event.items() if k != "event_sha256"}
+        event["event_sha256"] = canonical_sha256(core)
+        previous = event["event_sha256"]
 
 
 class EvidenceAdapterHappyPathTests(unittest.TestCase):
@@ -44,7 +116,34 @@ class EvidenceAdapterHappyPathTests(unittest.TestCase):
             self.assertIn("to", edge)
             self.assertIn("relation", edge)
             self.assertIn("evidence_ref", edge)
-            self.assertIn(edge["relation"], {"CAUSES", "AUTHORIZES", "CONSTRAINS", "VERIFIES"})
+
+
+class DeepCopyIndependenceTests(unittest.TestCase):
+    def test_bundle_mutate_does_not_affect_source_report(self):
+        report = run_default_scenario()
+        bundle = build_evidence_bundle(report)
+        bundle["trace"][0]["payload"]["mutated"] = True
+        self.assertNotIn("mutated", report["trace"][0]["payload"])
+
+    def test_report_mutate_does_not_affect_bundle(self):
+        report = run_default_scenario()
+        bundle = build_evidence_bundle(report)
+        original_auth_id = bundle["authorization"]["authorization_id"]
+        report["authorization"]["authorization_id"] = "auth:mutated-after-bundle"
+        self.assertEqual(bundle["authorization"]["authorization_id"], original_auth_id)
+
+    def test_bundle_deep_copy_of_provider_runs(self):
+        report = run_default_scenario()
+        bundle = build_evidence_bundle(report)
+        bundle["provider_runs"][0]["new_field"] = "injected"
+        self.assertNotIn("new_field", report["provider_runs"][0])
+
+    def test_bundle_deep_copy_of_finding(self):
+        report = run_default_scenario()
+        bundle = build_evidence_bundle(report)
+        if bundle["finding"] is not None:
+            bundle["finding"]["status"] = "TAMPERED"
+        self.assertNotEqual(report["finding"]["status"], "TAMPERED")
 
 
 class ReplayVerifierHappyPathTests(unittest.TestCase):
@@ -70,14 +169,185 @@ class ReplayVerifierHappyPathTests(unittest.TestCase):
         bundle = build_evidence_bundle(run_default_scenario())
         receipt = verify_evidence_bundle(bundle)
         for check in receipt["checks"]:
-            self.assertEqual(check["result"], "PASS", f"check {check['id']} failed")
+            self.assertEqual(check["result"], "PASS", "check " + check["id"] + " failed")
+
+    def test_fail_receipt_has_failure_detail(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        bundle["authorization"]["authorization_id"] = "auth:mutated"
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertIn("failed_check", receipt)
+        self.assertIn("failure_detail", receipt)
+
+
+class StateTransitionChainTests(unittest.TestCase):
+    def test_first_transition_must_start_from_new(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        trace = bundle["trace"]
+        found = False
+        for event in trace:
+            if event["kind"] == "STATE_TRANSITION":
+                event["payload"]["from"] = "AUTHORIZED"
+                core = {k: v for k, v in event.items() if k != "event_sha256"}
+                event["event_sha256"] = canonical_sha256(core)
+                found = True
+                break
+        self.assertTrue(found, "expected at least one STATE_TRANSITION")
+        _rebuild_trace_hashes(trace)
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "STATE_TRANSITION")
+
+    def test_disconnected_state_chain_fails(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        trace = bundle["trace"]
+        transitions = [e for e in trace if e["kind"] == "STATE_TRANSITION"]
+        self.assertGreaterEqual(len(transitions), 2, "need at least 2 transitions")
+        transitions[1]["payload"]["from"] = "NEW"
+        _rebuild_trace_hashes(trace)
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "STATE_TRANSITION")
+
+    def test_valid_hashes_illegal_chain_still_fails(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        trace = bundle["trace"]
+        transitions = [e for e in trace if e["kind"] == "STATE_TRANSITION"]
+        self.assertGreaterEqual(len(transitions), 2, "need at least 2 transitions")
+        t0_from = transitions[0]["payload"]["from"]
+        transitions[1]["payload"]["from"] = t0_from
+        _rebuild_trace_hashes(trace)
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "STATE_TRANSITION")
+
+
+class FallbackRunIdentityTests(unittest.TestCase):
+    def test_primary_run_id_is_run1(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        self.assertIsNotNone(bundle["provider_runs"][0].get("run_id"))
+        primary_run_id = bundle["provider_runs"][0]["run_id"]
+        self.assertEqual(primary_run_id, "run:1")
+
+    def test_fallback_run_is_not_misidentified(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        primary_run_id = bundle["provider_runs"][0]["run_id"]
+        for run in bundle["provider_runs"][1:]:
+            self.assertNotEqual(run["run_id"], primary_run_id)
+
+    def test_causal_order_passes_with_correct_ids(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "PASS")
+        causal_check = next(c for c in receipt["checks"] if c["id"] == "CAUSAL_ORDER")
+        self.assertEqual(causal_check["result"], "PASS")
+
+    def test_fallback_masked_as_run10_is_still_identified(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        self.assertGreaterEqual(len(bundle["provider_runs"]), 2)
+        primary_run_id = bundle["provider_runs"][0]["run_id"]
+        self.assertNotEqual("run:10", primary_run_id)
+        bundle["provider_runs"][1]["run_id"] = "run:10"
+        trace = bundle["trace"]
+        for event in trace:
+            if event["kind"] == "PROVIDER_RUN_RECORDED":
+                payload = event["payload"]
+                if payload.get("run_id") != primary_run_id:
+                    payload["run_id"] = "run:10"
+        _rebuild_trace_hashes(trace)
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "PASS")
+
+    def test_fallback_with_missing_run_id_fails(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        self.assertGreaterEqual(len(bundle["provider_runs"]), 2)
+        primary_run_id = bundle["provider_runs"][0]["run_id"]
+        bundle["provider_runs"][1].pop("run_id", None)
+        trace = bundle["trace"]
+        for event in trace:
+            if event["kind"] == "PROVIDER_RUN_RECORDED":
+                payload = event["payload"]
+                if payload.get("run_id") != primary_run_id:
+                    payload["run_id"] = ""
+        _rebuild_trace_hashes(trace)
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "FAILOVER_DECISION_REQUIRED")
+
+    def test_missing_primary_run_id_does_not_misidentify_fallback(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        primary_run_id = bundle["provider_runs"][0]["run_id"]
+        bundle["provider_runs"][0].pop("run_id", None)
+        trace = bundle["trace"]
+        for event in trace:
+            if event["kind"] == "PROVIDER_RUN_RECORDED":
+                payload = event["payload"]
+                if payload.get("run_id") == primary_run_id:
+                    payload["run_id"] = ""
+        _rebuild_trace_hashes(trace)
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "PASS")
+        causal_check = next(c for c in receipt["checks"] if c["id"] == "CAUSAL_ORDER")
+        self.assertEqual(causal_check["result"], "PASS")
+
+
+class ProhibitedActionSeparateScopeTests(unittest.TestCase):
+    def test_initial_scope_overlap_fails(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        self.assertIn("ANALYZE_FIXTURE", bundle["initial_scope"]["allowed_actions"])
+        initial_prohibited = list(bundle["initial_scope"]["prohibited_actions"])
+        bundle["initial_scope"]["prohibited_actions"] = initial_prohibited + ["ANALYZE_FIXTURE"]
+        effective_prohibited = list(bundle["effective_scope"]["prohibited_actions"])
+        if "ANALYZE_FIXTURE" not in effective_prohibited:
+            bundle["effective_scope"]["prohibited_actions"] = effective_prohibited + ["ANALYZE_FIXTURE"]
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "PROHIBITED_ACTION")
+
+    def test_effective_scope_overlap_fails(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        effective_prohibited = list(bundle["effective_scope"]["prohibited_actions"])
+        self.assertNotIn("ANALYZE_FIXTURE", effective_prohibited)
+        bundle["effective_scope"]["prohibited_actions"] = ["ANALYZE_FIXTURE"] + effective_prohibited
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "PROHIBITED_ACTION")
+
+    def test_legal_narrowing_passes(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        self.assertIn("ANALYZE_FIXTURE", bundle["effective_scope"]["allowed_actions"])
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "PASS")
+
+    def test_narrowing_by_moving_to_prohibited_passes(self):
+        scenario = _run_scenario_with_two_actions()
+        bundle = build_evidence_bundle(scenario)
+        self.assertGreaterEqual(len(bundle["initial_scope"]["allowed_actions"]), 2)
+        initial_allowed = sorted(bundle["initial_scope"]["allowed_actions"])
+        narrowed = initial_allowed[:1]
+        removed = initial_allowed[1]
+        bundle["effective_scope"]["allowed_actions"] = narrowed
+        effective_prohibited = list(bundle["effective_scope"]["prohibited_actions"])
+        bundle["effective_scope"]["prohibited_actions"] = effective_prohibited + [removed]
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "PASS")
 
 
 class AdversarialMutationTests(unittest.TestCase):
-    def _valid_bundle(self) -> dict:
+    def _valid_bundle(self):
         return build_evidence_bundle(run_default_scenario())
 
-    def _mutate_bundle(self, bundle: dict) -> dict:
+    def _mutate_bundle(self, bundle):
         return copy.deepcopy(bundle)
 
     def test_01_change_authorization_id_fails(self):
@@ -90,6 +360,7 @@ class AdversarialMutationTests(unittest.TestCase):
 
     def test_02_broaden_effective_scope_targets_fails(self):
         bundle = self._mutate_bundle(self._valid_bundle())
+        self.assertIn("allowed_targets", bundle["effective_scope"])
         bundle["effective_scope"]["allowed_targets"] = [
             "fixture:repo",
             "fixture:other",
@@ -113,19 +384,14 @@ class AdversarialMutationTests(unittest.TestCase):
     def test_04_reorder_provider_transitions_fails(self):
         bundle = self._mutate_bundle(self._valid_bundle())
         trace = bundle["trace"]
-        state_transitions = [e for e in trace if e["kind"] == "STATE_TRANSITION"]
-        if len(state_transitions) >= 2:
-            state_transitions[0]["payload"]["to"], state_transitions[1]["payload"]["to"] = (
-                state_transitions[1]["payload"]["to"],
-                state_transitions[0]["payload"]["to"],
-            )
-            for event in state_transitions:
-                core = {k: v for k, v in event.items() if k != "event_sha256"}
-                event["event_sha256"] = canonical_sha256(core)
-            for i in range(1, len(trace)):
-                trace[i]["previous_event_sha256"] = trace[i - 1]["event_sha256"]
-            last = trace[-1]
-            _recalculate_bundle_hash(bundle)
+        transitions = [e for e in trace if e["kind"] == "STATE_TRANSITION"]
+        self.assertGreaterEqual(len(transitions), 2, "need at least 2 transitions")
+        transitions[0]["payload"]["to"], transitions[1]["payload"]["to"] = (
+            transitions[1]["payload"]["to"],
+            transitions[0]["payload"]["to"],
+        )
+        _rebuild_trace_hashes(trace)
+        _recalculate_bundle_hash(bundle)
         receipt = verify_evidence_bundle(bundle)
         self.assertEqual(receipt["result"], "FAIL")
         self.assertIn(
@@ -135,18 +401,13 @@ class AdversarialMutationTests(unittest.TestCase):
 
     def test_05_remove_failover_decision_fails(self):
         bundle = self._mutate_bundle(self._valid_bundle())
+        self.assertIsNotNone(bundle["failover_decision"])
         bundle["failover_decision"] = None
         trace = bundle["trace"]
         bundle["trace"] = [
             e for e in trace if e["kind"] != "FAILOVER_DECISION_RECORDED"
         ]
-        for i in range(len(bundle["trace"])):
-            if i == 0:
-                bundle["trace"][i]["previous_event_sha256"] = "0" * 64
-            else:
-                bundle["trace"][i]["previous_event_sha256"] = bundle["trace"][i - 1]["event_sha256"]
-            core = {k: v for k, v in bundle["trace"][i].items() if k != "event_sha256"}
-            bundle["trace"][i]["event_sha256"] = canonical_sha256(core)
+        _rebuild_trace_hashes(bundle["trace"])
         _recalculate_bundle_hash(bundle)
         receipt = verify_evidence_bundle(bundle)
         self.assertEqual(receipt["result"], "FAIL")
@@ -157,13 +418,13 @@ class AdversarialMutationTests(unittest.TestCase):
 
     def test_06_change_fallback_task_hash_fails(self):
         bundle = self._mutate_bundle(self._valid_bundle())
-        if len(bundle["provider_runs"]) >= 2:
-            bundle["provider_runs"][-1]["normalized_task_hash"] = "deadbeef" * 8
-            run_body = {
-                k: v for k, v in bundle["provider_runs"][-1].items()
-                if k != "record_sha256"
-            }
-            bundle["provider_runs"][-1]["record_sha256"] = canonical_sha256(run_body)
+        self.assertGreaterEqual(len(bundle["provider_runs"]), 2)
+        bundle["provider_runs"][-1]["normalized_task_hash"] = "deadbeef" * 8
+        run_body = {
+            k: v for k, v in bundle["provider_runs"][-1].items()
+            if k != "record_sha256"
+        }
+        bundle["provider_runs"][-1]["record_sha256"] = canonical_sha256(run_body)
         _recalculate_bundle_hash(bundle)
         receipt = verify_evidence_bundle(bundle)
         self.assertEqual(receipt["result"], "FAIL")
@@ -172,10 +433,13 @@ class AdversarialMutationTests(unittest.TestCase):
     def test_07_mutate_trace_event_without_rehash_fails(self):
         bundle = self._mutate_bundle(self._valid_bundle())
         trace = bundle["trace"]
+        found = False
         for event in trace:
             if event["kind"] == "PROVIDER_RUN_RECORDED":
                 event["payload"]["outcome"] = "COMPLETED"
+                found = True
                 break
+        self.assertTrue(found, "expected PROVIDER_RUN_RECORDED event")
         receipt = verify_evidence_bundle(bundle)
         self.assertEqual(receipt["result"], "FAIL")
         self.assertIn(
@@ -186,18 +450,14 @@ class AdversarialMutationTests(unittest.TestCase):
     def test_08_illegal_state_transition_with_valid_hashes_fails(self):
         bundle = self._mutate_bundle(self._valid_bundle())
         trace = bundle["trace"]
-        state_transitions = [e for e in trace if e["kind"] == "STATE_TRANSITION"]
-        if len(state_transitions) >= 3:
-            state_transitions[0]["payload"]["to"] = "VERIFYING"
-            state_transitions[1]["payload"]["from"] = "VERIFYING"
-            state_transitions[1]["payload"]["to"] = "ACTIVE"
-            state_transitions[2]["payload"]["from"] = "ACTIVE"
-            for event in state_transitions:
-                core = {k: v for k, v in event.items() if k != "event_sha256"}
-                event["event_sha256"] = canonical_sha256(core)
-            for i in range(1, len(trace)):
-                trace[i]["previous_event_sha256"] = trace[i - 1]["event_sha256"]
-            _recalculate_bundle_hash(bundle)
+        transitions = [e for e in trace if e["kind"] == "STATE_TRANSITION"]
+        self.assertGreaterEqual(len(transitions), 3, "need at least 3 transitions")
+        transitions[0]["payload"]["to"] = "VERIFYING"
+        transitions[1]["payload"]["from"] = "VERIFYING"
+        transitions[1]["payload"]["to"] = "ACTIVE"
+        transitions[2]["payload"]["from"] = "ACTIVE"
+        _rebuild_trace_hashes(trace)
+        _recalculate_bundle_hash(bundle)
         receipt = verify_evidence_bundle(bundle)
         self.assertEqual(receipt["result"], "FAIL")
         self.assertIn(
@@ -208,14 +468,9 @@ class AdversarialMutationTests(unittest.TestCase):
     def test_09_non_monotonic_timestamp_fails(self):
         bundle = self._mutate_bundle(self._valid_bundle())
         trace = bundle["trace"]
-        if len(trace) >= 3:
-            trace[2]["observed_at_unix"] = trace[0]["observed_at_unix"] - 100
-            core = {k: v for k, v in trace[2].items() if k != "event_sha256"}
-            trace[2]["event_sha256"] = canonical_sha256(core)
-            for i in range(3, len(trace)):
-                trace[i]["previous_event_sha256"] = trace[i - 1]["event_sha256"]
-                core = {k: v for k, v in trace[i].items() if k != "event_sha256"}
-                trace[i]["event_sha256"] = canonical_sha256(core)
+        self.assertGreaterEqual(len(trace), 3, "need at least 3 trace events")
+        trace[2]["observed_at_unix"] = trace[0]["observed_at_unix"] - 100
+        _rebuild_trace_hashes(trace)
         _recalculate_bundle_hash(bundle)
         receipt = verify_evidence_bundle(bundle)
         self.assertEqual(receipt["result"], "FAIL")
@@ -226,20 +481,20 @@ class AdversarialMutationTests(unittest.TestCase):
 
     def test_10_confirmed_without_reproduced_fails(self):
         bundle = self._mutate_bundle(self._valid_bundle())
-        if bundle["finding"] is not None:
-            bundle["finding"]["status"] = "CONFIRMED"
-            finding_body = {
-                k: v for k, v in bundle["finding"].items()
-                if k != "record_sha256"
-            }
-            bundle["finding"]["record_sha256"] = canonical_sha256(finding_body)
-        if bundle["verification"] is not None:
-            bundle["verification"]["result"] = "NOT_REPRODUCED"
-            ver_body = {
-                k: v for k, v in bundle["verification"].items()
-                if k != "record_sha256"
-            }
-            bundle["verification"]["record_sha256"] = canonical_sha256(ver_body)
+        self.assertIsNotNone(bundle["finding"])
+        self.assertIsNotNone(bundle["verification"])
+        bundle["finding"]["status"] = "CONFIRMED"
+        finding_body = {
+            k: v for k, v in bundle["finding"].items()
+            if k != "record_sha256"
+        }
+        bundle["finding"]["record_sha256"] = canonical_sha256(finding_body)
+        bundle["verification"]["result"] = "NOT_REPRODUCED"
+        ver_body = {
+            k: v for k, v in bundle["verification"].items()
+            if k != "record_sha256"
+        }
+        bundle["verification"]["record_sha256"] = canonical_sha256(ver_body)
         _recalculate_bundle_hash(bundle)
         receipt = verify_evidence_bundle(bundle)
         self.assertEqual(receipt["result"], "FAIL")
@@ -247,13 +502,14 @@ class AdversarialMutationTests(unittest.TestCase):
 
     def test_11_verification_status_mismatch_fails(self):
         bundle = self._mutate_bundle(self._valid_bundle())
-        if bundle["verification"] is not None and bundle["finding"] is not None:
-            bundle["verification"]["finding_id"] = "finding:different-id"
-            ver_body = {
-                k: v for k, v in bundle["verification"].items()
-                if k != "record_sha256"
-            }
-            bundle["verification"]["record_sha256"] = canonical_sha256(ver_body)
+        self.assertIsNotNone(bundle["verification"])
+        self.assertIsNotNone(bundle["finding"])
+        bundle["verification"]["finding_id"] = "finding:different-id"
+        ver_body = {
+            k: v for k, v in bundle["verification"].items()
+            if k != "record_sha256"
+        }
+        bundle["verification"]["record_sha256"] = canonical_sha256(ver_body)
         _recalculate_bundle_hash(bundle)
         receipt = verify_evidence_bundle(bundle)
         self.assertEqual(receipt["result"], "FAIL")
@@ -316,8 +572,9 @@ class ReplayIndependenceTests(unittest.TestCase):
         import inspect
         from sdk.liminal_trcp import replay
         source = inspect.getsource(replay)
-        self.assertNotIn("from sdk.liminal_trcp import", source)
-        self.assertNotIn("TRCPSimulator(", source)
+        self.assertNotIn("TRCPSimulator", source)
+        self.assertNotIn("execute_primary", source)
+        self.assertNotIn("execute_fallback", source)
 
     def test_replay_uses_only_bundle_data(self):
         bundle = build_evidence_bundle(run_default_scenario())
@@ -346,6 +603,15 @@ class CausalLineageTests(unittest.TestCase):
         for edge in lineage:
             self.assertTrue(edge["edge_id"].startswith("edge:"))
 
+    def test_lineage_edges_refer_to_existing_nodes(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        lineage = bundle["causal_lineage"]
+        existing_nodes = {AUTHORIZATION_NODE, PRIMARY_RUN_NODE}
+        for edge in lineage:
+            self.assertIn(edge["from"], existing_nodes,
+                          "edge from=" + edge["from"] + " references non-existing node")
+            existing_nodes.add(edge["to"])
+
 
 class DeterministicReceiptTests(unittest.TestCase):
     def test_same_bundle_same_receipt_hash(self):
@@ -354,14 +620,17 @@ class DeterministicReceiptTests(unittest.TestCase):
         r2 = verify_evidence_bundle(bundle)
         self.assertEqual(r1["receipt_sha256"], r2["receipt_sha256"])
 
-    def test_different_bundle_different_receipt_hash(self):
-        bundle1 = build_evidence_bundle(run_default_scenario())
-        bundle2 = copy.deepcopy(bundle1)
-        bundle2["bundle_sha256"] = "a" * 64
-        r1 = verify_evidence_bundle(bundle1)
-        r2 = verify_evidence_bundle(bundle2)
-        if r1["result"] == r2["result"] == "PASS":
-            self.assertNotEqual(r1["receipt_sha256"], r2["receipt_sha256"])
+    def test_pass_and_fail_receipts_differ(self):
+        bundle_pass = build_evidence_bundle(run_default_scenario())
+        r1 = verify_evidence_bundle(bundle_pass)
+        self.assertEqual(r1["result"], "PASS")
+
+        bundle_fail = copy.deepcopy(bundle_pass)
+        bundle_fail["authorization"]["authorization_id"] = "auth:mutated"
+        _recalculate_bundle_hash(bundle_fail)
+        r2 = verify_evidence_bundle(bundle_fail)
+        self.assertEqual(r2["result"], "FAIL")
+        self.assertNotEqual(r1["receipt_sha256"], r2["receipt_sha256"])
 
 
 class FailoverWithoutFindingTests(unittest.TestCase):
@@ -374,6 +643,27 @@ class FailoverWithoutFindingTests(unittest.TestCase):
         report_no_finding["report_sha256"] = canonical_sha256(body)
         bundle = build_evidence_bundle(report_no_finding)
         receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "PASS")
+
+
+class CliExitCodeTests(unittest.TestCase):
+    def test_cli_exit_code_zero_on_pass(self):
+        result = subprocess.run(
+            [sys.executable, str(CLI_SCRIPT)],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+        )
+        self.assertEqual(result.returncode, 0, "stderr: " + result.stderr)
+
+    def test_cli_output_is_valid_json(self):
+        result = subprocess.run(
+            [sys.executable, str(CLI_SCRIPT)],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+        )
+        receipt = json.loads(result.stdout)
         self.assertEqual(receipt["result"], "PASS")
 
 

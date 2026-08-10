@@ -579,11 +579,11 @@ Each edge has a deterministic `edge_id`. No UUIDs or random timestamps.
 1. **BUNDLE_INTEGRITY** — bundle SHA-256 matches canonical serialization
 2. **TRACE_HASH_CHAIN** — trace events form a valid SHA-256 chain
 3. **TEMPORAL_ORDER** — timestamps are monotonically non-decreasing
-4. **STATE_TRANSITION** — every state transition is legal per the v0.1 state machine
+4. **STATE_TRANSITION** — transitions form a continuous chain from `NEW` (each `from` matches previous `to`) and each transition is legal per the v0.1 state machine
 5. **CAUSAL_ORDER** — cause precedes effect (failover before fallback, finding before verification)
 6. **AUTHORIZATION_CONTINUITY** — authorization_id is stable across all records
 7. **SCOPE_MONOTONICITY** — effective scope ⊆ initial scope (equal-or-narrower)
-8. **PROHIBITED_ACTION** — prohibited actions never appear in allowed set
+8. **PROHIBITED_ACTION** — within each scope independently, prohibited actions never overlap allowed actions
 9. **FAILOVER_DECISION_REQUIRED** — failover decision exists before fallback execution
 10. **TASK_IDENTITY** — fallback normalized_task_hash matches primary
 11. **VERIFICATION_CLOSURE** — CONFIRMED finding requires REPRODUCED verification
@@ -600,12 +600,25 @@ The verifier produces a receipt:
   "result": "PASS" | "FAIL",
   "source_bundle_sha256": "...",
   "checks": [...],
-  "failed_check": "..."  // only on FAIL
+  "failed_check": "...",       // only on FAIL
+  "failure_detail": "...",     // optional, only on FAIL when detail is non-empty
   "receipt_sha256": "..."
 }
 ```
 
+`failure_detail` is present only when the result is `FAIL` and the triggering check produced a non-empty detail string.
+
 Same bundle → same receipt → same receipt SHA-256.
+
+### 20.4.1 CLI exit code
+
+```bash
+python3 scripts/replay_trcp_evidence.py
+```
+
+- `PASS` → exit code `0`
+- `FAIL` → exit code `1`
+- unexpected error → exit code `2`
 
 ### 20.5 Security boundary
 
