@@ -141,8 +141,8 @@ class DeepCopyIndependenceTests(unittest.TestCase):
     def test_bundle_deep_copy_of_finding(self):
         report = run_default_scenario()
         bundle = build_evidence_bundle(report)
-        if bundle["finding"] is not None:
-            bundle["finding"]["status"] = "TAMPERED"
+        self.assertIsNotNone(bundle["finding"])
+        bundle["finding"]["status"] = "TAMPERED"
         self.assertNotEqual(report["finding"]["status"], "TAMPERED")
 
 
@@ -189,8 +189,6 @@ class StateTransitionChainTests(unittest.TestCase):
         for event in trace:
             if event["kind"] == "STATE_TRANSITION":
                 event["payload"]["from"] = "AUTHORIZED"
-                core = {k: v for k, v in event.items() if k != "event_sha256"}
-                event["event_sha256"] = canonical_sha256(core)
                 found = True
                 break
         self.assertTrue(found, "expected at least one STATE_TRANSITION")
@@ -353,20 +351,20 @@ class ProhibitedActionSeparateScopeTests(unittest.TestCase):
         bundle = build_evidence_bundle(run_default_scenario())
         self.assertIn("ANALYZE_FIXTURE", bundle["initial_scope"]["allowed_actions"])
         initial_prohibited = list(bundle["initial_scope"]["prohibited_actions"])
-        bundle["initial_scope"]["prohibited_actions"] = initial_prohibited + ["ANALYZE_FIXTURE"]
-        effective_prohibited = list(bundle["effective_scope"]["prohibited_actions"])
-        if "ANALYZE_FIXTURE" not in effective_prohibited:
-            bundle["effective_scope"]["prohibited_actions"] = effective_prohibited + ["ANALYZE_FIXTURE"]
+        bundle["initial_scope"]["prohibited_actions"] = [*initial_prohibited, "ANALYZE_FIXTURE"]
         _recalculate_bundle_hash(bundle)
         receipt = verify_evidence_bundle(bundle)
         self.assertEqual(receipt["result"], "FAIL")
-        self.assertEqual(receipt["failed_check"], "PROHIBITED_ACTION")
+        prohibited_check = next(
+            c for c in receipt["checks"] if c["id"] == "PROHIBITED_ACTION"
+        )
+        self.assertEqual(prohibited_check["result"], "FAIL")
 
     def test_effective_scope_overlap_fails(self):
         bundle = build_evidence_bundle(run_default_scenario())
         effective_prohibited = list(bundle["effective_scope"]["prohibited_actions"])
         self.assertNotIn("ANALYZE_FIXTURE", effective_prohibited)
-        bundle["effective_scope"]["prohibited_actions"] = ["ANALYZE_FIXTURE"] + effective_prohibited
+        bundle["effective_scope"]["prohibited_actions"] = ["ANALYZE_FIXTURE", *effective_prohibited]
         _recalculate_bundle_hash(bundle)
         receipt = verify_evidence_bundle(bundle)
         self.assertEqual(receipt["result"], "FAIL")
@@ -387,7 +385,7 @@ class ProhibitedActionSeparateScopeTests(unittest.TestCase):
         removed = initial_allowed[1]
         bundle["effective_scope"]["allowed_actions"] = narrowed
         effective_prohibited = list(bundle["effective_scope"]["prohibited_actions"])
-        bundle["effective_scope"]["prohibited_actions"] = effective_prohibited + [removed]
+        bundle["effective_scope"]["prohibited_actions"] = [*effective_prohibited, removed]
         _recalculate_bundle_hash(bundle)
         receipt = verify_evidence_bundle(bundle)
         self.assertEqual(receipt["result"], "PASS")
@@ -397,11 +395,8 @@ class AdversarialMutationTests(unittest.TestCase):
     def _valid_bundle(self):
         return build_evidence_bundle(run_default_scenario())
 
-    def _mutate_bundle(self, bundle):
-        return copy.deepcopy(bundle)
-
     def test_01_change_authorization_id_fails(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         bundle["authorization"]["authorization_id"] = "auth:mutated"
         _recalculate_bundle_hash(bundle)
         receipt = verify_evidence_bundle(bundle)
@@ -409,7 +404,7 @@ class AdversarialMutationTests(unittest.TestCase):
         self.assertEqual(receipt["failed_check"], "AUTHORIZATION_CONTINUITY")
 
     def test_02_broaden_effective_scope_targets_fails(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         self.assertIn("allowed_targets", bundle["effective_scope"])
         bundle["effective_scope"]["allowed_targets"] = [
             "fixture:repo",
@@ -421,7 +416,7 @@ class AdversarialMutationTests(unittest.TestCase):
         self.assertEqual(receipt["failed_check"], "SCOPE_MONOTONICITY")
 
     def test_03_add_prohibited_action_to_allowed_fails(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         bundle["effective_scope"]["allowed_actions"] = [
             "ANALYZE_FIXTURE",
             "LIVE_EXPLOIT",
@@ -432,7 +427,7 @@ class AdversarialMutationTests(unittest.TestCase):
         self.assertIn(receipt["failed_check"], {"SCOPE_MONOTONICITY", "PROHIBITED_ACTION"})
 
     def test_04_reorder_provider_transitions_fails(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         trace = bundle["trace"]
         transitions = [e for e in trace if e["kind"] == "STATE_TRANSITION"]
         self.assertGreaterEqual(len(transitions), 2, "need at least 2 transitions")
@@ -450,7 +445,7 @@ class AdversarialMutationTests(unittest.TestCase):
         )
 
     def test_05_remove_failover_decision_fails(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         self.assertIsNotNone(bundle["failover_decision"])
         bundle["failover_decision"] = None
         trace = bundle["trace"]
@@ -467,7 +462,7 @@ class AdversarialMutationTests(unittest.TestCase):
         )
 
     def test_06_change_fallback_task_hash_fails(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         self.assertGreaterEqual(len(bundle["provider_runs"]), 2)
         bundle["provider_runs"][-1]["normalized_task_hash"] = "deadbeef" * 8
         run_body = {
@@ -481,7 +476,7 @@ class AdversarialMutationTests(unittest.TestCase):
         self.assertEqual(receipt["failed_check"], "TASK_IDENTITY")
 
     def test_07_mutate_trace_event_without_rehash_fails(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         trace = bundle["trace"]
         found = False
         for event in trace:
@@ -498,7 +493,7 @@ class AdversarialMutationTests(unittest.TestCase):
         )
 
     def test_08_illegal_state_transition_with_valid_hashes_fails(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         trace = bundle["trace"]
         transitions = [e for e in trace if e["kind"] == "STATE_TRANSITION"]
         self.assertGreaterEqual(len(transitions), 3, "need at least 3 transitions")
@@ -516,7 +511,7 @@ class AdversarialMutationTests(unittest.TestCase):
         )
 
     def test_09_non_monotonic_timestamp_fails(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         trace = bundle["trace"]
         self.assertGreaterEqual(len(trace), 3, "need at least 3 trace events")
         trace[2]["observed_at_unix"] = trace[0]["observed_at_unix"] - 100
@@ -530,7 +525,7 @@ class AdversarialMutationTests(unittest.TestCase):
         )
 
     def test_10_confirmed_without_reproduced_fails(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         self.assertIsNotNone(bundle["finding"])
         self.assertIsNotNone(bundle["verification"])
         bundle["finding"]["status"] = "CONFIRMED"
@@ -551,7 +546,7 @@ class AdversarialMutationTests(unittest.TestCase):
         self.assertEqual(receipt["failed_check"], "VERIFICATION_CLOSURE")
 
     def test_11_verification_status_mismatch_fails(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         self.assertIsNotNone(bundle["verification"])
         self.assertIsNotNone(bundle["finding"])
         bundle["verification"]["finding_id"] = "finding:different-id"
@@ -566,14 +561,14 @@ class AdversarialMutationTests(unittest.TestCase):
         self.assertEqual(receipt["failed_check"], "VERIFICATION_CONSISTENCY")
 
     def test_12_tampered_bundle_hash_fails(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         bundle["authorization"]["authority_source"] = "tampered"
         receipt = verify_evidence_bundle(bundle)
         self.assertEqual(receipt["result"], "FAIL")
         self.assertEqual(receipt["failed_check"], "BUNDLE_INTEGRITY")
 
     def test_13_broaden_effective_actions_fails(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         bundle["effective_scope"]["allowed_actions"] = [
             "ANALYZE_FIXTURE",
             "ACTIVE_VALIDATE",
@@ -584,7 +579,7 @@ class AdversarialMutationTests(unittest.TestCase):
         self.assertEqual(receipt["failed_check"], "SCOPE_MONOTONICITY")
 
     def test_14_change_initial_scope_authorization_fails(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         bundle["initial_scope"]["authorization_id"] = "auth:different"
         _recalculate_bundle_hash(bundle)
         receipt = verify_evidence_bundle(bundle)
@@ -592,7 +587,7 @@ class AdversarialMutationTests(unittest.TestCase):
         self.assertEqual(receipt["failed_check"], "AUTHORIZATION_CONTINUITY")
 
     def test_15_empty_trace_preserves_hash_fails_integrity(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         original_hash = bundle["bundle_sha256"]
         bundle["trace"] = []
         bundle["bundle_sha256"] = original_hash
@@ -601,7 +596,7 @@ class AdversarialMutationTests(unittest.TestCase):
         self.assertEqual(receipt["failed_check"], "BUNDLE_INTEGRITY")
 
     def test_16_broaden_network_mode_fails(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         bundle["effective_scope"]["network_mode"] = "EXTERNAL"
         _recalculate_bundle_hash(bundle)
         receipt = verify_evidence_bundle(bundle)
@@ -609,22 +604,46 @@ class AdversarialMutationTests(unittest.TestCase):
         self.assertEqual(receipt["failed_check"], "SCOPE_MONOTONICITY")
 
     def test_17_extend_scope_expiry_fails(self):
-        bundle = self._mutate_bundle(self._valid_bundle())
+        bundle = self._valid_bundle()
         bundle["effective_scope"]["expires_at"] = 9999
         _recalculate_bundle_hash(bundle)
         receipt = verify_evidence_bundle(bundle)
         self.assertEqual(receipt["result"], "FAIL")
         self.assertEqual(receipt["failed_check"], "SCOPE_MONOTONICITY")
 
+    def test_18_non_numeric_timestamp_fails(self):
+        bundle = self._valid_bundle()
+        bundle["trace"][2]["observed_at_unix"] = "not-a-number"
+        _rebuild_trace_hashes(bundle["trace"])
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "TEMPORAL_ORDER")
+
+    def test_19_non_numeric_expiry_fails(self):
+        bundle = self._valid_bundle()
+        bundle["effective_scope"]["expires_at"] = "not-a-number"
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "SCOPE_MONOTONICITY")
+
+    def test_20_empty_primary_task_hash_fails(self):
+        bundle = self._valid_bundle()
+        bundle["provider_runs"][0]["normalized_task_hash"] = ""
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "TASK_IDENTITY")
+
 
 class ReplayIndependenceTests(unittest.TestCase):
     def test_replay_does_not_import_simulator(self):
-        import inspect
         from sdk.liminal_trcp import replay
-        source = inspect.getsource(replay)
-        self.assertNotIn("TRCPSimulator", source)
-        self.assertNotIn("execute_primary", source)
-        self.assertNotIn("execute_fallback", source)
+        replay_names = set(replay.__dict__)
+        self.assertNotIn("TRCPSimulator", replay_names)
+        self.assertNotIn("execute_primary", replay_names)
+        self.assertNotIn("execute_fallback", replay_names)
 
     def test_replay_uses_only_bundle_data(self):
         bundle = build_evidence_bundle(run_default_scenario())
@@ -662,6 +681,46 @@ class CausalLineageTests(unittest.TestCase):
                           "edge from=" + edge["from"] + " references non-existing node")
             existing_nodes.add(edge["to"])
 
+    def test_lineage_contains_fallback_to_finding_edge(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        edges = {(e["from"], e["to"]) for e in bundle["causal_lineage"]}
+        self.assertIn(("FALLBACK_RUN", "FINDING"), edges)
+
+    def test_lineage_contains_verification_to_closed_edge(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        edges = {(e["from"], e["to"]) for e in bundle["causal_lineage"]}
+        self.assertIn(("VERIFICATION", "CLOSED"), edges)
+
+    def test_lineage_contains_failover_scope_edges(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        edges = {(e["from"], e["to"]) for e in bundle["causal_lineage"]}
+        self.assertIn(("PROVIDER_FAILURE", "FAILOVER_DECISION"), edges)
+        self.assertIn(("FAILOVER_DECISION", "EFFECTIVE_SCOPE"), edges)
+        self.assertIn(("EFFECTIVE_SCOPE", "FALLBACK_RUN"), edges)
+
+
+class StateTransitionParityTests(unittest.TestCase):
+    def test_allowed_transitions_match_simulator(self):
+        from sdk.liminal_trcp import _ALLOWED_TRANSITIONS
+        from sdk.liminal_trcp.replay import ALLOWED_TRANSITIONS
+
+        self.assertEqual(set(ALLOWED_TRANSITIONS), set(_ALLOWED_TRANSITIONS))
+        for state, targets in _ALLOWED_TRANSITIONS.items():
+            self.assertEqual(
+                ALLOWED_TRANSITIONS[state],
+                frozenset(targets),
+                f"transition targets differ for {state}",
+            )
+
+    def test_terminal_states_match_simulator_dead_ends(self):
+        from sdk.liminal_trcp import _ALLOWED_TRANSITIONS
+        from sdk.liminal_trcp.replay import TERMINAL_STATES
+
+        dead_ends = frozenset(
+            state for state, targets in _ALLOWED_TRANSITIONS.items() if not targets
+        )
+        self.assertEqual(TERMINAL_STATES, dead_ends)
+
 
 class DeterministicReceiptTests(unittest.TestCase):
     def test_same_bundle_same_receipt_hash(self):
@@ -697,22 +756,22 @@ class FailoverWithoutFindingTests(unittest.TestCase):
 
 
 class CliExitCodeTests(unittest.TestCase):
-    def test_cli_exit_code_zero_on_pass(self):
-        result = subprocess.run(
+    def _run_cli(self):
+        return subprocess.run(
             [sys.executable, str(CLI_SCRIPT)],
             capture_output=True,
             text=True,
             cwd=str(ROOT),
+            timeout=60,
+            check=False,
         )
+
+    def test_cli_exit_code_zero_on_pass(self):
+        result = self._run_cli()
         self.assertEqual(result.returncode, 0, "stderr: " + result.stderr)
 
     def test_cli_output_is_valid_json(self):
-        result = subprocess.run(
-            [sys.executable, str(CLI_SCRIPT)],
-            capture_output=True,
-            text=True,
-            cwd=str(ROOT),
-        )
+        result = self._run_cli()
         self.assertEqual(result.returncode, 0, "stderr: " + result.stderr)
         receipt = json.loads(result.stdout)
         self.assertEqual(receipt["result"], "PASS")

@@ -223,6 +223,12 @@ def _check_temporal_order(bundle: dict[str, Any]) -> CheckResult:
                 "FAIL",
                 f"event {idx}: missing observed_at_unix",
             )
+        if not isinstance(ts, (int, float)):
+            return CheckResult(
+                "TEMPORAL_ORDER",
+                "FAIL",
+                f"event {idx}: non-numeric observed_at_unix ({ts!r})",
+            )
         if prev_ts is not None and ts < prev_ts:
             return CheckResult(
                 "TEMPORAL_ORDER",
@@ -345,6 +351,12 @@ def _check_scope_monotonicity(bundle: dict[str, Any]) -> CheckResult:
 
     initial_expiry = initial.get("expires_at", 0)
     effective_expiry = effective.get("expires_at", 0)
+    if not isinstance(initial_expiry, (int, float)) or not isinstance(effective_expiry, (int, float)):
+        return CheckResult(
+            "SCOPE_MONOTONICITY",
+            "FAIL",
+            f"non-numeric expiry: initial={initial_expiry!r} effective={effective_expiry!r}",
+        )
     if effective_expiry > initial_expiry:
         return CheckResult(
             "SCOPE_MONOTONICITY",
@@ -456,6 +468,12 @@ def _check_task_identity(bundle: dict[str, Any]) -> CheckResult:
         return CheckResult("TASK_IDENTITY", "PASS", "single provider run")
 
     primary_hash = provider_runs[0].get("normalized_task_hash", "")
+    if not primary_hash:
+        return CheckResult(
+            "TASK_IDENTITY",
+            "FAIL",
+            "primary provider run has empty normalized_task_hash",
+        )
 
     for index, run in enumerate(provider_runs[1:], start=2):
         if run.get("normalized_task_hash", "") != primary_hash:
@@ -578,7 +596,10 @@ def verify_evidence_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
 
     for check_id in CHECK_ORDER:
         check_fn = CHECK_FUNCTIONS[check_id]
-        result = check_fn(bundle)
+        try:
+            result = check_fn(bundle)
+        except Exception as exc:  # noqa: BLE001 - verifier must fail closed
+            result = CheckResult(check_id, "FAIL", f"verifier error: {exc}")
         checks.append(result.as_dict())
         if result.result == "FAIL" and failed_check_id is None:
             failed_check_id = check_id
@@ -604,8 +625,8 @@ def verify_evidence_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
-    "RECEIPT_SCHEMA",
     "CHECK_ORDER",
-    "verify_evidence_bundle",
     "CheckResult",
+    "RECEIPT_SCHEMA",
+    "verify_evidence_bundle",
 ]
