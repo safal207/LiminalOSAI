@@ -64,7 +64,8 @@ PYTHON_TESTS := \
 	tests/test_trace_visualizer.py \
 	tests/test_pulse_kernel_cli.py \
 	tests/test_trcp_simulator.py \
-	tests/test_trcp_codex_review.py
+	tests/test_trcp_codex_review.py \
+	tests/test_trcp_evidence_replay.py
 
 all: $(TARGET) $(SUBSTRATE_TARGET)
 
@@ -97,7 +98,7 @@ else
 	rm -f $(ALL_OBJS) $(TARGET) $(SUBSTRATE_TARGET)
 endif
 
-.PHONY: all clean check test test-repo verify-core rebirth report report-metabolic long-run-diagnostics trcp-test trcp-sim
+.PHONY: all clean check test test-repo verify-core rebirth report report-metabolic long-run-diagnostics trcp-test trcp-sim trcp-replay
 
 check: $(TARGET) $(SUBSTRATE_TARGET)
 	@echo "🧪 Running smoke checks..."
@@ -123,10 +124,13 @@ test-repo:
 	@python3 -m unittest tests/test_repo_hygiene.py -v
 
 trcp-test:
-	@python3 -m unittest tests/test_trcp_simulator.py tests/test_trcp_codex_review.py -v
+	@python3 -m unittest tests/test_trcp_simulator.py tests/test_trcp_codex_review.py tests/test_trcp_evidence_replay.py -v
 
 trcp-sim:
 	@python3 scripts/run_trcp_simulator.py
+
+trcp-replay:
+	@python3 scripts/replay_trcp_evidence.py
 
 verify-core:
 	@bash scripts/verify_core.sh

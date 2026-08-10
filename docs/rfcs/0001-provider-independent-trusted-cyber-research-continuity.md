@@ -503,7 +503,20 @@ TRCP in this repository is an experimental protocol and simulator. It is not a p
 - [x] Experimental-scope boundary is explicit.
 - [x] Deterministic replay and hash-chain behavior are tested.
 
-## 18. Next hardening work
+## 18. v0.2 acceptance criteria
+
+- [x] Evidence adapter builds provider-neutral bundle from v0.1 report
+- [x] Bundle is deterministically serialized
+- [x] Causal lineage is explicit and deterministic
+- [x] Replay verifier does not use TRCPSimulator execution methods
+- [x] Replay verifier checks 13 semantic invariants
+- [x] Receipt is deterministic with stable SHA-256
+- [x] 17 adversarial mutation tests fail verification
+- [x] LOCAL_ONLY / SYNTHETIC_ONLY boundary preserved
+- [x] CLI: `make trcp-replay`
+- [x] Existing v0.1 tests still pass
+
+## 19. Next hardening work
 
 The first local deterministic simulator now exists. Follow-up work should focus on hardening rather than creating the simulator again:
 
@@ -515,7 +528,112 @@ The first local deterministic simulator now exists. Follow-up work should focus 
 6. define a production-boundary review before any live-provider integration is considered;
 7. keep real cybersecurity targets and live exploitation out of this repository unless separately authorized, designed, and reviewed.
 
-## 19. References
+## 20. TRCP v0.2 — Evidence adapter and independent replay
+
+v0.2 adds an **evidence adapter** and an **independent replay verifier** on top of the v0.1 simulator. It does not modify v0.1 execution logic.
+
+### 20.1 Evidence adapter
+
+`sdk/liminal_trcp/evidence.py` accepts a completed v0.1 report and produces a provider-neutral evidence bundle:
+
+```text
+{
+  "schema": "liminal-trcp-evidence-v0.2",
+  "source_report_sha256": "...",
+  "authorization": {...},
+  "initial_scope": {...},
+  "effective_scope": {...},
+  "provider_runs": [...],
+  "failover_decision": {...},
+  "finding": {...} | null,
+  "verification": {...} | null,
+  "trace": [...],
+  "causal_lineage": [...],
+  "bundle_sha256": "..."
+}
+```
+
+The bundle is deterministically serialized. Same input produces the same bundle and the same `bundle_sha256`.
+
+### 20.2 Causal lineage
+
+The evidence bundle explicitly records causal edges:
+
+```text
+AUTHORIZATION -> PRIMARY_RUN
+PRIMARY_RUN -> PROVIDER_FAILURE
+PROVIDER_FAILURE -> FAILOVER_DECISION
+FAILOVER_DECISION -> EFFECTIVE_SCOPE
+EFFECTIVE_SCOPE -> FALLBACK_RUN
+FALLBACK_RUN -> FINDING
+FINDING -> VERIFICATION
+VERIFICATION -> CLOSED
+```
+
+Each edge has a deterministic `edge_id`. No UUIDs or random timestamps.
+
+### 20.3 Independent replay verifier
+
+`sdk/liminal_trcp/replay.py` validates evidence bundles **without** using `TRCPSimulator` execution methods. The verifier checks invariants from the bundle alone:
+
+1. **BUNDLE_INTEGRITY** — bundle SHA-256 matches canonical serialization
+2. **TRACE_HASH_CHAIN** — trace events form a valid SHA-256 chain
+3. **TEMPORAL_ORDER** — timestamps are monotonically non-decreasing
+4. **STATE_TRANSITION** — every state transition is legal per the v0.1 state machine
+5. **CAUSAL_ORDER** — cause precedes effect (failover before fallback, finding before verification)
+6. **AUTHORIZATION_CONTINUITY** — authorization_id is stable across all records
+7. **SCOPE_MONOTONICITY** — effective scope ⊆ initial scope (equal-or-narrower)
+8. **PROHIBITED_ACTION** — prohibited actions never appear in allowed set
+9. **FAILOVER_DECISION_REQUIRED** — failover decision exists before fallback execution
+10. **TASK_IDENTITY** — fallback normalized_task_hash matches primary
+11. **VERIFICATION_CLOSURE** — CONFIRMED finding requires REPRODUCED verification
+12. **VERIFICATION_CONSISTENCY** — verification finding_id matches finding
+13. **FINAL_STATE** — final state is terminal
+
+### 20.4 Deterministic verification receipt
+
+The verifier produces a receipt:
+
+```text
+{
+  "schema": "liminal-trcp-replay-receipt-v0.2",
+  "result": "PASS" | "FAIL",
+  "source_bundle_sha256": "...",
+  "checks": [...],
+  "failed_check": "..."  // only on FAIL
+  "receipt_sha256": "..."
+}
+```
+
+Same bundle → same receipt → same receipt SHA-256.
+
+### 20.5 Security boundary
+
+> Replay validates evidence produced by the experimental local simulator.
+> It does not establish a production security boundary.
+
+v0.2 remains **LOCAL_ONLY** and **SYNTHETIC_ONLY**. No live providers, no network, no real targets.
+
+### 20.6 Tests
+
+`tests/test_trcp_evidence_replay.py` covers:
+
+- Happy-path PASS
+- 17 adversarial mutation tests (each must produce FAIL)
+- Deterministic receipt verification
+- Independence from simulator execution methods
+- Causal lineage integrity
+
+### 20.7 CLI
+
+```bash
+python3 scripts/replay_trcp_evidence.py
+make trcp-replay
+```
+
+Runs the full pipeline: simulator → report → evidence → replay → receipt.
+
+## 21. References
 
 - OpenAI, **Introducing Trusted Access for Cyber**: https://openai.com/index/trusted-access-for-cyber/
 - OpenAI Help Center, **Trusted Access for Cyber Overview**: https://help.openai.com/en/articles/20001258-trusted-access-for-cyber
