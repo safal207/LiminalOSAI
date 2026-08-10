@@ -7,6 +7,7 @@ effective scope, verification, and hash-chained evidence lineage.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Mapping
 
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
@@ -32,7 +33,7 @@ FINDING_STATUSES = frozenset({
     "REMEDIATED",
 })
 
-AUTHORITY = {
+AUTHORITY = MappingProxyType({
     "mode": "local_deterministic_simulation_only",
     "external_network": False,
     "live_targets": False,
@@ -41,11 +42,11 @@ AUTHORITY = {
     "provider_api_calls": False,
     "automatic_disclosure": False,
     "data_handling_class": "SYNTHETIC_ONLY",
-}
+})
 
 _ALLOWED_TRANSITIONS = {
     "NEW": frozenset({"AUTHORIZED"}),
-    "AUTHORIZED": frozenset({"ACTIVE"}),
+    "AUTHORIZED": frozenset({"ACTIVE", "AUTH_EXPIRED", "SCOPE_INVALID"}),
     "ACTIVE": frozenset({"VERIFYING", "DEGRADED", "ABORTED"}),
     "DEGRADED": frozenset({"FAILOVER_PENDING"}),
     "FAILOVER_PENDING": frozenset({
@@ -138,6 +139,9 @@ class ScopeEnvelope:
             raise TRCPError("scope has expired")
         if not self.allowed_actions:
             raise TRCPError("scope must allow at least one action")
+        overlap = set(self.allowed_actions) & set(self.prohibited_actions)
+        if overlap:
+            raise TRCPError("scope cannot both allow and prohibit the same action")
 
     def permission_view(self) -> dict[str, Any]:
         """Return permission semantics excluding record identity such as scope_id."""
@@ -228,7 +232,7 @@ class TRCPSimulator:
         previous = self.trace[-1]["event_sha256"] if self.trace else "0" * 64
         core = {
             "sequence": len(self.trace) + 1,
-            "observed_at_unix": 1000 + len(self.trace),
+            "observed_at_unix": self.now_unix,
             "kind": kind,
             "state": self.state,
             "payload": dict(payload),
@@ -271,6 +275,8 @@ class TRCPSimulator:
             raise TRCPError("task asset is outside scope")
         if task["activity_class"] not in self.authorization.allowed_activity_classes:
             raise TRCPError("task activity class is outside authorization")
+        if task["action"] in active_scope.prohibited_actions:
+            raise TRCPError("task action is explicitly prohibited by scope")
         if task["action"] not in active_scope.allowed_actions:
             raise TRCPError("task action is outside scope")
         if active_scope.network_mode != "LOCAL_ONLY":
@@ -288,8 +294,8 @@ class TRCPSimulator:
             "scope_id": self.scope.scope_id,
             "provider_id": provider.provider_id,
             "model_id": provider.model_id,
-            "started_at": 1100 + len(self.provider_runs) * 10,
-            "ended_at": 1101 + len(self.provider_runs) * 10,
+            "started_at": self.now_unix,
+            "ended_at": self.now_unix,
             "normalized_task_hash": normalized_task_hash,
             "provider_request_reference": f"mock://{provider.provider_id}/{len(self.provider_runs) + 1}",
             "outcome": output["outcome"],
@@ -300,8 +306,18 @@ class TRCPSimulator:
     def execute_primary(self, task: Mapping[str, Any], provider: MockProvider) -> dict[str, Any]:
         if self.state != "AUTHORIZED":
             raise TRCPError("primary execution requires AUTHORIZED state")
-        self.authorization.validate(self.now_unix)
-        normalized_task_hash = self._validate_task(task)
+        try:
+            self.authorization.validate(self.now_unix)
+        except TRCPError as exc:
+            self._fail_failover("AUTH_EXPIRED", "authorization_expired_before_primary", str(exc))
+        try:
+            self.scope.validate(self.authorization, self.now_unix)
+        except TRCPError as exc:
+            self._fail_failover("SCOPE_INVALID", "scope_invalid_before_primary", str(exc))
+        try:
+            normalized_task_hash = self._validate_task(task)
+        except TRCPError as exc:
+            self._fail_failover("SCOPE_INVALID", "primary_task_outside_effective_scope", str(exc))
         self._transition("ACTIVE", "primary_provider_started")
         output = provider.run(normalized_task_hash)
         run = self._provider_run_record(provider, normalized_task_hash, output)
@@ -390,7 +406,7 @@ class TRCPSimulator:
             "sensitive_artifacts_minimized": sensitive_artifacts_minimized,
             "human_approval_required": require_human_approval,
             "human_approval_reference": human_approval_reference if require_human_approval else None,
-            "created_at": 1200,
+            "created_at": self.now_unix,
         }
         self.failover_record = {**body, "record_sha256": canonical_sha256(body)}
         self._append("FAILOVER_DECISION_RECORDED", self.failover_record)
@@ -407,11 +423,19 @@ class TRCPSimulator:
             provider.provider_id != self.failover_record["new_provider_id"]
             or provider.model_id != self.failover_record["new_model_id"]
         ):
-            self._fail_failover("ABORTED", "fallback_provider_mismatch", "fallback provider does not match FailoverDecisionRecord")
+            self._fail_failover(
+                "ABORTED",
+                "fallback_provider_mismatch",
+                "fallback provider does not match FailoverDecisionRecord",
+            )
         try:
             self.authorization.validate(self.now_unix)
         except TRCPError as exc:
             self._fail_failover("AUTH_EXPIRED", "authorization_expired_before_fallback", str(exc))
+        try:
+            self.scope.validate(self.authorization, self.now_unix)
+        except TRCPError as exc:
+            self._fail_failover("SCOPE_INVALID", "effective_scope_invalid_before_fallback", str(exc))
         try:
             normalized_task_hash = self._validate_task(task, self.scope)
         except TRCPError as exc:
@@ -456,16 +480,16 @@ class TRCPSimulator:
             **normalized,
             "evidence_references": [f"sha256:{output['provider_output_sha256']}"],
             "status": "UNVERIFIED",
-            "created_at": 1300,
+            "created_at": self.now_unix,
         }
         self.finding = {**body, "record_sha256": canonical_sha256(body)}
         self._append("FINDING_RECORDED", self.finding)
 
     def verify(self, *, reproduced: bool) -> dict[str, Any]:
-        if self.state != "VERIFYING":
-            raise TRCPError("verification requires VERIFYING state")
         if self.verification is not None:
             raise TRCPError("verification has already been recorded for this finding")
+        if self.state != "VERIFYING":
+            raise TRCPError("verification requires VERIFYING state")
         if self.finding is None:
             self._transition("CLOSED", "no_finding_to_verify")
             return {}
@@ -480,7 +504,7 @@ class TRCPSimulator:
             "evidence_references": [
                 f"sha256:{canonical_sha256({'fixture': 'trcp-verifier-v1', 'result': result})}"
             ],
-            "performed_at": 1400,
+            "performed_at": self.now_unix,
         }
         self.verification = {**body, "record_sha256": canonical_sha256(body)}
         finding_body = {key: value for key, value in self.finding.items() if key != "record_sha256"}
@@ -488,15 +512,17 @@ class TRCPSimulator:
         self.finding = {**finding_body, "record_sha256": canonical_sha256(finding_body)}
         self._append("VERIFICATION_RECORDED", self.verification)
         self._append("FINDING_STATUS_UPDATED", {"finding_id": self.finding["finding_id"], "status": result})
+        if not reproduced:
+            self._transition("CLOSED", "finding_not_reproduced")
         return self.verification
 
     def confirm_finding(self) -> None:
-        if self.state != "VERIFYING":
-            raise TRCPError("finding confirmation requires VERIFYING state")
         if self.finding is None:
             raise TRCPError("no finding exists")
         if self.verification is None or self.verification["result"] != "REPRODUCED":
             raise TRCPError("finding cannot become CONFIRMED without reproduced verification")
+        if self.state != "VERIFYING":
+            raise TRCPError("finding confirmation requires VERIFYING state")
         body = {key: value for key, value in self.finding.items() if key != "record_sha256"}
         body["status"] = "CONFIRMED"
         self.finding = {**body, "record_sha256": canonical_sha256(body)}
