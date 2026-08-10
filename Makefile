@@ -45,6 +45,27 @@ LONG_TRACE_LOG := $(LONG_TRACE_DIR)/liminal_core_long_run.log
 LONG_TRACE_SUMMARY := $(LONG_TRACE_DIR)/liminal_core_long_run.txt
 LONG_TRACE_JSON := $(LONG_TRACE_DIR)/liminal_core_long_run.json
 
+PYTHON_TESTS := \
+	tests/test_liminal_evidence_advisor.py \
+	tests/test_chatgpt_liminal_adapter.py \
+	tests/test_chatgpt_conversation_normalizer.py \
+	tests/test_chatgpt_live_session_exporter.py \
+	tests/test_chatgpt_session_recorder.py \
+	tests/test_chatgpt_host_adapter.py \
+	tests/test_chatgpt_github_agent_bridge.py \
+	tests/test_chatgpt_connected_github_runtime.py \
+	tests/test_chatgpt_github_transaction_orchestrator.py \
+	tests/test_chatgpt_github_transaction_policy.py \
+	tests/test_chatgpt_signed_governance_capsule.py \
+	tests/test_chatgpt_identity_attestation.py \
+	tests/test_chatgpt_portable_action_receipt.py \
+	tests/test_post_sandbox_phase0_contracts.py \
+	tests/test_capability_broker_phase1.py \
+	tests/test_trace_visualizer.py \
+	tests/test_pulse_kernel_cli.py \
+	tests/test_trcp_simulator.py \
+	tests/test_trcp_codex_review.py
+
 all: $(TARGET) $(SUBSTRATE_TARGET)
 
 ifeq ($(OS),Windows_NT)
@@ -76,7 +97,7 @@ else
 	rm -f $(ALL_OBJS) $(TARGET) $(SUBSTRATE_TARGET)
 endif
 
-.PHONY: all clean check test test-repo verify-core rebirth report report-metabolic long-run-diagnostics
+.PHONY: all clean check test test-repo verify-core rebirth report report-metabolic long-run-diagnostics trcp-test trcp-sim
 
 check: $(TARGET) $(SUBSTRATE_TARGET)
 	@echo "🧪 Running smoke checks..."
@@ -96,10 +117,16 @@ test: $(TARGET)
 	@build/tests/test_anticipation_v2
 	@build/tests/test_kernel_runtime
 	@build/tests/test_kernel_context
-	@python3 -m unittest tests/test_liminal_evidence_advisor.py tests/test_chatgpt_liminal_adapter.py tests/test_chatgpt_conversation_normalizer.py tests/test_chatgpt_live_session_exporter.py tests/test_chatgpt_session_recorder.py tests/test_chatgpt_host_adapter.py tests/test_chatgpt_github_agent_bridge.py tests/test_chatgpt_connected_github_runtime.py tests/test_chatgpt_github_transaction_orchestrator.py tests/test_chatgpt_github_transaction_policy.py tests/test_chatgpt_signed_governance_capsule.py tests/test_chatgpt_identity_attestation.py tests/test_chatgpt_portable_action_receipt.py tests/test_post_sandbox_phase0_contracts.py tests/test_capability_broker_phase1.py tests/test_trace_visualizer.py tests/test_pulse_kernel_cli.py -v
+	@python3 -m unittest $(PYTHON_TESTS) -v
 
 test-repo:
 	@python3 -m unittest tests/test_repo_hygiene.py -v
+
+trcp-test:
+	@python3 -m unittest tests/test_trcp_simulator.py tests/test_trcp_codex_review.py -v
+
+trcp-sim:
+	@python3 scripts/run_trcp_simulator.py
 
 verify-core:
 	@bash scripts/verify_core.sh
