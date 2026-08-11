@@ -6,6 +6,8 @@ produce FAIL or a specific verifier check failure.
 LOCAL_ONLY / SYNTHETIC_ONLY. No network, no providers, no real targets.
 """
 import copy
+import contextlib
+import io
 import json
 import subprocess
 import sys
@@ -654,6 +656,25 @@ class ReplayIndependenceTests(unittest.TestCase):
             "replay imports the simulator package: " + repr(sorted(imported_module_names)),
         )
 
+    def test_replay_source_has_no_simulator_imports(self):
+        import ast as _ast
+
+        from sdk.liminal_trcp.replay import __file__ as replay_file
+
+        tree = _ast.parse(Path(replay_file).read_text(encoding="utf-8"), filename=replay_file)
+        offending: list[str] = []
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.ImportFrom) and node.module == "sdk.liminal_trcp":
+                for alias in node.names:
+                    offending.append(f"from sdk.liminal_trcp import {alias.asname or alias.name}")
+            elif isinstance(node, _ast.Import) and node.names[0].name.startswith("sdk.liminal_trcp"):
+                for alias in node.names:
+                    offending.append(f"import {alias.name}" + (f" as {alias.asname}" if alias.asname else ""))
+        self.assertEqual(
+            offending, [],
+            "replay source imports the simulator package: " + repr(offending),
+        )
+
     def test_replay_uses_only_bundle_data(self):
         bundle = build_evidence_bundle(run_default_scenario())
         bundle_copy = copy.deepcopy(bundle)
@@ -732,7 +753,10 @@ class CausalLineageTests(unittest.TestCase):
         simulator = TRCPSimulator(authorization, scope)
         simulator.authorize()
         simulator.execute_primary(task, MockProvider("provider:A", "mock-model-a", "COMPLETED"))
+        simulator.verify(reproduced=True)
+        self.assertEqual(simulator.state, "CLOSED")
         bundle = build_evidence_bundle(simulator.report())
+        self.assertEqual(verify_evidence_bundle(bundle)["result"], "PASS")
         edges = {(e["from"], e["to"]) for e in bundle["causal_lineage"]}
         self.assertNotIn(("PRIMARY_RUN", "PROVIDER_FAILURE"), edges)
         self.assertIn(("PRIMARY_RUN", "CLOSED"), edges)
@@ -885,11 +909,16 @@ class CliExitCodeTests(unittest.TestCase):
             raise RuntimeError("boom")
 
         cli.verify_evidence_bundle = sdk_replay_fail
+        stderr = io.StringIO()
         try:
-            exit_code = cli.main()
+            with contextlib.redirect_stderr(stderr):
+                exit_code = cli.main()
         finally:
             cli.verify_evidence_bundle = original
         self.assertEqual(exit_code, 2)
+        captured = stderr.getvalue()
+        self.assertIn("error: boom", captured)
+        self.assertIn("RuntimeError: boom", captured)
 
 
 if __name__ == "__main__":
