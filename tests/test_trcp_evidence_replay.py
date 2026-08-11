@@ -171,7 +171,14 @@ class ReplayVerifierHappyPathTests(unittest.TestCase):
         bundle = build_evidence_bundle(run_default_scenario())
         receipt = verify_evidence_bundle(bundle)
         for check in receipt["checks"]:
-            self.assertEqual(check["result"], "PASS", "check " + check["id"] + " failed")
+            self.assertIn(
+                check["result"],
+                ("PASS", "SKIP"),
+                "check " + check["id"] + " failed",
+            )
+        for check in receipt["checks"]:
+            if check["id"] == "WORKLOAD_EVIDENCE_BINDING":
+                self.assertEqual(check["result"], "SKIP")
 
     def test_fail_receipt_has_failure_detail(self):
         bundle = build_evidence_bundle(run_default_scenario())

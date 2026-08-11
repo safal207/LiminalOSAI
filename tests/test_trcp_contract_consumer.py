@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
+from sdk.liminal_trcp import run_default_scenario
 from sdk.liminal_trcp.consumer import (
     DOUBLE_RELEASE_PATH,
     ILLEGAL_PATH,
@@ -17,6 +18,7 @@ from sdk.liminal_trcp.consumer import (
     run_contract_consumer,
     workload_result,
 )
+from sdk.liminal_trcp.evidence import build_evidence_bundle
 from sdk.liminal_trcp.replay import verify_evidence_bundle
 
 
@@ -302,17 +304,50 @@ class WorkloadEvidenceBindingTests(unittest.TestCase):
         self.assertEqual(receipt["result"], "FAIL")
         self.assertEqual(receipt["failed_check"], "WORKLOAD_EVIDENCE_BINDING")
 
-    def test_missing_consumer_evidence_passes_for_legacy_bundle(self):
-        bundle = self._valid_bundle()
-        del bundle["consumer_evidence"]
-        _recalculate_bundle_hash(bundle)
-        receipt = verify_evidence_bundle(bundle)
+    def test_legacy_bundle_workload_binding_is_skip(self):
+        legacy_bundle = build_evidence_bundle(run_default_scenario())
+        receipt = verify_evidence_bundle(legacy_bundle)
         self.assertEqual(receipt["result"], "PASS")
         binding = next(
             check for check in receipt["checks"]
             if check["id"] == "WORKLOAD_EVIDENCE_BINDING"
         )
-        self.assertEqual(binding["detail"], "no consumer evidence")
+        self.assertEqual(binding["result"], "SKIP")
+        self.assertEqual(binding["detail"], "not applicable: no consumer workload declared")
+
+    def test_contract_consumer_missing_consumer_evidence_fails(self):
+        bundle = self._valid_bundle()
+        del bundle["consumer_evidence"]
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "WORKLOAD_EVIDENCE_BINDING")
+
+    def test_consumer_evidence_without_provider_runs_fails(self):
+        bundle = self._valid_bundle()
+        bundle["provider_runs"] = []
+        bundle["failover_decision"] = None
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "WORKLOAD_EVIDENCE_BINDING")
+
+    def test_consumer_evidence_without_matching_provider_hash_fails(self):
+        bundle = self._valid_bundle()
+        for run in bundle["provider_runs"]:
+            run["provider_metadata"]["workload_sha256"] = "1" * 64
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "WORKLOAD_EVIDENCE_BINDING")
+
+    def test_valid_contract_consumer_binding_passes(self):
+        bundle = self._valid_bundle()
+        binding = next(
+            check for check in verify_evidence_bundle(bundle)["checks"]
+            if check["id"] == "WORKLOAD_EVIDENCE_BINDING"
+        )
+        self.assertEqual(binding["result"], "PASS")
 
     def test_unrecognized_consumer_evidence_schema_fails(self):
         bundle = self._valid_bundle()

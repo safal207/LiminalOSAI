@@ -4,9 +4,14 @@ Validates a provider-neutral evidence bundle without re-running the
 originating simulator. The verifier checks invariants from the bundle alone:
 causal order, scope monotonicity, authorization continuity, state
 transition legality, temporal monotonicity, task identity, finding
-trustworthiness, verification closure, and (for contract consumers) the
+trustworthiness, verification closure, and (for consumer workloads) the
 cryptographic binding of the complete workload artifact to the task and
 provider run chain.
+
+Check semantics: FAIL fails the whole receipt, PASS reports verified
+success, and SKIP is neutral — a legacy TRCP v0.2 bundle that never
+declares a consumer workload stays overall PASS while explicitly not
+claiming workload binding.
 
 Deterministic: same bundle -> same receipt -> same receipt_sha256.
 LOCAL_ONLY / SYNTHETIC_ONLY. No providers, no network, no real targets.
@@ -618,15 +623,36 @@ def _check_final_state(bundle: dict[str, Any]) -> CheckResult:
 
 WORKLOAD_EVIDENCE_SCHEMA = "contract-workload-evidence-v0.1"
 _TASK_FIXTURE_PATTERN = r"^(.+)@sha256:([0-9a-f]{64})$"
+_WORKLOAD_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _declares_consumer_workload(bundle: dict[str, Any]) -> bool:
+    """True when the bundle claims a consumer workload, even if the artifact was stripped."""
+    if isinstance(bundle.get("consumer_evidence"), dict):
+        return True
+    for run in bundle.get("provider_runs") or []:
+        metadata = run.get("provider_metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        claimed = metadata.get("workload_sha256")
+        if isinstance(claimed, str) and _WORKLOAD_SHA256_PATTERN.fullmatch(claimed):
+            return True
+    return False
 
 
 def _check_workload_evidence_binding(bundle: dict[str, Any]) -> CheckResult:
     consumer_evidence = bundle.get("consumer_evidence")
     if consumer_evidence is None:
+        if _declares_consumer_workload(bundle):
+            return CheckResult(
+                "WORKLOAD_EVIDENCE_BINDING",
+                "FAIL",
+                "consumer workload declared but consumer_evidence is missing",
+            )
         return CheckResult(
             "WORKLOAD_EVIDENCE_BINDING",
-            "PASS",
-            "no consumer evidence",
+            "SKIP",
+            "not applicable: no consumer workload declared",
         )
     if not isinstance(consumer_evidence, dict):
         return CheckResult(
@@ -694,7 +720,16 @@ def _check_workload_evidence_binding(bundle: dict[str, Any]) -> CheckResult:
             "consumer_evidence task fixture does not match task_fixture reference",
         )
     expected_task_sha256 = canonical_sha256(task)
+
     provider_runs = bundle.get("provider_runs") or []
+    if not provider_runs:
+        return CheckResult(
+            "WORKLOAD_EVIDENCE_BINDING",
+            "FAIL",
+            "consumer_evidence present but no provider runs",
+        )
+
+    matched_run = False
     for run in provider_runs:
         if run.get("normalized_task_hash") != expected_task_sha256:
             return CheckResult(
@@ -702,6 +737,15 @@ def _check_workload_evidence_binding(bundle: dict[str, Any]) -> CheckResult:
                 "FAIL",
                 "provider run does not bind to the consumer workload task",
             )
+        metadata = run.get("provider_metadata") or {}
+        if isinstance(metadata, dict) and metadata.get("workload_sha256") == claimed:
+            matched_run = True
+    if not matched_run:
+        return CheckResult(
+            "WORKLOAD_EVIDENCE_BINDING",
+            "FAIL",
+            "no provider run carries the consumer workload_sha256",
+        )
 
     return CheckResult(
         "WORKLOAD_EVIDENCE_BINDING",
@@ -762,6 +806,7 @@ def verify_evidence_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
             failed_check_id = check_id
             failed_detail = result.detail
 
+    # FAIL -> overall FAIL; PASS -> success; SKIP -> neutral (stays PASS).
     overall_result = "FAIL" if failed_check_id is not None else "PASS"
 
     receipt_body: dict[str, Any] = {
