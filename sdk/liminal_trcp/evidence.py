@@ -8,7 +8,7 @@ No live providers, no network, no real targets. LOCAL_ONLY / SYNTHETIC_ONLY.
 from __future__ import annotations
 
 import copy
-from typing import Any
+from typing import Any, Mapping
 
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
 
@@ -89,7 +89,11 @@ def _build_causal_lineage(report: dict[str, Any]) -> list[dict[str, Any]]:
     return edges
 
 
-def build_evidence_bundle(report: dict[str, Any]) -> dict[str, Any]:
+def build_evidence_bundle(
+    report: dict[str, Any],
+    *,
+    consumer_evidence: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     source_report_sha256 = report.get("report_sha256", "")
 
     authorization = copy.deepcopy(report.get("authorization") or {})
@@ -122,6 +126,8 @@ def build_evidence_bundle(report: dict[str, Any]) -> dict[str, Any]:
         "trace": trace,
         "causal_lineage": [],
     }
+    if consumer_evidence is not None:
+        bundle_body["consumer_evidence"] = copy.deepcopy(dict(consumer_evidence))
     bundle_body["causal_lineage"] = _build_causal_lineage(bundle_body)
 
     bundle = copy.deepcopy(bundle_body)

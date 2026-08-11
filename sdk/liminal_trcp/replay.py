@@ -4,13 +4,16 @@ Validates a provider-neutral evidence bundle without re-running the
 originating simulator. The verifier checks invariants from the bundle alone:
 causal order, scope monotonicity, authorization continuity, state
 transition legality, temporal monotonicity, task identity, finding
-trustworthiness, and verification closure.
+trustworthiness, verification closure, and (for contract consumers) the
+cryptographic binding of the complete workload artifact to the task and
+provider run chain.
 
 Deterministic: same bundle -> same receipt -> same receipt_sha256.
 LOCAL_ONLY / SYNTHETIC_ONLY. No providers, no network, no real targets.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
@@ -613,6 +616,100 @@ def _check_final_state(bundle: dict[str, Any]) -> CheckResult:
     return CheckResult("FINAL_STATE", "PASS")
 
 
+WORKLOAD_EVIDENCE_SCHEMA = "contract-workload-evidence-v0.1"
+_TASK_FIXTURE_PATTERN = r"^(.+)@sha256:([0-9a-f]{64})$"
+
+
+def _check_workload_evidence_binding(bundle: dict[str, Any]) -> CheckResult:
+    consumer_evidence = bundle.get("consumer_evidence")
+    if consumer_evidence is None:
+        return CheckResult(
+            "WORKLOAD_EVIDENCE_BINDING",
+            "PASS",
+            "no consumer evidence",
+        )
+    if not isinstance(consumer_evidence, dict):
+        return CheckResult(
+            "WORKLOAD_EVIDENCE_BINDING",
+            "FAIL",
+            "consumer_evidence must be a JSON object",
+        )
+
+    required = ("schema", "requested_path", "actor", "result")
+    for field in required:
+        if field not in consumer_evidence:
+            return CheckResult(
+                "WORKLOAD_EVIDENCE_BINDING",
+                "FAIL",
+                f"consumer_evidence missing required field: {field}",
+            )
+    if consumer_evidence["schema"] != WORKLOAD_EVIDENCE_SCHEMA:
+        return CheckResult(
+            "WORKLOAD_EVIDENCE_BINDING",
+            "FAIL",
+            "consumer_evidence uses an unrecognized schema",
+        )
+
+    body = {field: consumer_evidence[field] for field in required}
+    claimed = consumer_evidence.get("workload_sha256")
+    if not isinstance(claimed, str) or claimed != canonical_sha256(body):
+        return CheckResult(
+            "WORKLOAD_EVIDENCE_BINDING",
+            "FAIL",
+            "consumer_evidence workload_sha256 does not match artifact content",
+        )
+
+    task_fixture = consumer_evidence.get("task_fixture")
+    if not isinstance(task_fixture, str):
+        return CheckResult(
+            "WORKLOAD_EVIDENCE_BINDING",
+            "FAIL",
+            "consumer_evidence is missing task_fixture",
+        )
+    match = re.fullmatch(_TASK_FIXTURE_PATTERN, task_fixture)
+    if match is None:
+        return CheckResult(
+            "WORKLOAD_EVIDENCE_BINDING",
+            "FAIL",
+            "task_fixture does not carry a sha256 reference",
+        )
+    if match.group(2) != claimed:
+        return CheckResult(
+            "WORKLOAD_EVIDENCE_BINDING",
+            "FAIL",
+            "task_fixture sha256 does not match consumer_evidence workload_sha256",
+        )
+
+    task = consumer_evidence.get("task")
+    if not isinstance(task, dict):
+        return CheckResult(
+            "WORKLOAD_EVIDENCE_BINDING",
+            "FAIL",
+            "consumer_evidence is missing the task record",
+        )
+    if task.get("fixture") != task_fixture:
+        return CheckResult(
+            "WORKLOAD_EVIDENCE_BINDING",
+            "FAIL",
+            "consumer_evidence task fixture does not match task_fixture reference",
+        )
+    expected_task_sha256 = canonical_sha256(task)
+    provider_runs = bundle.get("provider_runs") or []
+    for run in provider_runs:
+        if run.get("normalized_task_hash") != expected_task_sha256:
+            return CheckResult(
+                "WORKLOAD_EVIDENCE_BINDING",
+                "FAIL",
+                "provider run does not bind to the consumer workload task",
+            )
+
+    return CheckResult(
+        "WORKLOAD_EVIDENCE_BINDING",
+        "PASS",
+        "consumer workload bound to evidence chain",
+    )
+
+
 CHECK_ORDER = (
     "BUNDLE_INTEGRITY",
     "TRACE_HASH_CHAIN",
@@ -627,6 +724,7 @@ CHECK_ORDER = (
     "VERIFICATION_CLOSURE",
     "VERIFICATION_CONSISTENCY",
     "FINAL_STATE",
+    "WORKLOAD_EVIDENCE_BINDING",
 )
 
 CHECK_FUNCTIONS: dict[str, Any] = {
@@ -643,6 +741,7 @@ CHECK_FUNCTIONS: dict[str, Any] = {
     "VERIFICATION_CLOSURE": _check_verification_closure,
     "VERIFICATION_CONSISTENCY": _check_verification_consistency,
     "FINAL_STATE": _check_final_state,
+    "WORKLOAD_EVIDENCE_BINDING": _check_workload_evidence_binding,
 }
 
 
@@ -686,5 +785,6 @@ __all__ = [
     "CHECK_ORDER",
     "CheckResult",
     "RECEIPT_SCHEMA",
+    "WORKLOAD_EVIDENCE_SCHEMA",
     "verify_evidence_bundle",
 ]

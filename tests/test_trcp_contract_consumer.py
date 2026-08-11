@@ -6,6 +6,7 @@ import copy
 import unittest
 from unittest.mock import patch
 
+from sdk.liminal_post_sandbox_contracts import canonical_sha256
 from sdk.liminal_trcp.consumer import (
     DOUBLE_RELEASE_PATH,
     ILLEGAL_PATH,
@@ -204,6 +205,133 @@ class ContractFixtureTests(unittest.TestCase):
             fixture["task"]["fixture"],
             f"escrow-causal-temporal-v0.1@sha256:{digest}",
         )
+
+
+def _recalculate_bundle_hash(bundle):
+    body = {key: value for key, value in bundle.items() if key != "bundle_sha256"}
+    bundle["bundle_sha256"] = canonical_sha256(body)
+
+
+class WorkloadEvidenceBindingTests(unittest.TestCase):
+    def _valid_bundle(self):
+        outcome = run_contract_consumer(VALID_PATH)
+        self.assertEqual(outcome["receipt"]["result"], "PASS")
+        return outcome["bundle"]
+
+    def test_bundle_contains_complete_consumer_evidence(self):
+        bundle = self._valid_bundle()
+        evidence = bundle["consumer_evidence"]
+        self.assertEqual(evidence["schema"], "contract-workload-evidence-v0.1")
+        self.assertEqual(evidence["requested_path"], list(VALID_PATH))
+        self.assertEqual(evidence["actor"], "buyer")
+        self.assertIsInstance(evidence["result"], dict)
+        self.assertIn("violations", evidence["result"])
+        self.assertIn("final_state", evidence["result"])
+        self.assertIn("workload_sha256", evidence)
+        self.assertIn("task", evidence)
+        self.assertIn("task_fixture", evidence)
+
+    def test_consumer_evidence_hash_matches_content(self):
+        bundle = self._valid_bundle()
+        evidence = bundle["consumer_evidence"]
+        body = {
+            "schema": evidence["schema"],
+            "requested_path": evidence["requested_path"],
+            "actor": evidence["actor"],
+            "result": evidence["result"],
+        }
+        self.assertEqual(evidence["workload_sha256"], canonical_sha256(body))
+
+    def test_clean_paths_produce_distinct_receipts(self):
+        full = run_contract_consumer(VALID_PATH)
+        partial = run_contract_consumer(("FUNDED",))
+        self.assertIsNone(full["report"]["finding"])
+        self.assertIsNone(partial["report"]["finding"])
+        self.assertEqual(full["receipt"]["result"], "PASS")
+        self.assertEqual(partial["receipt"]["result"], "PASS")
+        self.assertNotEqual(
+            full["workload_evidence"]["workload_sha256"],
+            partial["workload_evidence"]["workload_sha256"],
+        )
+        self.assertNotEqual(
+            full["bundle"]["bundle_sha256"],
+            partial["bundle"]["bundle_sha256"],
+        )
+        self.assertNotEqual(
+            full["receipt"]["receipt_sha256"],
+            partial["receipt"]["receipt_sha256"],
+        )
+
+    def test_mutated_consumer_artifact_fails_binding(self):
+        bundle = self._valid_bundle()
+        bundle["consumer_evidence"]["requested_path"] = ["CREATED"]
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "WORKLOAD_EVIDENCE_BINDING")
+
+    def test_mutated_final_state_fails_binding(self):
+        bundle = self._valid_bundle()
+        bundle["consumer_evidence"]["result"]["final_state"] = "REFUNDED"
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "WORKLOAD_EVIDENCE_BINDING")
+
+    def test_rehashed_artifact_with_stale_task_reference_fails(self):
+        bundle = self._valid_bundle()
+        evidence = bundle["consumer_evidence"]
+        evidence["result"]["violations"] = [{"invariant_id": "forged", "violated": True}]
+        body = {
+            "schema": evidence["schema"],
+            "requested_path": evidence["requested_path"],
+            "actor": evidence["actor"],
+            "result": evidence["result"],
+        }
+        evidence["workload_sha256"] = canonical_sha256(body)
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "WORKLOAD_EVIDENCE_BINDING")
+
+    def test_stale_provider_reference_fails_binding(self):
+        bundle = self._valid_bundle()
+        bundle["consumer_evidence"]["task"]["task_id"] = "task:forged"
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "WORKLOAD_EVIDENCE_BINDING")
+
+    def test_missing_consumer_evidence_passes_for_legacy_bundle(self):
+        bundle = self._valid_bundle()
+        del bundle["consumer_evidence"]
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "PASS")
+        binding = next(
+            check for check in receipt["checks"]
+            if check["id"] == "WORKLOAD_EVIDENCE_BINDING"
+        )
+        self.assertEqual(binding["detail"], "no consumer evidence")
+
+    def test_unrecognized_consumer_evidence_schema_fails(self):
+        bundle = self._valid_bundle()
+        bundle["consumer_evidence"]["schema"] = "contract-workload-evidence-v0.9"
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "WORKLOAD_EVIDENCE_BINDING")
+
+    def test_all_workload_violations_preserved(self):
+        outcome = run_contract_consumer(ILLEGAL_PATH)
+        evidence_violations = outcome["workload_evidence"]["result"]["violations"]
+        finding_summary = outcome["report"]["finding"]["summary"]
+        self.assertGreater(len(evidence_violations), 0)
+        self.assertEqual(
+            evidence_violations,
+            outcome["workload"]["violations"],
+        )
+        self.assertIn(evidence_violations[0]["invariant_id"], finding_summary)
 
 
 if __name__ == "__main__":

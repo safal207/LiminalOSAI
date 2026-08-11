@@ -21,7 +21,7 @@ No blockchain, network, credential, or real-target interaction exists here.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
 from sdk.liminal_trcp import (
@@ -211,14 +211,28 @@ def _workload_evidence(
     path: tuple[str, ...],
     actor: str,
     result: dict[str, Any],
+    task: Mapping[str, Any],
 ) -> dict[str, Any]:
-    body = {
+    body = _workload_body(path, actor, result)
+    return {
+        **body,
+        "task": dict(task),
+        "task_fixture": task["fixture"],
+        "workload_sha256": canonical_sha256(body),
+    }
+
+
+def _workload_body(
+    path: tuple[str, ...],
+    actor: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    return {
         "schema": WORKLOAD_EVIDENCE_SCHEMA,
         "requested_path": list(path),
         "actor": actor,
         "result": result,
     }
-    return {**body, "workload_sha256": canonical_sha256(body)}
 
 
 def _synthetic_finding(result: dict[str, Any]) -> dict[str, Any] | None:
@@ -285,27 +299,27 @@ def run_contract_consumer(
 ) -> dict[str, Any]:
     """Full pipeline: local fixture -> TRCP -> evidence bundle -> replay receipt."""
     result = workload_result(path, actor)
-    workload_evidence = _workload_evidence(path, actor, result)
+    workload_sha256 = canonical_sha256(_workload_body(path, actor, result))
 
-    reproduction_result = workload_result(path, actor)
-    reproduction_evidence = _workload_evidence(path, actor, reproduction_result)
-    reproduced = (
-        workload_evidence["workload_sha256"]
-        == reproduction_evidence["workload_sha256"]
-    )
-
-    fixture = contract_fixture(workload_evidence["workload_sha256"])
+    fixture = contract_fixture(workload_sha256)
     authorization: AuthorizationRecord = fixture["authorization"]
     scope: ScopeEnvelope = fixture["scope"]
     task: dict[str, Any] = fixture["task"]
     primary: MockProvider = fixture["primary"]
+    workload_evidence = _workload_evidence(path, actor, result, task)
+
+    reproduction_result = workload_result(path, actor)
+    reproduction_sha256 = canonical_sha256(
+        _workload_body(path, actor, reproduction_result)
+    )
+    reproduced = workload_sha256 == reproduction_sha256
 
     fallback = MockProvider(
         "provider:cgqa-fallback",
         "mock-model-b",
         "COMPLETED",
         synthetic_finding=_synthetic_finding(result),
-        provider_metadata={"workload_sha256": workload_evidence["workload_sha256"]},
+        provider_metadata={"workload_sha256": workload_sha256},
     )
 
     simulator = TRCPSimulator(authorization, scope)
@@ -318,7 +332,10 @@ def run_contract_consumer(
         simulator.confirm_finding()
 
     report = simulator.report()
-    bundle = build_evidence_bundle(report)
+    bundle = build_evidence_bundle(
+        report,
+        consumer_evidence=workload_evidence,
+    )
     receipt = verify_evidence_bundle(bundle)
 
     return {
@@ -326,7 +343,7 @@ def run_contract_consumer(
         "workload_evidence": workload_evidence,
         "reproduction": {
             "result": reproduction_result,
-            "workload_sha256": reproduction_evidence["workload_sha256"],
+            "workload_sha256": reproduction_sha256,
             "matches_original": reproduced,
         },
         "report": report,
