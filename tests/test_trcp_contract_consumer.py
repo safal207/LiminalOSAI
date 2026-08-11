@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import unittest
+from unittest.mock import patch
 
 from sdk.liminal_trcp.consumer import (
     DOUBLE_RELEASE_PATH,
@@ -44,15 +45,37 @@ class WorkloadFixtureTests(unittest.TestCase):
         with self.assertRaises(IllegalTransition):
             fixture.fund("seller")
 
-    def test_release_before_funding_is_rejected(self):
+    def test_unauthorized_actor_is_classified_as_authorization(self):
+        result = workload_result(("FUNDED",), actor="seller")
+        self.assertEqual(
+            [v["invariant_id"] for v in result["violations"]],
+            ["authorization"],
+        )
+
+    def test_release_before_funding_is_transition_validation(self):
         result = workload_result(("RELEASED",))
-        self.assertIn("authorization", [v["invariant_id"] for v in result["violations"]])
+        self.assertEqual(
+            [v["invariant_id"] for v in result["violations"]],
+            ["transition-validation"],
+        )
 
     def test_steps_are_recorded_in_order(self):
         result = workload_result(VALID_PATH)
         self.assertEqual(
             [step["action"] for step in result["path"]],
             ["fund", "release_request", "release"],
+        )
+
+    def test_steps_preserve_true_pre_and_post_states(self):
+        result = workload_result(VALID_PATH)
+        states = [(step["pre_state"], step["post_state"]) for step in result["path"]]
+        self.assertEqual(
+            states,
+            [
+                ("CREATED", "FUNDED"),
+                ("FUNDED", "RELEASE_REQUESTED"),
+                ("RELEASE_REQUESTED", "RELEASED"),
+            ],
         )
 
 
@@ -79,14 +102,60 @@ class ContractConsumerPipelineTests(unittest.TestCase):
         self.assertIn("payout-conservation", finding["summary"])
         self.assertEqual(outcome["receipt"]["result"], "PASS")
 
-    def test_verification_records_finding_status(self):
+    def test_verification_records_finding_status_after_second_execution(self):
         outcome = run_contract_consumer(ILLEGAL_PATH)
         verification = outcome["report"]["verification"]
         self.assertIsNotNone(verification)
+        self.assertTrue(outcome["reproduction"]["matches_original"])
+        self.assertEqual(
+            outcome["workload_evidence"]["workload_sha256"],
+            outcome["reproduction"]["workload_sha256"],
+        )
         self.assertEqual(verification["result"], "REPRODUCED")
         self.assertEqual(
             verification["finding_id"],
             outcome["report"]["finding"]["finding_id"],
+        )
+        self.assertEqual(outcome["report"]["finding"]["status"], "CONFIRMED")
+
+    def test_reproduction_mismatch_is_not_confirmed(self):
+        original = workload_result(ILLEGAL_PATH)
+        different = copy.deepcopy(original)
+        different["final_state"] = "REFUNDED"
+
+        with patch(
+            "sdk.liminal_trcp.consumer.workload_result",
+            side_effect=[original, different],
+        ):
+            outcome = run_contract_consumer(ILLEGAL_PATH)
+
+        self.assertFalse(outcome["reproduction"]["matches_original"])
+        self.assertEqual(outcome["report"]["verification"]["result"], "NOT_REPRODUCED")
+        self.assertEqual(outcome["report"]["finding"]["status"], "NOT_REPRODUCED")
+        self.assertEqual(outcome["report"]["final_state"], "CLOSED")
+        self.assertEqual(outcome["receipt"]["result"], "PASS")
+
+    def test_distinct_clean_workloads_bind_to_distinct_evidence(self):
+        full = run_contract_consumer(VALID_PATH)
+        partial = run_contract_consumer(("FUNDED",))
+
+        self.assertIsNone(full["report"]["finding"])
+        self.assertIsNone(partial["report"]["finding"])
+        self.assertNotEqual(
+            full["workload_evidence"]["workload_sha256"],
+            partial["workload_evidence"]["workload_sha256"],
+        )
+        self.assertNotEqual(
+            full["report"]["provider_runs"][0]["normalized_task_hash"],
+            partial["report"]["provider_runs"][0]["normalized_task_hash"],
+        )
+        self.assertNotEqual(
+            full["report"]["provider_runs"][0]["output_artifact_reference"],
+            partial["report"]["provider_runs"][0]["output_artifact_reference"],
+        )
+        self.assertNotEqual(
+            full["receipt"]["receipt_sha256"],
+            partial["receipt"]["receipt_sha256"],
         )
 
     def test_run_is_deterministic(self):
@@ -126,6 +195,14 @@ class ContractFixtureTests(unittest.TestCase):
         self.assertIn(
             fixture["task"]["asset_id"],
             fixture["scope"].allowed_targets,
+        )
+
+    def test_workload_digest_is_embedded_in_task_fixture_reference(self):
+        digest = "a" * 64
+        fixture = contract_fixture(digest)
+        self.assertEqual(
+            fixture["task"]["fixture"],
+            f"escrow-causal-temporal-v0.1@sha256:{digest}",
         )
 
 
