@@ -27,6 +27,7 @@ from sdk.liminal_trcp.evidence import (
     PRIMARY_RUN_NODE,
     build_evidence_bundle,
 )
+from sdk.liminal_trcp.consumer import VALID_PATH, run_contract_consumer
 from sdk.liminal_trcp.replay import verify_evidence_bundle
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -171,14 +172,22 @@ class ReplayVerifierHappyPathTests(unittest.TestCase):
         bundle = build_evidence_bundle(run_default_scenario())
         receipt = verify_evidence_bundle(bundle)
         for check in receipt["checks"]:
-            self.assertIn(
-                check["result"],
-                ("PASS", "SKIP"),
-                "check " + check["id"] + " failed",
+            expected = (
+                "SKIP"
+                if check["id"] == "WORKLOAD_EVIDENCE_BINDING"
+                else "PASS"
             )
-        for check in receipt["checks"]:
-            if check["id"] == "WORKLOAD_EVIDENCE_BINDING":
-                self.assertEqual(check["result"], "SKIP")
+            self.assertEqual(check["result"], expected)
+
+    def test_contract_consumer_binding_passes(self):
+        bundle = run_contract_consumer(VALID_PATH)["bundle"]
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "PASS")
+        binding = next(
+            check for check in receipt["checks"]
+            if check["id"] == "WORKLOAD_EVIDENCE_BINDING"
+        )
+        self.assertEqual(binding["result"], "PASS")
 
     def test_fail_receipt_has_failure_detail(self):
         bundle = build_evidence_bundle(run_default_scenario())
