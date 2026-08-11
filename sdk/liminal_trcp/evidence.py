@@ -54,12 +54,12 @@ def _build_causal_lineage(report: dict[str, Any]) -> list[dict[str, Any]]:
     add_edge(AUTHORIZATION_NODE, PRIMARY_RUN_NODE, "AUTHORIZES", f"ref:{auth_ref}")
 
     provider_runs = report.get("provider_runs") or []
-    if provider_runs:
+    failover = report.get("failover_decision")
+    if provider_runs and failover is not None:
         primary = provider_runs[0]
         primary_ref = primary.get("record_sha256", "unknown")
         add_edge(PRIMARY_RUN_NODE, PROVIDER_FAILURE_NODE, "CAUSES", f"sha256:{primary_ref}")
 
-    failover = report.get("failover_decision")
     if failover is not None and last_node == PROVIDER_FAILURE_NODE:
         failover_ref = failover.get("record_sha256", "unknown")
         add_edge(PROVIDER_FAILURE_NODE, FAILOVER_DECISION_NODE, "CAUSES", f"sha256:{failover_ref}")

@@ -418,6 +418,20 @@ def _check_failover_decision(bundle: dict[str, Any]) -> CheckResult:
     trace = bundle.get("trace") or []
     primary_run_id = _get_primary_run_id(bundle)
 
+    if not primary_run_id:
+        return CheckResult(
+            "FAILOVER_DECISION_REQUIRED",
+            "FAIL",
+            "primary provider run has no run_id",
+        )
+
+    if failover.get("previous_run_id", "") != primary_run_id:
+        return CheckResult(
+            "FAILOVER_DECISION_REQUIRED",
+            "FAIL",
+            "failover decision previous_run_id does not match primary run",
+        )
+
     fallback_run_ids = {run.get("run_id") for run in provider_runs[1:]}
 
     failover_event_seq = None
@@ -533,6 +547,32 @@ def _check_verification_consistency(bundle: dict[str, Any]) -> CheckResult:
             "FAIL",
             "VERIFICATION_RECORDED in trace but verification record is missing",
         )
+
+    if (finding is not None
+            and (trace_finding := next((e.get("payload") or {}) for e in trace
+                                       if e.get("kind") == "FINDING_RECORDED"))):
+        if trace_finding.get("finding_id", "") != finding.get("finding_id", ""):
+            return CheckResult(
+                "VERIFICATION_CONSISTENCY",
+                "FAIL",
+                "FINDING_RECORDED finding_id does not match finding record",
+            )
+
+    if (verification is not None
+            and (trace_verification := next((e.get("payload") or {}) for e in trace
+                                            if e.get("kind") == "VERIFICATION_RECORDED"))):
+        if trace_verification.get("finding_id", "") != verification.get("finding_id", ""):
+            return CheckResult(
+                "VERIFICATION_CONSISTENCY",
+                "FAIL",
+                "VERIFICATION_RECORDED finding_id does not match verification record",
+            )
+        if trace_verification.get("verification_id", "") != verification.get("verification_id", ""):
+            return CheckResult(
+                "VERIFICATION_CONSISTENCY",
+                "FAIL",
+                "VERIFICATION_RECORDED verification_id does not match verification record",
+            )
 
     if verification is None and finding is None:
         return CheckResult("VERIFICATION_CONSISTENCY", "PASS", "no verification or finding")

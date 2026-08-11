@@ -278,7 +278,7 @@ class FallbackRunIdentityTests(unittest.TestCase):
         self.assertEqual(receipt["result"], "FAIL")
         self.assertEqual(receipt["failed_check"], "FAILOVER_DECISION_REQUIRED")
 
-    def test_missing_primary_run_id_does_not_misidentify_fallback(self):
+    def test_missing_primary_run_id_fails_closed(self):
         bundle = build_evidence_bundle(run_default_scenario())
         primary_run_id = bundle["provider_runs"][0]["run_id"]
         bundle["provider_runs"][0].pop("run_id", None)
@@ -291,9 +291,8 @@ class FallbackRunIdentityTests(unittest.TestCase):
         _rebuild_trace_hashes(trace)
         _recalculate_bundle_hash(bundle)
         receipt = verify_evidence_bundle(bundle)
-        self.assertEqual(receipt["result"], "PASS")
-        causal_check = next(c for c in receipt["checks"] if c["id"] == "CAUSAL_ORDER")
-        self.assertEqual(causal_check["result"], "PASS")
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "FAILOVER_DECISION_REQUIRED")
 
     def test_early_fallback_run_before_decision_fails(self):
         bundle = build_evidence_bundle(run_default_scenario())
@@ -708,6 +707,37 @@ class CausalLineageTests(unittest.TestCase):
         self.assertIn(("FAILOVER_DECISION", "EFFECTIVE_SCOPE"), edges)
         self.assertIn(("EFFECTIVE_SCOPE", "FALLBACK_RUN"), edges)
 
+    def test_lineage_single_run_has_no_provider_failure(self):
+        authorization = AuthorizationRecord(
+            authorization_id="auth:trcp-demo",
+            subject_id="researcher:fixture",
+            asset_id="fixture:repo",
+            valid_from=900,
+            valid_until=2000,
+            allowed_activity_classes=("STATIC_ANALYSIS",),
+        )
+        scope = ScopeEnvelope(
+            scope_id="scope:trcp-demo",
+            authorization_id=authorization.authorization_id,
+            allowed_targets=("fixture:repo",),
+            allowed_actions=("ANALYZE_FIXTURE",),
+        )
+        task = {
+            "task_id": "task:1",
+            "asset_id": "fixture:repo",
+            "activity_class": "STATIC_ANALYSIS",
+            "action": "ANALYZE_FIXTURE",
+            "fixture": "synthetic-safe-fixture-v1",
+        }
+        simulator = TRCPSimulator(authorization, scope)
+        simulator.authorize()
+        simulator.execute_primary(task, MockProvider("provider:A", "mock-model-a", "COMPLETED"))
+        bundle = build_evidence_bundle(simulator.report())
+        edges = {(e["from"], e["to"]) for e in bundle["causal_lineage"]}
+        self.assertNotIn(("PRIMARY_RUN", "PROVIDER_FAILURE"), edges)
+        self.assertIn(("PRIMARY_RUN", "CLOSED"), edges)
+        self.assertIsNone(bundle["failover_decision"])
+
 
 class StateTransitionParityTests(unittest.TestCase):
     def test_allowed_transitions_match_simulator(self):
@@ -777,6 +807,36 @@ class FailoverWithoutFindingTests(unittest.TestCase):
         receipt = verify_evidence_bundle(bundle)
         self.assertEqual(receipt["result"], "FAIL")
         self.assertEqual(receipt["failed_check"], "VERIFICATION_CONSISTENCY")
+
+    def test_finding_record_id_mismatch_fails(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        for event in bundle["trace"]:
+            if event["kind"] == "FINDING_RECORDED":
+                event["payload"]["finding_id"] = "finding:OTHER"
+        _rebuild_trace_hashes(bundle["trace"])
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "VERIFICATION_CONSISTENCY")
+
+    def test_verification_record_id_mismatch_fails(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        for event in bundle["trace"]:
+            if event["kind"] == "VERIFICATION_RECORDED":
+                event["payload"]["verification_id"] = "verification:OTHER"
+        _rebuild_trace_hashes(bundle["trace"])
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "VERIFICATION_CONSISTENCY")
+
+    def test_failover_previous_run_id_mismatch_fails(self):
+        bundle = build_evidence_bundle(run_default_scenario())
+        bundle["failover_decision"]["previous_run_id"] = "run:NOWHERE"
+        _recalculate_bundle_hash(bundle)
+        receipt = verify_evidence_bundle(bundle)
+        self.assertEqual(receipt["result"], "FAIL")
+        self.assertEqual(receipt["failed_check"], "FAILOVER_DECISION_REQUIRED")
 
 
 class CliExitCodeTests(unittest.TestCase):
