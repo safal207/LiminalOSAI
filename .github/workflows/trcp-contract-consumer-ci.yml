@@ -6,6 +6,7 @@ on:
       - "sdk/liminal_trcp/**"
       - "tests/test_trcp_*.py"
       - "scripts/replay_trcp_contractgraph.py"
+      - "scripts/replay_trcp_external_consumer.py"
       - "Makefile"
       - ".github/workflows/trcp-contract-consumer-ci.yml"
   push:
@@ -15,6 +16,7 @@ on:
       - "sdk/liminal_trcp/**"
       - "tests/test_trcp_*.py"
       - "scripts/replay_trcp_contractgraph.py"
+      - "scripts/replay_trcp_external_consumer.py"
       - "Makefile"
       - ".github/workflows/trcp-contract-consumer-ci.yml"
 
@@ -36,13 +38,19 @@ jobs:
           python-version: "3.12"
 
       - name: Compile Python sources
-        run: python -m compileall -q sdk/liminal_trcp scripts/replay_trcp_contractgraph.py tests/test_trcp_contract_consumer.py
+        run: python -m compileall -q sdk/liminal_trcp scripts/replay_trcp_contractgraph.py scripts/replay_trcp_external_consumer.py tests/test_trcp_contract_consumer.py tests/test_trcp_external_consumer.py
 
       - name: Run contract consumer regressions
         run: python -m unittest tests/test_trcp_contract_consumer.py -v
+
+      - name: Run external consumer regressions
+        run: python -m unittest tests/test_trcp_external_consumer.py -v
 
       - name: Run full TRCP regression set
         run: make trcp-test
 
       - name: Run contract consumer replay CLI
         run: python scripts/replay_trcp_contractgraph.py
+
+      - name: Run external consumer replay CLI
+        run: python scripts/replay_trcp_external_consumer.py
