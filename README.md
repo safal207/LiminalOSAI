@@ -43,6 +43,26 @@ See core/pulse_kernel.c for the full flag list and defaults.
 - Metabolic report: make report-metabolic
 - Long substrate diagnostic (60 cycles, writes logs & summary): make long-run-diagnostics
 
+## TRCP Evidence Replay Benchmark
+
+> We don't just test whether an agent action succeeded. We verify that the intended financial state transition happened, that its evidence is bound to the workload, and that tampering is independently detectable.
+
+```
+21/21 scenarios · 12/12 tampers · 100% hash stability · 0 false confirmations
+```
+
+A deterministic, local-only proof that the TRCP pipeline produces stable,
+independently verifiable, tamper-evident receipts for contract-state workloads
+(escrow: clean / illegal / invariant scenario classes, 12 adversarial bundle
+mutations). Determinism is proven on evidence hashes, not on wall-clock
+timing. Scope: evidence consistency/binding under mutation; producer-
+independent re-execution is a separate layer (see
+[docs/benchmark-v0.1.md](docs/benchmark-v0.1.md)).
+
+- [docs/benchmark-v0.1.md](docs/benchmark-v0.1.md) — what is checked, scenario classes, invariants, evidence binding, independent replay
+- [docs/RESONANCE_TRCP_EVIDENCE.md](docs/RESONANCE_TRCP_EVIDENCE.md) — why a green test is not enough for a financial AI agent
+- Run: `python3 scripts/benchmark_trcp_contract.py` → `artifacts/trcp-contract-benchmark.json` (gitignored)
+
 ## Layout
 
 - Core loop: core/pulse_kernel.c
