@@ -59,7 +59,10 @@ ADVERSARIAL = "adversarial"
 def _git_revision() -> str:
     try:
         return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
         ).strip()
     except Exception:  # noqa: BLE001 - best-effort metadata
         return "unknown"
@@ -501,9 +504,12 @@ def main() -> int:
                     hash_failures += 1
                     failures.append(f"{spec['name']}: evidence {key} differs across runs")
 
+        valid_baseline = run_contract_consumer(VALID_PATH)
         for spec in TAMPERS:
-            baseline_path = tuple(spec.get("baseline_path") or VALID_PATH)
-            baseline = run_contract_consumer(baseline_path)
+            if spec.get("baseline_path") is not None:
+                baseline = run_contract_consumer(tuple(spec["baseline_path"]))
+            else:
+                baseline = valid_baseline
             record = _run_tamper_once(spec, baseline)
             records.append(record)
             if record["actual"] != spec["expected"]:
@@ -558,7 +564,10 @@ def main() -> int:
             "records": records,
         }
         ARTIFACT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        ARTIFACT_PATH.write_text(json.dumps(artifact, sort_keys=True, indent=2) + "\n")
+        ARTIFACT_PATH.write_text(
+            json.dumps(artifact, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
         median_ms = summary["median_replay_time_ns"] / 1_000_000.0
         print("TRCP Contract Benchmark v0.1")
