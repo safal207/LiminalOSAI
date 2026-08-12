@@ -23,6 +23,7 @@ Exit codes:
 from __future__ import annotations
 
 import sys
+import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,27 +52,32 @@ SCENARIOS = (
 
 
 def main() -> int:
-    adapter = DelegatedSpendingAdapter()
-    failed = False
-    for name, external_input, with_execution_replay in SCENARIOS:
-        outcome = run_external_consumer(
-            adapter,
-            external_input,
-            execution_replay=with_execution_replay,
-        )
-        receipt = outcome["receipt"]
-        replay = outcome["execution_replay"]
-        print("External Consumer Adapter")
-        print(f"  scenario: {name}")
-        print(f"  consumer_type: {adapter.consumer_type}")
-        print(f"  Binding replay: {receipt['result']}")
-        print(f"  Execution replay: {replay['status']}")
-        print(f"  workload_sha256: {outcome['workload_evidence']['workload_sha256']}")
-        print(f"  bundle_sha256: {outcome['bundle']['bundle_sha256']}")
-        print(f"  receipt_sha256: {receipt['receipt_sha256']}")
-        if receipt["result"] != "PASS":
-            failed = True
-    return 1 if failed else 0
+    try:
+        adapter = DelegatedSpendingAdapter()
+        failed = False
+        for name, external_input, with_execution_replay in SCENARIOS:
+            outcome = run_external_consumer(
+                adapter,
+                external_input,
+                execution_replay=with_execution_replay,
+            )
+            receipt = outcome["receipt"]
+            replay = outcome["execution_replay"]
+            print("External Consumer Adapter")
+            print(f"  scenario: {name}")
+            print(f"  consumer_type: {adapter.consumer_type}")
+            print(f"  Binding replay: {receipt['result']}")
+            print(f"  Execution replay: {replay['status']}")
+            print(f"  workload_sha256: {outcome['workload_evidence']['workload_sha256']}")
+            print(f"  bundle_sha256: {outcome['bundle']['bundle_sha256']}")
+            print(f"  receipt_sha256: {receipt['receipt_sha256']}")
+            if receipt["result"] != "PASS":
+                failed = True
+        return 1 if failed else 0
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
+        print(f"error: {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

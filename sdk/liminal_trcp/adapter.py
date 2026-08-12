@@ -43,9 +43,18 @@ from sdk.liminal_trcp import (
     TRCPSimulator,
 )
 from sdk.liminal_trcp.evidence import build_evidence_bundle
-from sdk.liminal_trcp.replay import GENERIC_WORKLOAD_EVIDENCE_SCHEMA, verify_evidence_bundle
+from sdk.liminal_trcp.replay import (
+    GENERIC_WORKLOAD_EVIDENCE_SCHEMA,
+    WORKLOAD_EVIDENCE_SCHEMAS,
+    verify_evidence_bundle,
+)
 
 EXECUTION_REPLAY_NOT_RUN = "NOT_RUN"
+EXECUTION_REPLAY_UNSUPPORTED = "UNSUPPORTED"
+
+
+class WorkloadAdapterError(ValueError):
+    """Raised when an adapter artifact cannot be bound to TRCP evidence."""
 
 
 @runtime_checkable
@@ -54,7 +63,10 @@ class ExternalWorkloadAdapter(Protocol):
 
     Responsibilities:
     - ``normalize``: turn external input into the canonical workload body
-      (the deterministic artifact the workload_sha256 commits to).
+      (the deterministic artifact the workload_sha256 commits to). The body
+      must carry every field registered for its schema in
+      ``WORKLOAD_EVIDENCE_SCHEMAS``, plus a ``result`` object whose
+      ``violations`` entries provide ``invariant_id`` and ``expression``.
     - ``task``: build the TRCP task record, carrying a ``fixture`` reference
       that pins the workload digest (``<fixture>@sha256:<workload_sha256>``).
     - ``fixture``: build authorization / scope / task / primary provider for
@@ -75,17 +87,34 @@ class ExternalWorkloadAdapter(Protocol):
     def replay_execution(self, workload_body: Mapping[str, Any]) -> dict[str, Any] | None: ...
 
 
+def _binding_hash(workload_body: Mapping[str, Any]) -> str:
+    """Canonical workload digest over the schema-registered binding fields.
+
+    Uses the exact field projection ``verify_evidence_bundle`` hashes for the
+    evidence schema, so the adapter and the verifier can never disagree.
+    """
+    schema = workload_body.get("schema")
+    required = WORKLOAD_EVIDENCE_SCHEMAS.get(schema)
+    if required is None:
+        raise WorkloadAdapterError(f"unregistered workload evidence schema: {schema!r}")
+    missing = [field for field in required if field not in workload_body]
+    if missing:
+        raise WorkloadAdapterError(
+            "workload body missing required binding fields: " + ", ".join(sorted(missing))
+        )
+    return canonical_sha256({field: workload_body[field] for field in required})
+
+
 def build_workload_evidence(
     workload_body: Mapping[str, Any],
     task: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Produce the consumer evidence artifact for a normalized workload body."""
-    body = dict(workload_body)
     return {
-        **body,
+        **dict(workload_body),
         "task": dict(task),
         "task_fixture": task["fixture"],
-        "workload_sha256": canonical_sha256(body),
+        "workload_sha256": _binding_hash(workload_body),
     }
 
 
@@ -97,7 +126,10 @@ def _synthetic_finding(result: Mapping[str, Any]) -> dict[str, Any] | None:
     return {
         "finding_class": "WORKLOAD_INVARIANT_VIOLATION",
         "location_reference": "fixture://external-consumer-workload#L1",
-        "summary": f"{first['invariant_id']} violated: {first['expression']}",
+        "summary": (
+            f"{first.get('invariant_id', 'unknown-invariant')} violated: "
+            f"{first.get('expression', 'unspecified')}"
+        ),
         "severity_claim": "HIGH",
         "confidence_claim": "DETERMINISTIC",
     }
@@ -117,7 +149,7 @@ def run_external_consumer(
     binding receipt.
     """
     workload_body = adapter.normalize(external_input)
-    workload_sha256 = canonical_sha256(workload_body)
+    workload_sha256 = _binding_hash(workload_body)
 
     task = adapter.task(workload_sha256)
     fixture = adapter.fixture(workload_sha256)
@@ -127,7 +159,7 @@ def run_external_consumer(
     workload_evidence = build_workload_evidence(workload_body, task)
 
     reproduction_body = adapter.normalize(external_input)
-    reproduced = workload_sha256 == canonical_sha256(reproduction_body)
+    reproduced = workload_sha256 == _binding_hash(reproduction_body)
 
     fallback = MockProvider(
         "provider:external-fallback",
@@ -152,7 +184,9 @@ def run_external_consumer(
 
     execution_replay_outcome: dict[str, Any] = {"status": EXECUTION_REPLAY_NOT_RUN}
     hook = getattr(adapter, "replay_execution", None)
-    if execution_replay and callable(hook):
+    if execution_replay and not callable(hook):
+        execution_replay_outcome = {"status": EXECUTION_REPLAY_UNSUPPORTED}
+    elif execution_replay:
         replay_result = hook(workload_body)
         matches = replay_result == workload_body.get("result")
         execution_replay_outcome = {
@@ -166,7 +200,7 @@ def run_external_consumer(
         "workload_body": workload_body,
         "workload_evidence": workload_evidence,
         "reproduction": {
-            "workload_sha256": canonical_sha256(reproduction_body),
+            "workload_sha256": _binding_hash(reproduction_body),
             "matches_original": reproduced,
         },
         "report": report,
@@ -178,8 +212,10 @@ def run_external_consumer(
 
 __all__ = [
     "EXECUTION_REPLAY_NOT_RUN",
+    "EXECUTION_REPLAY_UNSUPPORTED",
     "ExternalWorkloadAdapter",
     "GENERIC_WORKLOAD_EVIDENCE_SCHEMA",
+    "WorkloadAdapterError",
     "build_workload_evidence",
     "run_external_consumer",
 ]

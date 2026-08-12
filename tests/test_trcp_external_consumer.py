@@ -377,6 +377,30 @@ class ExecutionReplaySeparationTests(unittest.TestCase):
         self.assertTrue(outcome["execution_replay"]["matches_binding_result"])
         self.assertEqual(outcome["receipt"]["result"], "PASS")
 
+    def test_requested_replay_without_hook_reports_unsupported(self):
+        class HooklessAdapter:
+            consumer_type = "delegated-spending"
+
+            def __init__(self):
+                self._delegate = DelegatedSpendingAdapter()
+
+            def normalize(self, external_input):
+                return self._delegate.normalize(external_input)
+
+            def task(self, workload_sha256):
+                return self._delegate.task(workload_sha256)
+
+            def fixture(self, workload_sha256):
+                return self._delegate.fixture(workload_sha256)
+
+        outcome = run_external_consumer(
+            HooklessAdapter(),
+            VALID_EXTERNAL_INPUT,
+            execution_replay=True,
+        )
+        self.assertEqual(outcome["execution_replay"]["status"], "UNSUPPORTED")
+        self.assertEqual(outcome["receipt"]["result"], "PASS")
+
     def test_execution_replay_mismatch_is_explicit_and_separate(self):
         class MismatchAdapter(DelegatedSpendingAdapter):
             def replay_execution(self, workload_body):
@@ -400,12 +424,25 @@ class ExecutionReplaySeparationTests(unittest.TestCase):
 
 
 class ReplayGenericityTests(unittest.TestCase):
-    def test_replay_source_has_no_consumer_special_case(self):
+    def test_replay_verifier_surface_is_consumer_neutral(self):
+        from sdk.liminal_trcp.replay import CHECK_FUNCTIONS, WORKLOAD_EVIDENCE_SCHEMAS
+
+        for schema in WORKLOAD_EVIDENCE_SCHEMAS:
+            self.assertIsInstance(schema, str)
+            self.assertTrue(schema.endswith("-evidence-v0.1"))
+            self.assertNotIn("escrow", schema.lower())
+            self.assertNotIn("delegated", schema.lower())
+        for check_id in CHECK_FUNCTIONS:
+            self.assertNotIn("EXECUTION_REPLAY", check_id)
+            self.assertNotIn("CONSUMER_", check_id)
+            self.assertNotIn("DELEGATED", check_id)
+
+    def test_replay_source_has_no_consumer_conditional(self):
         from sdk.liminal_trcp.replay import __file__ as replay_file
 
         source = Path(replay_file).read_text(encoding="utf-8")
-        for token in ("delegated", "external_consumer", "quota", "approved"):
-            self.assertNotIn(token, source)
+        self.assertNotIn("external_consumer", source)
+        self.assertNotIn("delegated_spending", source)
 
     def test_replay_registry_is_verifier_side_only(self):
         from sdk.liminal_trcp.replay import __file__ as replay_file
@@ -414,6 +451,36 @@ class ReplayGenericityTests(unittest.TestCase):
         self.assertIn("WORKLOAD_EVIDENCE_SCHEMAS", source)
         self.assertIn("contract-workload-evidence-v0.1", source)
         self.assertIn("generic-workload-evidence-v0.1", source)
+
+
+class MalformedInputTests(unittest.TestCase):
+    def test_missing_amount_is_deterministic_violation(self):
+        malformed = {
+            "operations": [{"operation": "request_action"}],
+            "actor_schedule": ["agent"],
+        }
+        result = delegated_workload_result(malformed)
+        self.assertEqual(
+            [v["invariant_id"] for v in result["violations"]],
+            ["malformed-operation"],
+        )
+        self.assertEqual(result["final_state"], "ACTIVE")
+
+    def test_invariant_reports_are_deduplicated(self):
+        double_limit = {
+            "operations": [
+                {"operation": "request_action", "amount": 120},
+                {"operation": "approve"},
+                {"operation": "execute"},
+                {"operation": "execute"},
+            ],
+            "actor_schedule": ["agent", "approver", "agent", "agent"],
+        }
+        result = delegated_workload_result(double_limit)
+        self.assertEqual(
+            [v["invariant_id"] for v in result["violations"]],
+            ["per-action-limit", "cumulative-quota"],
+        )
 
 
 class CliExitCodeTests(unittest.TestCase):

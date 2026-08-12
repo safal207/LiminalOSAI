@@ -28,6 +28,7 @@ LOCAL_ONLY / SYNTHETIC_ONLY.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -128,7 +129,12 @@ class DelegatedSpendingFixture:
             "effect": effect,
         }
         self.steps.append(step)
-        self.violations.extend(self._check_invariants())
+        recorded_ids = {v["invariant_id"] for v in self.violations}
+        self.violations.extend(
+            report
+            for report in self._check_invariants()
+            if report["invariant_id"] not in recorded_ids
+        )
 
     def _check_invariants(self) -> list[dict[str, Any]]:
         report: list[dict[str, Any]] = []
@@ -240,7 +246,7 @@ def delegated_workload_result(external_input: Mapping[str, Any]) -> dict[str, An
     if len(schedule) != len(operations):
         raise ValueError("actor_schedule length must match operations length")
 
-    for operation, actor in zip(operations, schedule):
+    for operation, actor in zip(operations, schedule, strict=True):
         name = operation["operation"]
         try:
             if name == "request_action":
@@ -280,6 +286,15 @@ def delegated_workload_result(external_input: Mapping[str, Any]) -> dict[str, An
                     "detail": str(exc),
                 }
             )
+        except KeyError as exc:
+            fixture.violations.append(
+                {
+                    "invariant_id": "malformed-operation",
+                    "expression": "each operation must carry its required fields",
+                    "violated": True,
+                    "detail": f"missing field: {exc}",
+                }
+            )
     return fixture.summary()
 
 
@@ -291,7 +306,7 @@ def normalize_delegated_workload(external_input: Mapping[str, Any]) -> dict[str,
         "consumer_type": CONSUMER_TYPE,
         "requested_operation": [op["operation"] for op in external_input["operations"]],
         "actor": external_input.get("actor_schedule", AGENT_ACTOR),
-        "input": dict(external_input),
+        "input": copy.deepcopy(dict(external_input)),
         "result": result,
     }
 
@@ -356,6 +371,7 @@ __all__ = [
     "AGENT_ACTOR",
     "APPROVER_ACTOR",
     "AUTHORITY_EXTERNAL_INPUT",
+    "AuthorityViolation",
     "CONSUMER_ACTION",
     "CONSUMER_ACTIVITY",
     "CONSUMER_ASSET",
@@ -364,6 +380,7 @@ __all__ = [
     "CUMULATIVE_QUOTA",
     "DelegatedSpendingAdapter",
     "DelegatedSpendingFixture",
+    "DelegatedSpendingViolation",
     "IllegalOperation",
     "LIMIT_EXTERNAL_INPUT",
     "PER_ACTION_LIMIT",
