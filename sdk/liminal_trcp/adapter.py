@@ -15,7 +15,10 @@ evidence binding:
 ``run_external_consumer`` is the full generic pipeline. It never branches
 on consumer identity: all consumer-specific behavior lives inside the
 adapter (``normalize``, ``task``, ``fixture``, and the optional
-``replay_execution`` hook).
+``replay_execution`` hook). The pipeline adapts to the primary provider
+outcome: a failing primary triggers the failover decision and fallback
+run, a completed primary skips failover entirely, and an aborted primary
+closes the run without verification.
 
 Semantic boundary:
 
@@ -65,15 +68,20 @@ class ExternalWorkloadAdapter(Protocol):
     - ``normalize``: turn external input into the canonical workload body
       (the deterministic artifact the workload_sha256 commits to). The body
       must carry every field registered for its schema in
-      ``WORKLOAD_EVIDENCE_SCHEMAS``, plus a ``result`` object whose
-      ``violations`` entries provide ``invariant_id`` and ``expression``.
+      ``WORKLOAD_EVIDENCE_SCHEMAS``. The ``result`` value may be any JSON
+      value (scalar, list, or mapping); when it is a mapping whose
+      ``violations`` entries provide ``invariant_id`` and ``expression``,
+      the pipeline derives a synthetic finding from the first violation.
     - ``task``: build the TRCP task record, carrying a ``fixture`` reference
       that pins the workload digest (``<fixture>@sha256:<workload_sha256>``).
     - ``fixture``: build authorization / scope / task / primary provider for
-      the TRCP simulator run.
+      the TRCP simulator run. The primary provider outcome may be any
+      MockProvider outcome: a failover outcome triggers the failover path,
+      ``COMPLETED`` completes directly, ``ABORTED_BY_OPERATOR`` aborts.
     - ``replay_execution`` (optional): execution replay hook that re-runs the
       workload from a normalized workload body and returns its result. Its
-      outcome is reported separately from binding replay.
+      outcome is reported separately from binding replay; a hook exception is
+      encoded as a FAIL status without affecting the binding receipt.
     """
 
     consumer_type: str
@@ -118,7 +126,9 @@ def build_workload_evidence(
     }
 
 
-def _synthetic_finding(result: Mapping[str, Any]) -> dict[str, Any] | None:
+def _synthetic_finding(result: Any) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
     violations = result.get("violations") or []
     if not violations:
         return None
@@ -172,11 +182,13 @@ def run_external_consumer(
     simulator = TRCPSimulator(authorization, scope)
     simulator.authorize()
     simulator.execute_primary(task, primary)
-    simulator.record_failover(fallback)
-    simulator.execute_fallback(task, fallback)
-    simulator.verify(reproduced=reproduced)
-    if simulator.finding is not None and reproduced:
-        simulator.confirm_finding()
+    if simulator.state == "FAILOVER_PENDING":
+        simulator.record_failover(fallback)
+        simulator.execute_fallback(task, fallback)
+    if simulator.state == "VERIFYING":
+        simulator.verify(reproduced=reproduced)
+        if simulator.finding is not None and reproduced:
+            simulator.confirm_finding()
 
     report = simulator.report()
     bundle = build_evidence_bundle(report, consumer_evidence=workload_evidence)
@@ -187,13 +199,20 @@ def run_external_consumer(
     if execution_replay and not callable(hook):
         execution_replay_outcome = {"status": EXECUTION_REPLAY_UNSUPPORTED}
     elif execution_replay:
-        replay_result = hook(workload_body)
-        matches = replay_result == workload_body.get("result")
-        execution_replay_outcome = {
-            "status": "PASS" if matches else "FAIL",
-            "matches_binding_result": matches,
-            "result": replay_result,
-        }
+        try:
+            replay_result = hook(workload_body)
+        except Exception as exc:  # noqa: BLE001 - isolated from binding replay
+            execution_replay_outcome = {
+                "status": "FAIL",
+                "error": str(exc),
+            }
+        else:
+            matches = replay_result == workload_body.get("result")
+            execution_replay_outcome = {
+                "status": "PASS" if matches else "FAIL",
+                "matches_binding_result": matches,
+                "result": replay_result,
+            }
 
     return {
         "workload": workload_body["result"],

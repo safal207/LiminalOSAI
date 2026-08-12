@@ -357,6 +357,91 @@ class LegacyCompatibilityTests(unittest.TestCase):
         )
 
 
+class AdapterOutcomeAdaptivityTests(unittest.TestCase):
+    def _base_adapter(self, primary_outcome: str):
+        from sdk.liminal_trcp import MockProvider
+
+        class OutcomeAdapter(DelegatedSpendingAdapter):
+            def fixture(self, workload_sha256):
+                fixture = super().fixture(workload_sha256)
+                fixture["primary"] = MockProvider(
+                    self.primary_provider_id,
+                    "mock-model-a",
+                    primary_outcome,
+                    provider_metadata={"workload_sha256": workload_sha256},
+                )
+                return fixture
+
+        return OutcomeAdapter()
+
+    def test_primary_completion_without_failover_passes(self):
+        outcome = run_external_consumer(
+            self._base_adapter("COMPLETED"),
+            VALID_EXTERNAL_INPUT,
+        )
+        self.assertEqual(outcome["receipt"]["result"], "PASS")
+        self.assertIsNone(outcome["bundle"]["failover_decision"])
+        self.assertEqual(len(outcome["bundle"]["provider_runs"]), 1)
+        self.assertEqual(outcome["report"]["final_state"], "CLOSED")
+        self.assertIsNone(outcome["report"]["finding"])
+
+    def test_aborted_primary_closes_without_verification(self):
+        outcome = run_external_consumer(
+            self._base_adapter("ABORTED_BY_OPERATOR"),
+            VALID_EXTERNAL_INPUT,
+        )
+        self.assertEqual(outcome["receipt"]["result"], "PASS")
+        self.assertEqual(outcome["report"]["final_state"], "ABORTED")
+        self.assertIsNone(outcome["bundle"]["failover_decision"])
+        self.assertIsNone(outcome["report"]["verification"])
+
+    def test_failing_primary_still_triggers_failover(self):
+        outcome = run_external_consumer(
+            self._base_adapter("ACCESS_RESTRICTED"),
+            VALID_EXTERNAL_INPUT,
+        )
+        self.assertEqual(outcome["receipt"]["result"], "PASS")
+        self.assertIsNotNone(outcome["bundle"]["failover_decision"])
+        self.assertEqual(len(outcome["bundle"]["provider_runs"]), 2)
+
+    def test_scalar_normalized_result_is_supported(self):
+        class ScalarAdapter:
+            consumer_type = "delegated-spending"
+
+            def __init__(self):
+                self._delegate = DelegatedSpendingAdapter()
+
+            def normalize(self, external_input):
+                body = self._delegate.normalize(external_input)
+                body["result"] = {"final_state": body["result"]["final_state"]}
+                return body
+
+            def task(self, workload_sha256):
+                return self._delegate.task(workload_sha256)
+
+            def fixture(self, workload_sha256):
+                return self._delegate.fixture(workload_sha256)
+
+        outcome = run_external_consumer(ScalarAdapter(), VALID_EXTERNAL_INPUT)
+        self.assertEqual(outcome["receipt"]["result"], "PASS")
+        self.assertIsNone(outcome["report"]["finding"])
+
+    def test_replay_hook_exception_is_isolated_from_binding(self):
+        class ThrowingHookAdapter(DelegatedSpendingAdapter):
+            def replay_execution(self, workload_body):
+                raise RuntimeError("sandbox exploded")
+
+        outcome = run_external_consumer(
+            ThrowingHookAdapter(),
+            VALID_EXTERNAL_INPUT,
+            execution_replay=True,
+        )
+        self.assertEqual(outcome["execution_replay"]["status"], "FAIL")
+        self.assertIn("sandbox exploded", outcome["execution_replay"]["error"])
+        self.assertEqual(outcome["receipt"]["result"], "PASS")
+        self.assertNotIn("execution", outcome["receipt"])
+
+
 class ExecutionReplaySeparationTests(unittest.TestCase):
     def test_execution_replay_optional_and_not_required_for_binding(self):
         outcome = run_external_consumer(
