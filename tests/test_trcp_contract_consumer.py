@@ -81,6 +81,37 @@ class WorkloadFixtureTests(unittest.TestCase):
             ],
         )
 
+    def test_per_step_actor_schedule_reaches_named_action(self):
+        result = workload_result(
+            ("FUNDED", "RELEASE_REQUESTED", "RELEASED"),
+            actor=("buyer", "buyer", "seller"),
+        )
+        self.assertEqual(result["final_state"], "RELEASE_REQUESTED")
+        self.assertEqual(
+            [v["invariant_id"] for v in result["violations"]],
+            ["authorization"],
+        )
+        self.assertEqual(
+            [step["action"] for step in result["path"]],
+            ["fund", "release_request"],
+        )
+
+    def test_actor_schedule_length_mismatch_raises(self):
+        with self.assertRaises(ValueError):
+            workload_result(("FUNDED",), actor=("buyer", "seller"))
+
+    def test_actor_schedule_pipeline_evidence_records_actor_list(self):
+        outcome = run_contract_consumer(
+            ("FUNDED", "RELEASE_REQUESTED", "RELEASED"),
+            actor=("buyer", "buyer", "seller"),
+        )
+        self.assertEqual(
+            outcome["workload_evidence"]["actor"],
+            ["buyer", "buyer", "seller"],
+        )
+        self.assertEqual(outcome["receipt"]["result"], "PASS")
+        self.assertIsNotNone(outcome["report"]["finding"])
+
 
 class ContractConsumerPipelineTests(unittest.TestCase):
     def test_valid_path_produces_clean_passing_receipt(self):
