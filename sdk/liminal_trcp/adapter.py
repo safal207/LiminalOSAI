@@ -36,6 +36,7 @@ LOCAL_ONLY / SYNTHETIC_ONLY.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
@@ -54,6 +55,26 @@ from sdk.liminal_trcp.replay import (
 
 EXECUTION_REPLAY_NOT_RUN = "NOT_RUN"
 EXECUTION_REPLAY_UNSUPPORTED = "UNSUPPORTED"
+
+
+def _canonical_equal(left: Any, right: Any) -> bool:
+    """Compare JSON values without Python's ``True == 1`` coercion."""
+    try:
+        return json.dumps(
+            left,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ) == json.dumps(
+            right,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 class WorkloadAdapterError(ValueError):
@@ -138,10 +159,12 @@ def build_workload_evidence(
 def _synthetic_finding(result: Any) -> dict[str, Any] | None:
     if not isinstance(result, dict):
         return None
-    violations = result.get("violations") or []
-    if not violations:
+    violations = result.get("violations")
+    if not isinstance(violations, (list, tuple)) or not violations:
         return None
     first = violations[0]
+    if not isinstance(first, Mapping):
+        return None
     return {
         "finding_class": "WORKLOAD_INVARIANT_VIOLATION",
         "location_reference": "fixture://external-consumer-workload#L1",
@@ -216,7 +239,7 @@ def run_external_consumer(
                 "error": str(exc),
             }
         else:
-            matches = replay_result == workload_body.get("result")
+            matches = _canonical_equal(replay_result, workload_body.get("result"))
             execution_replay_outcome = {
                 "status": "PASS" if matches else "FAIL",
                 "matches_binding_result": matches,

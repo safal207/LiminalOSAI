@@ -7,6 +7,9 @@ on:
       - "tests/test_trcp_*.py"
       - "scripts/replay_trcp_contractgraph.py"
       - "scripts/replay_trcp_external_consumer.py"
+      - "examples/trcp_external_consumer_reference/**"
+      - "docs/TRCP_ADAPTER_SDK.md"
+      - "README.md"
       - "Makefile"
       - ".github/workflows/trcp-contract-consumer-ci.yml"
   push:
@@ -17,6 +20,9 @@ on:
       - "tests/test_trcp_*.py"
       - "scripts/replay_trcp_contractgraph.py"
       - "scripts/replay_trcp_external_consumer.py"
+      - "examples/trcp_external_consumer_reference/**"
+      - "docs/TRCP_ADAPTER_SDK.md"
+      - "README.md"
       - "Makefile"
       - ".github/workflows/trcp-contract-consumer-ci.yml"
 
@@ -38,13 +44,16 @@ jobs:
           python-version: "3.12"
 
       - name: Compile Python sources
-        run: python -m compileall -q sdk/liminal_trcp scripts/replay_trcp_contractgraph.py scripts/replay_trcp_external_consumer.py tests/test_trcp_contract_consumer.py tests/test_trcp_external_consumer.py
+        run: python -m compileall -q sdk/liminal_trcp scripts/replay_trcp_contractgraph.py scripts/replay_trcp_external_consumer.py examples/trcp_external_consumer_reference tests/test_trcp_contract_consumer.py tests/test_trcp_external_consumer.py tests/test_trcp_adapter_sdk.py
 
       - name: Run contract consumer regressions
         run: python -m unittest tests/test_trcp_contract_consumer.py -v
 
       - name: Run external consumer regressions
         run: python -m unittest tests/test_trcp_external_consumer.py -v
+
+      - name: Run public Adapter SDK contract tests
+        run: python -m unittest tests/test_trcp_adapter_sdk.py -v
 
       - name: Run full TRCP regression set
         run: make trcp-test
@@ -54,3 +63,8 @@ jobs:
 
       - name: Run external consumer replay CLI
         run: python scripts/replay_trcp_external_consumer.py
+
+      - name: Run public Adapter SDK reference integration
+        run: |
+          python -m examples.trcp_external_consumer_reference.self_check
+          python -m examples.trcp_external_consumer_reference.self_check --execution-replay

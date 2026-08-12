@@ -25,6 +25,7 @@ LOCAL_ONLY / SYNTHETIC_ONLY. No providers, no network, no real targets.
 from __future__ import annotations
 
 import re
+from types import MappingProxyType
 from typing import Any
 
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
@@ -633,7 +634,7 @@ GENERIC_WORKLOAD_EVIDENCE_SCHEMA = "generic-workload-evidence-v0.1"
 #: Consumer evidence schema registry: schema name -> canonical binding fields.
 #: The workload_sha256 of a consumer artifact is the canonical hash of exactly
 #: these fields, so every registered schema defines its own binding closure.
-WORKLOAD_EVIDENCE_SCHEMAS: dict[str, tuple[str, ...]] = {
+WORKLOAD_EVIDENCE_SCHEMAS = MappingProxyType({
     WORKLOAD_EVIDENCE_SCHEMA: ("schema", "requested_path", "actor", "result"),
     GENERIC_WORKLOAD_EVIDENCE_SCHEMA: (
         "schema",
@@ -643,7 +644,7 @@ WORKLOAD_EVIDENCE_SCHEMAS: dict[str, tuple[str, ...]] = {
         "input",
         "result",
     ),
-}
+})
 _TASK_FIXTURE_PATTERN = r"^(.+)@sha256:([0-9a-f]{64})$"
 _WORKLOAD_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 

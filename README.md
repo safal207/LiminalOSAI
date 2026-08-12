@@ -63,6 +63,12 @@ independent re-execution is a separate layer (see
 - [docs/RESONANCE_TRCP_EVIDENCE.md](docs/RESONANCE_TRCP_EVIDENCE.md) — why a green test is not enough for a financial AI agent
 - Run: `python3 scripts/benchmark_trcp_contract.py` → `artifacts/trcp-contract-benchmark.json` (gitignored)
 
+### TRCP Adapter SDK v0.1
+
+- [Five-minute external integration](docs/TRCP_ADAPTER_SDK.md)
+- Reference consumer: `python3 -m examples.trcp_external_consumer_reference.self_check`
+- Focused tests: `make trcp-sdk-test`
+
 ## Layout
 
 - Core loop: core/pulse_kernel.c
