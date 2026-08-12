@@ -52,9 +52,12 @@ See core/pulse_kernel.c for the full flag list and defaults.
 ```
 
 A deterministic, local-only proof that the TRCP pipeline produces stable,
-independently replayable, tamper-evident receipts for contract-state workloads
+independently verifiable, tamper-evident receipts for contract-state workloads
 (escrow: clean / illegal / invariant scenario classes, 12 adversarial bundle
-mutations). Determinism is proven on evidence hashes, not on wall-clock timing.
+mutations). Determinism is proven on evidence hashes, not on wall-clock
+timing. Scope: evidence consistency/binding under mutation; producer-
+independent re-execution is a separate layer (see
+[docs/benchmark-v0.1.md](docs/benchmark-v0.1.md)).
 
 - [docs/benchmark-v0.1.md](docs/benchmark-v0.1.md) — what is checked, scenario classes, invariants, evidence binding, independent replay
 - [docs/RESONANCE_TRCP_EVIDENCE.md](docs/RESONANCE_TRCP_EVIDENCE.md) — why a green test is not enough for a financial AI agent

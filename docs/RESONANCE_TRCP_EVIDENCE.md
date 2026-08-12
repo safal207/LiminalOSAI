@@ -32,13 +32,21 @@ agent must not conflate**:
 2. **Is the evidence bound to the workload?** — `workload_sha256` covers the
    path, the actors, and the result; the bundle and the receipt chain to that
    digest. Change any one byte and the whole chain breaks.
-3. **Is tampering independently detectable?** — the receiver re-executes the
-   workload from the evidence and compares hashes, so detection does not
-   depend on the honesty of the producer.
+3. **Is tampering independently detectable?** — the receiver verifies the
+   consistency of the evidence chain from outside the producing process:
+   workload hash binding, bundle integrity, provider-run hashes, trace chain,
+   authorization continuity, verification closure. No single piece of
+   evidence can be altered without breaking the chain.
 
 The benchmark makes this concrete: 21 scenarios prove stable receipts for
 clean, illegal, and invariant workloads; 12 adversarial mutations are all
 rejected with the expected failed check and none is ever confirmed as `PASS`.
+
+Honest boundary: the receiver does not re-execute the state machine and cannot
+defend against a fully dishonest producer that coherently recomputes the whole
+evidence chain. What v0.1 proves is that **any single drift in the bound
+evidence is detectable** — the difference between "we trust the SDK's word" and
+"the claim must survive an independent consistency check".
 
 ## Resonance
 

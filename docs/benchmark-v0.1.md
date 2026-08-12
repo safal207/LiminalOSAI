@@ -3,9 +3,10 @@
 ## Claim
 
 The TRCP (trusted replay checkpoint) pipeline produces **stable,
-independently replayable, tamper-evident receipts** for contract-state
+independently verifiable, tamper-evident receipts** for contract-state
 workloads: a receipt changes exactly when the evidence it covers changes, and
-tampering with any bound evidence is detectable by an independent verifier.
+any single drift in the bound evidence is detectable by an independent
+verifier that does not share the producer's state.
 
 Benchmark result:
 
@@ -75,21 +76,33 @@ authorization failure is asserted.
   (`BUNDLE_INTEGRITY`, `WORKLOAD_EVIDENCE_BINDING`,
   `AUTHORIZATION_CONTINUITY`, `TRACE_HASH_CHAIN`, `VERIFICATION_CLOSURE`).
 
-## Independent replay
+## Independent verification
 
-The receiver does not trust the consumer or the provider. It rebuilds the
-workload from the evidence and compares hashes; provider claims are verified
-against the workload digest. The benchmark proves this twice per scenario:
+The receiver does not share the producer's process state. It verifies the
+consistency of the evidence chain — workload hash binding, bundle integrity,
+provider-run hashes, trace hash chain, authorization continuity, and
+verification closure — so that **no single piece of evidence can be altered
+without breaking the chain**. The benchmark proves this against 12 adversarial
+mutations: every one is rejected with the expected failed check, and no
+expected-FAIL record is ever confirmed as `PASS` (0 false confirmations).
 
-- `workload_sha256`, `bundle_sha256`, `receipt_sha256` are identical across
-  two independent runs (63/63 hash comparisons stable);
-- the same receipts would not exist for a tampered bundle — 12/12 mutations
-  are rejected with the expected failed check, and no expected-FAIL record is
-  ever confirmed as `PASS` (0 false confirmations).
+Boundary: the receiver does not re-execute the escrow state machine, and it
+does not defend against a fully dishonest producer that coherently recomputes
+the whole chain (workload hash, task fixture, provider metadata, bundle hash)
+after changing a result. v0.1 guarantees consistency/binding under mutation —
+the final-state tamper is detected because the dependent references are left
+stale. Producer-independent re-execution requires the receiver to hold its own
+workload executor; that is a separate layer, not claimed here.
+
+Both runs are recorded per scenario (`evidence` + `second_evidence`), and
+`workload_sha256`, `bundle_sha256`, `receipt_sha256` are identical across two
+independent runs (63/63 hash comparisons stable).
 
 ## Limits
 
 - Synthetic fixtures and mock providers; this measures the evidence contract,
   not real-chain execution.
+- Evidence consistency/binding under mutation, not producer-independent
+  re-execution (see "Independent verification").
 - Timing is observational only — determinism is proven on hashes, never on
   wall-clock.
