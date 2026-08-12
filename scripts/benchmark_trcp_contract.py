@@ -38,7 +38,6 @@ if str(ROOT) not in sys.path:
 
 from sdk.liminal_post_sandbox_contracts import canonical_sha256  # noqa: E402
 from sdk.liminal_trcp.consumer import (  # noqa: E402
-    DOUBLE_RELEASE_PATH,
     ILLEGAL_PATH,
     VALID_PATH,
     run_contract_consumer,
@@ -84,40 +83,173 @@ def _benchmark_metadata() -> dict[str, Any]:
 
 def _scenario(
     name: str,
-    path: tuple[str, ...],
-    actor: str,
+    steps: tuple[tuple[str, str], ...],
     scenario_class: str,
+    *,
+    expected_violations: list[str],
+    expected_finding: bool,
 ) -> dict[str, Any]:
     return {
         "name": name,
-        "path": list(path),
-        "actor": actor,
+        "steps": [list(step) for step in steps],
         "class": scenario_class,
         "expected": "PASS",
+        "expected_violations": list(expected_violations),
+        "expected_finding": expected_finding,
     }
 
 
+B = "buyer"
+S = "seller"
+
 SCENARIOS: list[dict[str, Any]] = [
-    _scenario("valid-full-release", VALID_PATH, "buyer", CLEAN),
-    _scenario("funded-only", ("FUNDED",), "buyer", CLEAN),
-    _scenario("funded-release-requested", ("FUNDED", "RELEASE_REQUESTED"), "buyer", CLEAN),
-    _scenario("funded-refunded", ("FUNDED", "REFUNDED"), "buyer", CLEAN),
-    _scenario("refund-then-release", ("FUNDED", "REFUNDED", "RELEASED"), "buyer", CLEAN),
-    _scenario("empty-path", (), "buyer", CLEAN),
-    _scenario("request-before-funding", ("RELEASE_REQUESTED",), "buyer", ILLEGAL),
-    _scenario("release-before-funding", ("RELEASED",), "buyer", ILLEGAL),
-    _scenario("refund-before-funding", ("REFUNDED",), "buyer", ILLEGAL),
-    _scenario("double-fund", ("FUNDED", "FUNDED"), "buyer", ILLEGAL),
-    _scenario("double-release-request", ("FUNDED", "RELEASE_REQUESTED", "RELEASE_REQUESTED"), "buyer", ILLEGAL),
-    _scenario("release-then-refund", ("FUNDED", "RELEASE_REQUESTED", "RELEASED", "REFUNDED"), "buyer", ILLEGAL),
-    _scenario("unauthorized-seller-fund", ("FUNDED",), "seller", ILLEGAL),
-    _scenario("unauthorized-seller-release", VALID_PATH, "seller", ILLEGAL),
-    _scenario("unauthorized-seller-refund", ("FUNDED", "REFUNDED"), "seller", ILLEGAL),
-    _scenario("double-release-invariant", DOUBLE_RELEASE_PATH, "buyer", INVARIANT),
-    _scenario("illegal-terminal-state", ILLEGAL_PATH, "buyer", INVARIANT),
-    _scenario("unauthorized-seller-request", ("FUNDED", "RELEASE_REQUESTED"), "seller", ILLEGAL),
-    _scenario("unauthorized-seller-deep-release", VALID_PATH + ("RELEASED",), "seller", ILLEGAL),
-    _scenario("request-after-refund", ("FUNDED", "REFUNDED", "RELEASE_REQUESTED"), "buyer", ILLEGAL),
+    _scenario(
+        "valid-full-release",
+        (("FUNDED", B), ("RELEASE_REQUESTED", B), ("RELEASED", B)),
+        CLEAN,
+        expected_violations=[],
+        expected_finding=False,
+    ),
+    _scenario(
+        "funded-only",
+        (("FUNDED", B),),
+        CLEAN,
+        expected_violations=[],
+        expected_finding=False,
+    ),
+    _scenario(
+        "funded-release-requested",
+        (("FUNDED", B), ("RELEASE_REQUESTED", B)),
+        CLEAN,
+        expected_violations=[],
+        expected_finding=False,
+    ),
+    _scenario(
+        "funded-refunded",
+        (("FUNDED", B), ("REFUNDED", B)),
+        CLEAN,
+        expected_violations=[],
+        expected_finding=False,
+    ),
+    _scenario(
+        "empty-path",
+        (),
+        CLEAN,
+        expected_violations=[],
+        expected_finding=False,
+    ),
+    _scenario(
+        "request-before-funding",
+        (("RELEASE_REQUESTED", B),),
+        ILLEGAL,
+        expected_violations=["transition-validation"],
+        expected_finding=True,
+    ),
+    _scenario(
+        "release-before-funding",
+        (("RELEASED", B),),
+        ILLEGAL,
+        expected_violations=["transition-validation"],
+        expected_finding=True,
+    ),
+    _scenario(
+        "refund-before-funding",
+        (("REFUNDED", B),),
+        ILLEGAL,
+        expected_violations=["transition-validation"],
+        expected_finding=True,
+    ),
+    _scenario(
+        "double-fund",
+        (("FUNDED", B), ("FUNDED", B)),
+        ILLEGAL,
+        expected_violations=["transition-validation"],
+        expected_finding=True,
+    ),
+    _scenario(
+        "double-release-request",
+        (("FUNDED", B), ("RELEASE_REQUESTED", B), ("RELEASE_REQUESTED", B)),
+        ILLEGAL,
+        expected_violations=["transition-validation"],
+        expected_finding=True,
+    ),
+    _scenario(
+        "release-then-refund",
+        (("FUNDED", B), ("RELEASE_REQUESTED", B), ("RELEASED", B), ("REFUNDED", B)),
+        ILLEGAL,
+        expected_violations=["transition-validation"],
+        expected_finding=True,
+    ),
+    _scenario(
+        "request-after-refund",
+        (("FUNDED", B), ("REFUNDED", B), ("RELEASE_REQUESTED", B)),
+        ILLEGAL,
+        expected_violations=["transition-validation"],
+        expected_finding=True,
+    ),
+    _scenario(
+        "request-then-release-before-funding",
+        (("RELEASE_REQUESTED", B), ("RELEASED", B)),
+        ILLEGAL,
+        expected_violations=["transition-validation"],
+        expected_finding=True,
+    ),
+    _scenario(
+        "unauthorized-seller-fund",
+        (("FUNDED", S),),
+        ILLEGAL,
+        expected_violations=["authorization"],
+        expected_finding=True,
+    ),
+    _scenario(
+        "unauthorized-seller-request",
+        (("FUNDED", B), ("RELEASE_REQUESTED", S)),
+        ILLEGAL,
+        expected_violations=["authorization"],
+        expected_finding=True,
+    ),
+    _scenario(
+        "unauthorized-seller-release",
+        (("FUNDED", B), ("RELEASE_REQUESTED", B), ("RELEASED", S)),
+        ILLEGAL,
+        expected_violations=["authorization"],
+        expected_finding=True,
+    ),
+    _scenario(
+        "unauthorized-seller-refund",
+        (("FUNDED", B), ("REFUNDED", S)),
+        ILLEGAL,
+        expected_violations=["authorization"],
+        expected_finding=True,
+    ),
+    _scenario(
+        "unauthorized-seller-deep-release",
+        (("FUNDED", B), ("RELEASE_REQUESTED", B), ("RELEASED", B), ("RELEASED", S)),
+        ILLEGAL,
+        expected_violations=["authorization"],
+        expected_finding=True,
+    ),
+    _scenario(
+        "refund-then-release",
+        (("FUNDED", B), ("REFUNDED", B), ("RELEASED", B)),
+        INVARIANT,
+        expected_violations=["terminal-state-exclusivity"],
+        expected_finding=True,
+    ),
+    _scenario(
+        "double-release-invariant",
+        (("FUNDED", B), ("RELEASE_REQUESTED", B), ("RELEASED", B), ("RELEASED", B)),
+        INVARIANT,
+        expected_violations=["payout-conservation"],
+        expected_finding=True,
+    ),
+    _scenario(
+        "double-release-refund",
+        (("FUNDED", B), ("REFUNDED", B), ("RELEASED", B), ("RELEASED", B)),
+        INVARIANT,
+        expected_violations=["payout-conservation", "terminal-state-exclusivity"],
+        expected_finding=True,
+    ),
 ]
 
 
@@ -165,9 +297,14 @@ def _break_verification_closure(bundle: dict[str, Any]) -> None:
     bundle["verification"] = None
 
 
+def _adversarial_name(base: str, kind: str | None = "tamper") -> str:
+    """Combine a base name with an optional adversarial class suffix."""
+    return base if kind is None else f"{kind}-{base}"
+
+
 TAMPERS: list[dict[str, Any]] = [
     {
-        "name": "tamper-bundle-integrity",
+        "name": _adversarial_name("bundle-integrity"),
         "class": ADVERSARIAL,
         "expected": "FAIL",
         "expected_failed_check": "BUNDLE_INTEGRITY",
@@ -175,7 +312,7 @@ TAMPERS: list[dict[str, Any]] = [
         "recalculate": False,
     },
     {
-        "name": "tamper-requested-path",
+        "name": _adversarial_name("requested-path"),
         "class": ADVERSARIAL,
         "expected": "FAIL",
         "expected_failed_check": "WORKLOAD_EVIDENCE_BINDING",
@@ -183,7 +320,7 @@ TAMPERS: list[dict[str, Any]] = [
         "recalculate": True,
     },
     {
-        "name": "tamper-final-state",
+        "name": _adversarial_name("final-state"),
         "class": ADVERSARIAL,
         "expected": "FAIL",
         "expected_failed_check": "WORKLOAD_EVIDENCE_BINDING",
@@ -191,7 +328,7 @@ TAMPERS: list[dict[str, Any]] = [
         "recalculate": True,
     },
     {
-        "name": "tamper-forged-violations",
+        "name": _adversarial_name("forged-violations"),
         "class": ADVERSARIAL,
         "expected": "FAIL",
         "expected_failed_check": "WORKLOAD_EVIDENCE_BINDING",
@@ -199,7 +336,7 @@ TAMPERS: list[dict[str, Any]] = [
         "recalculate": True,
     },
     {
-        "name": "tamper-task-identity",
+        "name": _adversarial_name("task-identity"),
         "class": ADVERSARIAL,
         "expected": "FAIL",
         "expected_failed_check": "WORKLOAD_EVIDENCE_BINDING",
@@ -207,7 +344,7 @@ TAMPERS: list[dict[str, Any]] = [
         "recalculate": True,
     },
     {
-        "name": "tamper-schema",
+        "name": _adversarial_name("schema"),
         "class": ADVERSARIAL,
         "expected": "FAIL",
         "expected_failed_check": "WORKLOAD_EVIDENCE_BINDING",
@@ -215,7 +352,7 @@ TAMPERS: list[dict[str, Any]] = [
         "recalculate": True,
     },
     {
-        "name": "tamper-evidence-stripped",
+        "name": _adversarial_name("evidence-stripped"),
         "class": ADVERSARIAL,
         "expected": "FAIL",
         "expected_failed_check": "WORKLOAD_EVIDENCE_BINDING",
@@ -223,7 +360,7 @@ TAMPERS: list[dict[str, Any]] = [
         "recalculate": True,
     },
     {
-        "name": "tamper-empty-provider-runs",
+        "name": _adversarial_name("empty-provider-runs"),
         "class": ADVERSARIAL,
         "expected": "FAIL",
         "expected_failed_check": "WORKLOAD_EVIDENCE_BINDING",
@@ -231,7 +368,7 @@ TAMPERS: list[dict[str, Any]] = [
         "recalculate": True,
     },
     {
-        "name": "tamper-mismatched-provider-hash",
+        "name": _adversarial_name("mismatched-provider-hash"),
         "class": ADVERSARIAL,
         "expected": "FAIL",
         "expected_failed_check": "WORKLOAD_EVIDENCE_BINDING",
@@ -239,7 +376,7 @@ TAMPERS: list[dict[str, Any]] = [
         "recalculate": True,
     },
     {
-        "name": "tamper-authorization",
+        "name": _adversarial_name("authorization"),
         "class": ADVERSARIAL,
         "expected": "FAIL",
         "expected_failed_check": "AUTHORIZATION_CONTINUITY",
@@ -247,7 +384,7 @@ TAMPERS: list[dict[str, Any]] = [
         "recalculate": True,
     },
     {
-        "name": "tamper-trace-chain",
+        "name": _adversarial_name("trace-chain"),
         "class": ADVERSARIAL,
         "expected": "FAIL",
         "expected_failed_check": "TRACE_HASH_CHAIN",
@@ -255,7 +392,7 @@ TAMPERS: list[dict[str, Any]] = [
         "recalculate": True,
     },
     {
-        "name": "tamper-verification-closure",
+        "name": _adversarial_name("verification-closure"),
         "class": ADVERSARIAL,
         "expected": "FAIL",
         "expected_failed_check": "VERIFICATION_CLOSURE",
@@ -267,7 +404,11 @@ TAMPERS: list[dict[str, Any]] = [
 
 
 def _run_scenario_once(spec: dict[str, Any]) -> dict[str, Any]:
-    outcome = run_contract_consumer(tuple(spec["path"]), actor=spec["actor"])
+    steps = [tuple(step) for step in spec["steps"]]
+    path = tuple(step[0] for step in steps)
+    actors = tuple(step[1] for step in steps)
+    actor: str | tuple[str, ...] = actors[0] if len(set(actors)) == 1 else actors
+    outcome = run_contract_consumer(path, actor=actor)
     bundle = outcome["bundle"]
     started = time.perf_counter_ns()
     receipt = verify_evidence_bundle(bundle)
@@ -276,7 +417,13 @@ def _run_scenario_once(spec: dict[str, Any]) -> dict[str, Any]:
         "scenario": spec["name"],
         "class": spec["class"],
         "expected": spec["expected"],
+        "expected_violations": list(spec["expected_violations"]),
+        "expected_finding": spec["expected_finding"],
         "actual": receipt["result"],
+        "actual_violations": sorted(
+            {v["invariant_id"] for v in outcome["workload"]["violations"]}
+        ),
+        "finding_present": outcome["report"]["finding"] is not None,
         "evidence": {
             "workload_sha256": outcome["workload_evidence"]["workload_sha256"],
             "bundle_sha256": bundle["bundle_sha256"],
@@ -320,15 +467,33 @@ def main() -> int:
         records: list[dict[str, Any]] = []
         failures: list[str] = []
 
-        first_runs: dict[str, dict[str, Any]] = {}
         hash_failures = 0
         for spec in SCENARIOS:
             first = _run_scenario_once(spec)
             second = _run_scenario_once(spec)
+            first["second_evidence"] = {
+                key: second["evidence"][key]
+                for key in ("workload_sha256", "bundle_sha256", "receipt_sha256")
+            }
+            first["hash_equality"] = {
+                key: first["evidence"][key] == second["evidence"][key]
+                for key in ("workload_sha256", "bundle_sha256", "receipt_sha256")
+            }
+            first["deterministic"] = all(first["hash_equality"].values())
             records.append(first)
 
             if first["actual"] != spec["expected"]:
                 failures.append(f"{spec['name']}: expected {spec['expected']}, got {first['actual']}")
+            if first["actual_violations"] != first["expected_violations"]:
+                failures.append(
+                    f"{spec['name']}: expected violations {first['expected_violations']}, "
+                    f"got {first['actual_violations']}"
+                )
+            if first["finding_present"] != spec["expected_finding"]:
+                failures.append(
+                    f"{spec['name']}: expected finding={spec['expected_finding']}, "
+                    f"got finding={first['finding_present']}"
+                )
             if second["actual"] != spec["expected"]:
                 failures.append(f"{spec['name']} (run 2): expected {spec['expected']}, got {second['actual']}")
             for key in ("workload_sha256", "bundle_sha256", "receipt_sha256"):
@@ -336,12 +501,9 @@ def main() -> int:
                     hash_failures += 1
                     failures.append(f"{spec['name']}: evidence {key} differs across runs")
 
-            first_runs[spec["name"]] = first
-
-        baseline = run_contract_consumer(VALID_PATH)
         for spec in TAMPERS:
-            if spec.get("baseline_path") is not None:
-                baseline = run_contract_consumer(tuple(spec["baseline_path"]))
+            baseline_path = tuple(spec.get("baseline_path") or VALID_PATH)
+            baseline = run_contract_consumer(baseline_path)
             record = _run_tamper_once(spec, baseline)
             records.append(record)
             if record["actual"] != spec["expected"]:
@@ -364,12 +526,12 @@ def main() -> int:
             1 for r in binding_tampers if r["failed_check"] == "WORKLOAD_EVIDENCE_BINDING"
         )
         deterministic = sum(
-            1 for name, first in first_runs.items() if first["actual"] == "PASS"
+            1 for r in scenario_records if r["deterministic"] and r["actual"] == "PASS"
         )
         false_confirmations = sum(
-            1 for r in scenario_records if r["expected"] == "PASS" and r["actual"] != "PASS"
+            1 for r in records if r["expected"] == "FAIL" and r["actual"] == "PASS"
         )
-        hashes_compared = len(first_runs) * 3
+        hashes_compared = len(scenario_records) * 3
         hashes_stable = hashes_compared - hash_failures
         replay_times_ns = [r["measurement"]["replay_time_ns"] for r in scenario_records]
 

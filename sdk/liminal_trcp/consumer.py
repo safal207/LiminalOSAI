@@ -161,7 +161,13 @@ class EscrowFixture:
         self._record("refund", actor, "escrow refunded to buyer", pre_state)
 
     def run_path(self, path: tuple[str, ...], actor: str = "buyer") -> "EscrowFixture":
-        for expected_state in path:
+        return self.run_path_steps(tuple((state, actor) for state in path))
+
+    def run_path_steps(
+        self,
+        steps: tuple[tuple[str, str], ...],
+    ) -> "EscrowFixture":
+        for expected_state, actor in steps:
             action = {
                 "FUNDED": "fund",
                 "RELEASE_REQUESTED": "release_request",
@@ -181,11 +187,23 @@ class EscrowFixture:
         }
 
 
-def workload_result(path: tuple[str, ...], actor: str = "buyer") -> dict[str, Any]:
-    """Run the local state machine and return a deterministic workload result."""
+def workload_result(
+    path: tuple[str, ...],
+    actor: str | tuple[str, ...] = "buyer",
+) -> dict[str, Any]:
+    """Run the local state machine and return a deterministic workload result.
+
+    ``actor`` is either a single actor applied to every step, or a per-step
+    actor schedule of the same length as ``path``.
+    """
     fixture = EscrowFixture()
     try:
-        fixture.run_path(path, actor)
+        if isinstance(actor, str):
+            fixture.run_path(path, actor)
+        elif len(actor) != len(path):
+            raise ValueError("actor schedule length must match path length")
+        else:
+            fixture.run_path_steps(tuple(zip(path, actor)))
     except AuthorizationViolation as exc:
         fixture.violations.append(
             {
@@ -209,7 +227,7 @@ def workload_result(path: tuple[str, ...], actor: str = "buyer") -> dict[str, An
 
 def _workload_evidence(
     path: tuple[str, ...],
-    actor: str,
+    actor: str | tuple[str, ...],
     result: dict[str, Any],
     task: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -224,13 +242,13 @@ def _workload_evidence(
 
 def _workload_body(
     path: tuple[str, ...],
-    actor: str,
+    actor: str | tuple[str, ...],
     result: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema": WORKLOAD_EVIDENCE_SCHEMA,
         "requested_path": list(path),
-        "actor": actor,
+        "actor": list(actor) if isinstance(actor, tuple) else actor,
         "result": result,
     }
 
@@ -295,7 +313,7 @@ def contract_fixture(workload_sha256: str | None = None) -> dict[str, Any]:
 
 def run_contract_consumer(
     path: tuple[str, ...],
-    actor: str = "buyer",
+    actor: str | tuple[str, ...] = "buyer",
 ) -> dict[str, Any]:
     """Full pipeline: local fixture -> TRCP -> evidence bundle -> replay receipt."""
     result = workload_result(path, actor)
