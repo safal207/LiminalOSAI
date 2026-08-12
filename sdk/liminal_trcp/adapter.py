@@ -78,10 +78,6 @@ class ExternalWorkloadAdapter(Protocol):
       the TRCP simulator run. The primary provider outcome may be any
       MockProvider outcome: a failover outcome triggers the failover path,
       ``COMPLETED`` completes directly, ``ABORTED_BY_OPERATOR`` aborts.
-    - ``replay_execution`` (optional): execution replay hook that re-runs the
-      workload from a normalized workload body and returns its result. Its
-      outcome is reported separately from binding replay; a hook exception is
-      encoded as a FAIL status without affecting the binding receipt.
     """
 
     consumer_type: str
@@ -91,6 +87,19 @@ class ExternalWorkloadAdapter(Protocol):
     def task(self, workload_sha256: str) -> dict[str, Any]: ...
 
     def fixture(self, workload_sha256: str) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class ExecutionReplayHook(Protocol):
+    """Optional TRCP v0.4 adapter hook for execution replay.
+
+    An adapter may implement this separate protocol on top of
+    ``ExternalWorkloadAdapter`` to re-run the workload from a normalized
+    workload body. The hook outcome is reported separately from binding
+    replay; a hook exception is encoded as a FAIL status without affecting
+    the binding receipt. Adapters without the hook are still valid: a
+    requested execution replay reports ``UNSUPPORTED``.
+    """
 
     def replay_execution(self, workload_body: Mapping[str, Any]) -> dict[str, Any] | None: ...
 
@@ -195,7 +204,7 @@ def run_external_consumer(
     receipt = verify_evidence_bundle(bundle)
 
     execution_replay_outcome: dict[str, Any] = {"status": EXECUTION_REPLAY_NOT_RUN}
-    hook = getattr(adapter, "replay_execution", None)
+    hook = adapter.replay_execution if isinstance(adapter, ExecutionReplayHook) else None
     if execution_replay and not callable(hook):
         execution_replay_outcome = {"status": EXECUTION_REPLAY_UNSUPPORTED}
     elif execution_replay:
@@ -232,6 +241,7 @@ def run_external_consumer(
 __all__ = [
     "EXECUTION_REPLAY_NOT_RUN",
     "EXECUTION_REPLAY_UNSUPPORTED",
+    "ExecutionReplayHook",
     "ExternalWorkloadAdapter",
     "GENERIC_WORKLOAD_EVIDENCE_SCHEMA",
     "WorkloadAdapterError",
