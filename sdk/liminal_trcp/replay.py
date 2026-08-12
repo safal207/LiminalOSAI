@@ -1,4 +1,4 @@
-"""TRCP v0.2 — Independent replay verifier.
+"""TRCP v0.2/v0.4 — Independent replay verifier.
 
 Validates a provider-neutral evidence bundle without re-running the
 originating simulator. The verifier checks invariants from the bundle alone:
@@ -7,6 +7,12 @@ transition legality, temporal monotonicity, task identity, finding
 trustworthiness, verification closure, and (for consumer workloads) the
 cryptographic binding of the complete workload artifact to the task and
 provider run chain.
+
+Consumer workload binding is schema-driven: ``WORKLOAD_EVIDENCE_SCHEMAS``
+maps every accepted consumer evidence schema to its canonical binding
+fields. The legacy escrow schema (``contract-workload-evidence-v0.1``) and
+the TRCP v0.4 generic schema (``generic-workload-evidence-v0.1``) are both
+registered here, and the check never branches on consumer identity.
 
 Check semantics: FAIL fails the whole receipt, PASS reports verified
 success, and SKIP is neutral — a legacy TRCP v0.2 bundle that never
@@ -622,6 +628,22 @@ def _check_final_state(bundle: dict[str, Any]) -> CheckResult:
 
 
 WORKLOAD_EVIDENCE_SCHEMA = "contract-workload-evidence-v0.1"
+GENERIC_WORKLOAD_EVIDENCE_SCHEMA = "generic-workload-evidence-v0.1"
+
+#: Consumer evidence schema registry: schema name -> canonical binding fields.
+#: The workload_sha256 of a consumer artifact is the canonical hash of exactly
+#: these fields, so every registered schema defines its own binding closure.
+WORKLOAD_EVIDENCE_SCHEMAS: dict[str, tuple[str, ...]] = {
+    WORKLOAD_EVIDENCE_SCHEMA: ("schema", "requested_path", "actor", "result"),
+    GENERIC_WORKLOAD_EVIDENCE_SCHEMA: (
+        "schema",
+        "consumer_type",
+        "requested_operation",
+        "actor",
+        "input",
+        "result",
+    ),
+}
 _TASK_FIXTURE_PATTERN = r"^(.+)@sha256:([0-9a-f]{64})$"
 _WORKLOAD_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -661,7 +683,14 @@ def _check_workload_evidence_binding(bundle: dict[str, Any]) -> CheckResult:
             "consumer_evidence must be a JSON object",
         )
 
-    required = ("schema", "requested_path", "actor", "result")
+    schema = consumer_evidence.get("schema")
+    required = WORKLOAD_EVIDENCE_SCHEMAS.get(schema)
+    if required is None:
+        return CheckResult(
+            "WORKLOAD_EVIDENCE_BINDING",
+            "FAIL",
+            "consumer_evidence uses an unrecognized schema",
+        )
     for field in required:
         if field not in consumer_evidence:
             return CheckResult(
@@ -669,12 +698,6 @@ def _check_workload_evidence_binding(bundle: dict[str, Any]) -> CheckResult:
                 "FAIL",
                 f"consumer_evidence missing required field: {field}",
             )
-    if consumer_evidence["schema"] != WORKLOAD_EVIDENCE_SCHEMA:
-        return CheckResult(
-            "WORKLOAD_EVIDENCE_BINDING",
-            "FAIL",
-            "consumer_evidence uses an unrecognized schema",
-        )
 
     body = {field: consumer_evidence[field] for field in required}
     claimed = consumer_evidence.get("workload_sha256")
@@ -829,7 +852,9 @@ def verify_evidence_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
 __all__ = [
     "CHECK_ORDER",
     "CheckResult",
+    "GENERIC_WORKLOAD_EVIDENCE_SCHEMA",
     "RECEIPT_SCHEMA",
     "WORKLOAD_EVIDENCE_SCHEMA",
+    "WORKLOAD_EVIDENCE_SCHEMAS",
     "verify_evidence_bundle",
 ]
