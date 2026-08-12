@@ -301,6 +301,8 @@ class TRCPSimulator:
             "outcome": output["outcome"],
             "output_artifact_reference": f"sha256:{output['provider_output_sha256']}",
         }
+        if provider.provider_metadata:
+            run_body["provider_metadata"] = dict(provider.provider_metadata)
         return {**run_body, "record_sha256": canonical_sha256(run_body)}
 
     def execute_primary(self, task: Mapping[str, Any], provider: MockProvider) -> dict[str, Any]:

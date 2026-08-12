@@ -65,7 +65,8 @@ PYTHON_TESTS := \
 	tests/test_pulse_kernel_cli.py \
 	tests/test_trcp_simulator.py \
 	tests/test_trcp_codex_review.py \
-	tests/test_trcp_evidence_replay.py
+	tests/test_trcp_evidence_replay.py \
+	tests/test_trcp_contract_consumer.py
 
 all: $(TARGET) $(SUBSTRATE_TARGET)
 
@@ -124,7 +125,7 @@ test-repo:
 	@python3 -m unittest tests/test_repo_hygiene.py -v
 
 trcp-test:
-	@python3 -m unittest tests/test_trcp_simulator.py tests/test_trcp_codex_review.py tests/test_trcp_evidence_replay.py -v
+	@python3 -m unittest tests/test_trcp_simulator.py tests/test_trcp_codex_review.py tests/test_trcp_evidence_replay.py tests/test_trcp_contract_consumer.py -v
 
 trcp-sim:
 	@python3 scripts/run_trcp_simulator.py

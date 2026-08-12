@@ -1,0 +1,48 @@
+name: TRCP Contract Consumer
+
+on:
+  pull_request:
+    paths:
+      - "sdk/liminal_trcp/**"
+      - "tests/test_trcp_*.py"
+      - "scripts/replay_trcp_contractgraph.py"
+      - "Makefile"
+      - ".github/workflows/trcp-contract-consumer-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "sdk/liminal_trcp/**"
+      - "tests/test_trcp_*.py"
+      - "scripts/replay_trcp_contractgraph.py"
+      - "Makefile"
+      - ".github/workflows/trcp-contract-consumer-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  trcp-contract-consumer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile Python sources
+        run: python -m compileall -q sdk/liminal_trcp scripts/replay_trcp_contractgraph.py tests/test_trcp_contract_consumer.py
+
+      - name: Run contract consumer regressions
+        run: python -m unittest tests/test_trcp_contract_consumer.py -v
+
+      - name: Run full TRCP regression set
+        run: make trcp-test
+
+      - name: Run contract consumer replay CLI
+        run: python scripts/replay_trcp_contractgraph.py
