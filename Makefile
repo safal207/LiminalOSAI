@@ -67,7 +67,8 @@ PYTHON_TESTS := \
 	tests/test_trcp_codex_review.py \
 	tests/test_trcp_evidence_replay.py \
 	tests/test_trcp_contract_consumer.py \
-	tests/test_trcp_external_consumer.py
+	tests/test_trcp_external_consumer.py \
+	tests/test_trcp_adapter_sdk.py
 
 all: $(TARGET) $(SUBSTRATE_TARGET)
 
@@ -100,7 +101,7 @@ else
 	rm -f $(ALL_OBJS) $(TARGET) $(SUBSTRATE_TARGET)
 endif
 
-.PHONY: all clean check test test-repo verify-core rebirth report report-metabolic long-run-diagnostics trcp-test trcp-sim trcp-replay trcp-external
+.PHONY: all clean check test test-repo verify-core rebirth report report-metabolic long-run-diagnostics trcp-test trcp-sdk-test trcp-sim trcp-replay trcp-external
 
 check: $(TARGET) $(SUBSTRATE_TARGET)
 	@echo "🧪 Running smoke checks..."
@@ -126,7 +127,10 @@ test-repo:
 	@python3 -m unittest tests/test_repo_hygiene.py -v
 
 trcp-test:
-	@python3 -m unittest tests/test_trcp_simulator.py tests/test_trcp_codex_review.py tests/test_trcp_evidence_replay.py tests/test_trcp_contract_consumer.py tests/test_trcp_external_consumer.py -v
+	@python3 -m unittest tests/test_trcp_simulator.py tests/test_trcp_codex_review.py tests/test_trcp_evidence_replay.py tests/test_trcp_contract_consumer.py tests/test_trcp_external_consumer.py tests/test_trcp_adapter_sdk.py -v
+
+trcp-sdk-test:
+	@python3 -m unittest tests/test_trcp_adapter_sdk.py -v
 
 trcp-sim:
 	@python3 scripts/run_trcp_simulator.py
