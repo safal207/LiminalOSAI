@@ -1,0 +1,43 @@
+name: TRCP Semantic Mutation
+
+on:
+  pull_request:
+    paths:
+      - "tests/test_trcp_semantic_mutation.py"
+      - "docs/TRCP_SEMANTIC_MUTATION.md"
+      - "sdk/liminal_trcp/**"
+      - ".github/workflows/trcp-semantic-mutation-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "tests/test_trcp_semantic_mutation.py"
+      - "docs/TRCP_SEMANTIC_MUTATION.md"
+      - "sdk/liminal_trcp/**"
+      - ".github/workflows/trcp-semantic-mutation-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  semantic-mutation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile focused sources
+        run: python -m compileall -q sdk/liminal_trcp tests/test_trcp_semantic_mutation.py
+
+      - name: Run semantic mutation sensitivity suite
+        run: python -m unittest tests/test_trcp_semantic_mutation.py -v
+
+      - name: Run existing TRCP regression set
+        run: make trcp-test
