@@ -1,0 +1,50 @@
+name: TRCP Financial Transition Receipt
+
+on:
+  pull_request:
+    paths:
+      - "examples/trcp_agent_financial_transition_reference/**"
+      - "tests/test_trcp_agent_financial_transition.py"
+      - "sdk/liminal_trcp/**"
+      - ".github/workflows/trcp-financial-transition-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "examples/trcp_agent_financial_transition_reference/**"
+      - "tests/test_trcp_agent_financial_transition.py"
+      - "sdk/liminal_trcp/**"
+      - ".github/workflows/trcp-financial-transition-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  financial-transition-receipt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile reference consumer and tests
+        run: |
+          python -m compileall -q \
+            sdk/liminal_trcp \
+            examples/trcp_agent_financial_transition_reference \
+            tests/test_trcp_agent_financial_transition.py
+
+      - name: Run financial transition receipt tests
+        run: python -m unittest tests/test_trcp_agent_financial_transition.py -v
+
+      - name: Run synthetic reference consumer
+        run: python -m examples.trcp_agent_financial_transition_reference.self_check
+
+      - name: Run existing TRCP regressions
+        run: make trcp-test
