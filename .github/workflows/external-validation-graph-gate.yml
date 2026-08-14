@@ -8,30 +8,42 @@ on:
       - 'docs/EXTERNAL_REVIEW_LEDGER.md'
       - 'docs/REVIEW_EVENT_ENVELOPE.md'
       - 'docs/APPLY_REVIEW_EVENT.md'
+      - 'docs/EXTERNAL_EVIDENCE_EXPORT.md'
       - 'docs/review_event_envelope.v0.1.schema.json'
+      - 'benchmarks/fcrp-self-009.json'
       - 'examples/review_events/**'
       - 'tools/validate_external_graph.py'
       - 'tools/validate_review_event.py'
       - 'tools/apply_review_event.py'
+      - 'tools/export_external_validation_evidence.py'
       - 'tests/test_external_validation_graph.py'
       - 'tests/test_review_event_envelope.py'
       - 'tests/test_apply_review_event.py'
+      - 'tests/test_external_validation_export.py'
+      - 'tests/test_fcrp_self_009.py'
       - '.github/workflows/external-validation-graph-gate.yml'
   push:
     branches:
       - main
     paths:
       - 'docs/external_validation_graph.v0.1.yaml'
+      - 'docs/EXTERNAL_VALIDATION_GRAPH.md'
+      - 'docs/EXTERNAL_REVIEW_LEDGER.md'
       - 'docs/REVIEW_EVENT_ENVELOPE.md'
       - 'docs/APPLY_REVIEW_EVENT.md'
+      - 'docs/EXTERNAL_EVIDENCE_EXPORT.md'
       - 'docs/review_event_envelope.v0.1.schema.json'
+      - 'benchmarks/fcrp-self-009.json'
       - 'examples/review_events/**'
       - 'tools/validate_external_graph.py'
       - 'tools/validate_review_event.py'
       - 'tools/apply_review_event.py'
+      - 'tools/export_external_validation_evidence.py'
       - 'tests/test_external_validation_graph.py'
       - 'tests/test_review_event_envelope.py'
       - 'tests/test_apply_review_event.py'
+      - 'tests/test_external_validation_export.py'
+      - 'tests/test_fcrp_self_009.py'
       - '.github/workflows/external-validation-graph-gate.yml'
   workflow_dispatch:
 
@@ -41,11 +53,20 @@ permissions:
 jobs:
   verify-external-evidence-state:
     runs-on: ubuntu-latest
+    env:
+      EXACT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout exact subject head
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.EXACT_HEAD }}
+          persist-credentials: false
 
-      - name: Record exact head
-        run: echo "${GITHUB_SHA}"
+      - name: Verify exact checkout
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXACT_HEAD"
+          echo "exact_head=$EXACT_HEAD"
 
       - name: Validate canonical graph and recompute EEW
         run: python3 tools/validate_external_graph.py --json
@@ -63,14 +84,37 @@ jobs:
             --json
           git diff --exit-code -- docs/external_validation_graph.v0.1.yaml
 
-      - name: Run graph-gate regression tests
-        run: python3 -m unittest tests/test_external_validation_graph.py -v
+      - name: Export evidence with zero authority transfer
+        run: |
+          mkdir -p reports/external-validation
+          python3 tools/export_external_validation_evidence.py \
+            --output reports/external-validation/evidence-export.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          value = json.loads(Path('reports/external-validation/evidence-export.json').read_text())
+          boundary = value['authority_boundary']
+          assert boundary['classification'] == 'EVIDENCE_ONLY'
+          assert boundary['authorization_transfer'] == 'NONE'
+          assert boundary['execution_authorized'] is False
+          assert boundary['policy_mutation_authorized'] is False
+          assert boundary['capability_granted'] is False
+          assert boundary['durable_authority_granted'] is False
+          assert boundary['requires_separate_authorization_contract'] is True
+          assert value['downstream']['proofpath']['may_infer_authority'] is False
+          assert value['downstream']['cml']['may_influence_authorization_without_separate_contract'] is False
+          print('EXTERNAL_EVIDENCE_NON_AUTHORIZING_PASS')
+          PY
 
-      - name: Run review-event regression tests
-        run: python3 -m unittest tests/test_review_event_envelope.py -v
-
-      - name: Run review-event apply regression tests
-        run: python3 -m unittest tests/test_apply_review_event.py -v
+      - name: Run external validation regressions
+        run: |
+          python3 -m unittest \
+            tests/test_external_validation_graph.py \
+            tests/test_review_event_envelope.py \
+            tests/test_apply_review_event.py \
+            tests/test_external_validation_export.py \
+            tests/test_fcrp_self_009.py \
+            -v
 
       - name: State non-claim boundary
         run: |
@@ -80,6 +124,16 @@ jobs:
 
           graph = json.loads(Path('docs/external_validation_graph.v0.1.yaml').read_text())
           assert graph['score']['score_percent'] == 7.86
-          assert all(t['status'] != 'VALIDATED' for t in graph['review_targets'])
-          print('EEW is review maturity only; no external validation is currently claimed.')
+          boundary = graph['export_contract']
+          assert boundary['authorization_transfer'] == 'NONE'
+          assert boundary['execution_authorized'] is False
+          print('EEW is review maturity only; review evidence never transfers execution authority.')
           PY
+
+      - name: Upload evidence export
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: external-validation-evidence-${{ github.run_id }}
+          path: reports/external-validation/
+          if-no-files-found: error
+          retention-days: 14
