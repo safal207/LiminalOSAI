@@ -1,0 +1,109 @@
+{
+  "schema": "liminalosai.fcrp-case.v0.1",
+  "caseId": "FCRP-SELF-009",
+  "title": "External evidence maturity must not become execution authority",
+  "scope": {
+    "nodeId": "external-validation-export-authority-boundary",
+    "scale": "review-evidence/downstream-export/authorization-contract",
+    "idea": "Evidence can inform an authorization decision, but evidence state is never itself an authorization grant."
+  },
+  "timeline": {
+    "past": {
+      "summary": "The External Validation Graph carefully distinguished review maturity from safety confidence, but its ProofPath/CML mapping exported status and evidence without an explicit machine-readable negative authority contract."
+    },
+    "present": {
+      "main_sha": "f2c353c810ce09cb125efec268103212bc083d74",
+      "summary": "Current LiminalOSAI separately models AUTHORIZATION in TRCP causal lineage, while the external-review branch still needed reconciliation with that stronger parent separation."
+    },
+    "future": {
+      "summary": "Every exported external-review artifact carries an immutable EVIDENCE_ONLY boundary and explicitly transfers no capability or execution authority, including at VALIDATED / EEW=100."
+    }
+  },
+  "evidence": [
+    {
+      "id": "E1",
+      "kind": "historical-branch",
+      "ref": "docs/external_validation_graph.v0.1.yaml@f18d943b76c107eb33feea16730a0457c7071bff",
+      "claim": "The graph mapped review events into ProofPath/CML but did not carry explicit machine-readable authorization_transfer=NONE fields."
+    },
+    {
+      "id": "E2",
+      "kind": "canonical-parent",
+      "ref": "sdk/liminal_trcp/evidence.py@f2c353c810ce09cb125efec268103212bc083d74",
+      "claim": "Current TRCP evidence lineage represents AUTHORIZATION as a distinct causal node rather than inferring it from evidence maturity."
+    },
+    {
+      "id": "E3",
+      "kind": "refactor",
+      "ref": "docs/external_validation_graph.v0.1.yaml@docs/external-validation-authority-boundary-v0-2",
+      "claim": "The graph now carries EVIDENCE_ONLY, authorization_transfer=NONE, explicit false authority fields, and downstream no-inference rules."
+    },
+    {
+      "id": "E4",
+      "kind": "export-contract",
+      "ref": "tools/export_external_validation_evidence.py@docs/external-validation-authority-boundary-v0-2",
+      "claim": "The deterministic exporter fails closed if the negative authority boundary or downstream no-inference rules are weakened."
+    },
+    {
+      "id": "E5",
+      "kind": "regression",
+      "ref": "tests/test_external_validation_export.py@docs/external-validation-authority-boundary-v0-2",
+      "claim": "A synthetic fully VALIDATED / EEW=100 graph still exports zero authorization transfer and zero execution/capability/durable authority."
+    }
+  ],
+  "causalPath": [
+    {
+      "id": "N1",
+      "level": "downstream-contract",
+      "phase": "first-divergence",
+      "statement": "Human-readable nonclaims were stronger than the machine-readable ProofPath/CML export mapping: evidence status travelled, but explicit non-authority did not.",
+      "evidenceRefs": ["E1"]
+    },
+    {
+      "id": "N2",
+      "level": "parent-authorization-model",
+      "phase": "parent-contract-strengthened",
+      "statement": "Current LiminalOSAI/TRCP treats authorization as its own causal node and contract, making the older implicit export boundary too weak.",
+      "evidenceRefs": ["E2"]
+    },
+    {
+      "id": "N3",
+      "level": "ecosystem-consumer",
+      "phase": "symptom",
+      "statement": "A downstream consumer could incorrectly treat strong review maturity or VALIDATED state as evidence of permission because the negative authorization fact was not portable with the evidence."
+    },
+    {
+      "id": "N4",
+      "level": "export-boundary",
+      "phase": "refactor",
+      "statement": "Export review maturity only through an EVIDENCE_ONLY envelope with authorization_transfer=NONE and fail-closed false authority fields; require a separate authorization contract before action.",
+      "evidenceRefs": ["E3", "E4", "E5"]
+    }
+  ],
+  "divergence": {
+    "symptomPoint": "N3",
+    "firstMeaningfulDivergence": "N1",
+    "causePoint": "N1",
+    "selectedRefactorPoint": "N4",
+    "evidenceRefs": ["E1", "E2", "E3", "E4", "E5"]
+  },
+  "navigation": {
+    "direction": "UP",
+    "reason": "The local review-state machine was already fail-closed; the defect appeared only when inspecting the parent authorization semantics and the cross-repository export boundary."
+  },
+  "refactor": {
+    "point": "N4",
+    "change": "Make non-authority portable with evidence, enforce it in a deterministic exporter, and prove that maximum evidence maturity still cannot authorize execution.",
+    "expectedEffect": "ProofPath/CML may preserve and use review evidence without silently acquiring LiminalOSAI execution authority."
+  },
+  "verification": {
+    "local": "PASS_PENDING_CI",
+    "upward": "PASS_PENDING_CI",
+    "stopConditions": {
+      "parentInvariantsPreserved": true,
+      "crossBoundaryEffectsAbsent": true,
+      "causalExplanationComplete": true
+    }
+  },
+  "expectedProtocolDecision": "PASS"
+}
