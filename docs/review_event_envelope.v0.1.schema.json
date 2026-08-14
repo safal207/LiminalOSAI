@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/safal207/LiminalOSAI/blob/main/docs/review_event_envelope.v0.1.schema.json",
+  "title": "Review Event Envelope v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "event_type",
+    "occurred_at",
+    "claim_id",
+    "subject",
+    "transition",
+    "evidence",
+    "repository",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {"const": "review-event-envelope/v0.1"},
+    "event_id": {"type": "string", "minLength": 1},
+    "event_type": {
+      "enum": [
+        "review.sent",
+        "review.acknowledged",
+        "review.routed",
+        "review.technical_feedback",
+        "review.reproduced",
+        "review.validated"
+      ]
+    },
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "claim_id": {"type": "string", "minLength": 1},
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organization", "target_id"],
+      "properties": {
+        "organization": {"type": "string", "minLength": 1},
+        "target_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": {
+          "enum": [null, "SENT", "ACKNOWLEDGED", "ROUTED", "TECHNICAL_FEEDBACK", "REPRODUCED"]
+        },
+        "to": {
+          "enum": ["SENT", "ACKNOWLEDGED", "ROUTED", "TECHNICAL_FEEDBACK", "REPRODUCED", "VALIDATED"]
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reference", "summary", "public"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "reference": {"type": "string", "minLength": 1},
+        "summary": {"type": "string", "minLength": 1},
+        "public": {"type": "boolean"},
+        "external_reproducer": {"type": "string", "minLength": 1},
+        "reproduction_reference": {"type": "string", "minLength": 1},
+        "validation_reference": {"type": "string", "minLength": 1}
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "pr"],
+      "properties": {
+        "repository": {"const": "safal207/LiminalOSAI"},
+        "pr": {"type": "integer", "minimum": 1},
+        "commit": {"type": ["string", "null"]}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recorded_by", "source"],
+      "properties": {
+        "recorded_by": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
