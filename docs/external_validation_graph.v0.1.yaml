@@ -1,6 +1,6 @@
 {
   "schema_version": "external-validation-graph/v0.1",
-  "updated_at": "2026-08-09",
+  "updated_at": "2026-08-14",
   "project": "LiminalOSAI",
   "related_projects": ["LiminalDB"],
   "claim": {
@@ -10,7 +10,7 @@
     "nonclaims": [
       "does not claim to prevent sandbox escape itself",
       "does not claim universal agent safety",
-      "does not treat outreach, acknowledgement, or routing as validation"
+      "does not treat outreach, acknowledgement, routing, reproduction, or validation as execution authority"
     ]
   },
   "status_model": {
@@ -19,9 +19,9 @@
     "ROUTED": {"weight": 0.20, "meaning": "The recipient explicitly stated that material was passed internally for review."},
     "TECHNICAL_FEEDBACK": {"weight": 0.40, "meaning": "Substantive technical feedback or a counterexample was received."},
     "REPRODUCED": {"weight": 0.75, "meaning": "An external reviewer independently reproduced a test, failure trace, or benchmark result."},
-    "VALIDATED": {"weight": 1.00, "meaning": "Explicit evidence-backed external validation. Not currently claimed."}
+    "VALIDATED": {"weight": 1.00, "meaning": "Explicit evidence-backed external validation of the reviewed claim. This remains evidence, not authorization."}
   },
-  "weighting_note": "Weights are conservative operational weights for the maturity of the external review trail. They are not probabilities, safety-confidence estimates, endorsements, or scientific effect sizes. A sent email contributes only a small amount of weight; independent reproduction contributes substantially more.",
+  "weighting_note": "Weights are conservative operational weights for the maturity of the external review trail. They are not probabilities, safety-confidence estimates, endorsements, scientific effect sizes, capabilities, or authorization grants.",
   "score": {
     "id": "EEW-v0.1",
     "name": "External Evidence Weight",
@@ -30,6 +30,17 @@
     "weighted_sum": 0.55,
     "score_percent": 7.86,
     "interpretation": "External review outreach exists and one target has explicitly routed the work, but no external reproduction or validation is currently recorded."
+  },
+  "export_contract": {
+    "schema_version": "external-validation-export-boundary/v0.1",
+    "classification": "EVIDENCE_ONLY",
+    "authorization_transfer": "NONE",
+    "execution_authorized": false,
+    "policy_mutation_authorized": false,
+    "capability_granted": false,
+    "durable_authority_granted": false,
+    "requires_separate_authorization_contract": true,
+    "rule": "No review status or EEW value, including VALIDATED or 100/100, can satisfy or imply an execution authorization contract."
   },
   "allowed_transitions": [
     {"from": "SENT", "to": "ACKNOWLEDGED", "evidence_required": "explicit acknowledgement of receipt or intake"},
@@ -145,10 +156,14 @@
     {"id": "EVG-I2", "text": "Silence never advances a status."},
     {"id": "EVG-I3", "text": "SENT, ACKNOWLEDGED, and ROUTED must not be represented as endorsement or validation."},
     {"id": "EVG-I4", "text": "VALIDATED requires explicit external evidence and a reproducible artifact link."},
-    {"id": "EVG-I5", "text": "A counterexample that narrows or changes the claim increases review value even if it lowers apparent confidence."}
+    {"id": "EVG-I5", "text": "A counterexample that narrows or changes the claim increases review value even if it lowers apparent confidence."},
+    {"id": "EVG-I6", "text": "External evidence maturity must never create, transfer, extend, or imply execution authority."}
   ],
   "proofpath_mapping": {
     "claim_node": "PSAG-001",
+    "event_classification": "EVIDENCE_ONLY",
+    "authorization_transfer": "NONE",
+    "may_infer_authority": false,
     "evidence_event_types": [
       "review.sent",
       "review.acknowledged",
@@ -164,13 +179,19 @@
       "status",
       "evidence_reference",
       "claim_id",
-      "repository_commit_or_pr"
+      "repository_commit_or_pr",
+      "classification",
+      "authorization_transfer",
+      "execution_authorized"
     ]
   },
   "cml_mapping": {
     "state_key": "external_validation.PSAG-001",
     "transition_key": "review_status_transition",
     "persistence_rule": "append_only_evidence_events",
-    "recomputation_rule": "derive_current_status_from_latest_evidence_backed_transition"
+    "recomputation_rule": "derive_current_status_from_latest_evidence_backed_transition",
+    "memory_semantics": "EVIDENCE_STATE_ONLY",
+    "authorization_transfer": "NONE",
+    "may_influence_authorization_without_separate_contract": false
   }
 }
