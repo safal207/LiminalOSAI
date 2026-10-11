@@ -125,7 +125,7 @@ class RuntimeMediationTests(unittest.TestCase):
             self.admit("cap:"+cid,kind,scope)
         resolver=lambda host:["93.184.216.34"]
         transport=lambda req: TransportResponse(200,{},"e"*64)
-        eg=EgressGateway(broker=self.broker,resolver=resolver,transport=transport)
+        eg=EgressGateway(broker=self.broker,resolver=resolver,transport=transport,clock=lambda:30)
         self.m.egress_gateway=eg
         self.broker.admit(contract("cap:net","network.connect_domain","agent:a",net),at_unix=20)
         self.m.mediate(op("package.install",pkg,oid="op:pkg",at=30),lambda x: ExecutionObservation.success({"ok":1}))
@@ -150,6 +150,7 @@ class RuntimeMediationTests(unittest.TestCase):
             broker=self.broker,
             resolver=lambda host:["93.184.216.34"],
             transport=lambda req:(seen.append(req.url) or TransportResponse(204,{},"e"*64)),
+            clock=lambda:20,
         )
         self.m.egress_gateway=eg
         r=self.m.mediate_network(GatewayRequest("net:1","agent:a",P,"GET","https://api.example.com/x",{},"e"*64,{},21))

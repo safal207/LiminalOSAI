@@ -9,7 +9,8 @@ before delegating admission/use decisions.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol
+from contextlib import contextmanager
+from typing import Any, Callable, Mapping, Protocol
 
 from sdk.liminal_capability_broker import BrokerError, CapabilityBroker
 from sdk.liminal_post_sandbox_contracts import (
@@ -343,6 +344,26 @@ class EpochBoundCapabilityBroker:
                                     decision="BLOCK",
                                     reasons=tuple(revoked_reasons) + tuple(delegate_receipt.get("reason_codes", ())),
                                     at_unix=at_unix)
+
+    @contextmanager
+    def live_use(self, receipt: Mapping[str, Any], *, at_unix: int | Callable[[], int]):
+        """Recheck the runtime binding between stages of one committed use."""
+        known = next((item for item in self._receipts
+                      if item.receipt_sha256 == receipt.get("receipt_sha256")), None)
+        if known is None or dict(receipt) != known.as_document() or known.decision != "ALLOW":
+            raise BrokerError("unknown or altered epoch-bound use receipt")
+        base_receipt = next((item for item in self.delegate.receipts()
+                             if item["receipt_sha256"] == known.delegate_receipt_sha256), None)
+        if base_receipt is None:
+            raise BrokerError("missing committed base use receipt")
+        with self.delegate.live_use(base_receipt, at_unix=at_unix):
+            now = at_unix() if callable(at_unix) else at_unix
+            snapshot = TrustedRuntimeSnapshot.from_provider(self.runtime_provider)
+            bound = self._bindings.get(known.capability_id)
+            if bound is None or snapshot.tainted or self._binding_mismatch(bound, snapshot):
+                self.delegate.revoke(known.capability_id, at_unix=now)
+                raise BrokerError("committed use runtime binding is no longer live")
+            yield
 
     def revoke(self, capability_id: str, *, at_unix: int) -> dict[str, Any]:
         return self.delegate.revoke(capability_id, at_unix=at_unix)

@@ -7,7 +7,10 @@ It never executes the action itself.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from contextlib import contextmanager
+from functools import wraps
+from threading import RLock
+from typing import Any, Callable, Mapping
 
 from sdk.liminal_post_sandbox_contracts import (
     CAPABILITY_TYPES,
@@ -42,6 +45,14 @@ BROKER_AUTHORITY = {
 
 class BrokerError(ValueError):
     pass
+
+
+def _serialized(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return call
 
 
 @dataclass(frozen=True)
@@ -100,6 +111,7 @@ class CapabilityBroker:
         if not isinstance(broker_id, str) or not broker_id.strip():
             raise BrokerError("broker_id must be non-empty")
         self.broker_id = broker_id
+        self._lock = RLock()
         self._states: dict[str, _State] = {}
         self._events: list[CausalRuntimeEvent] = []
         self._receipts: list[CapabilityDecisionReceipt] = []
@@ -109,6 +121,7 @@ class CapabilityBroker:
     def head_sha256(self) -> str:
         return self._head
 
+    @_serialized
     def admit(self, document: Mapping[str, Any], *, at_unix: int) -> dict[str, Any]:
         self._check_time(at_unix)
         contract = CapabilityContract.from_document(dict(document))
@@ -124,6 +137,7 @@ class CapabilityBroker:
         self._states[contract.capability_id] = state
         return self._lifecycle(state, "grant", "ALLOW", ("capability_admitted",), at_unix)
 
+    @_serialized
     def authorize(
         self,
         *,
@@ -183,6 +197,33 @@ class CapabilityBroker:
             reasons=deny_reasons, at_unix=at_unix, before=0, after=0, event=event,
         )
 
+    @contextmanager
+    def live_use(self, receipt: Mapping[str, Any], *, at_unix: int | Callable[[], int]):
+        """Serialize one trusted callback with revocation; never consume twice.
+
+        Only this broker's exact committed-use receipt is accepted. A grant
+        exhausted by that use remains valid for its stages, but revocation or
+        expiry does not. The host must bound callbacks and separately cancel
+        in-flight I/O: revocation waits for a currently admitted callback.
+        This context is a trusted-host API, not a transferable permission.
+        """
+        with self._lock:
+            at_unix = at_unix() if callable(at_unix) else at_unix
+            self._check_time(at_unix)
+            known = next((item for item in self._receipts
+                          if item.receipt_sha256 == receipt.get("receipt_sha256")), None)
+            if known is None or dict(receipt) != known.as_document():
+                raise BrokerError("unknown or altered committed-use receipt")
+            if known.decision != "ALLOW" or "use_committed" not in known.reason_codes:
+                raise BrokerError("receipt is not an admitted capability use")
+            state = self._require(known.capability_id)
+            bad = self._ineligible(state, known.policy_sha256, known.requested_scope,
+                                   at_unix, check_uses=False)
+            if bad:
+                raise BrokerError("committed use is no longer live: " + ",".join(bad))
+            yield
+
+    @_serialized
     def revoke(self, capability_id: str, *, at_unix: int) -> dict[str, Any]:
         self._check_time(at_unix)
         state = self._require(capability_id)
@@ -192,6 +233,7 @@ class CapabilityBroker:
         state.revoked_at_unix = at_unix
         return self._lifecycle(state, "revoke", "ALLOW", ("explicit_revoke",), at_unix)
 
+    @_serialized
     def expire_due(self, *, at_unix: int) -> tuple[dict[str, Any], ...]:
         self._check_time(at_unix)
         out: list[dict[str, Any]] = []
@@ -203,6 +245,7 @@ class CapabilityBroker:
                 out.append(self._lifecycle(state, "expire", "ALLOW", ("ttl_expired",), at_unix))
         return tuple(out)
 
+    @_serialized
     def state_document(self) -> dict[str, Any]:
         caps = []
         for capability_id in sorted(self._states):
@@ -232,7 +275,7 @@ class CapabilityBroker:
     def receipts(self) -> tuple[dict[str, Any], ...]:
         return tuple(receipt.as_document() for receipt in self._receipts)
 
-    def _ineligible(self, state: _State, policy_sha: str, scope: Mapping[str, Any], at_unix: int) -> tuple[str, ...]:
+    def _ineligible(self, state: _State, policy_sha: str, scope: Mapping[str, Any], at_unix: int, *, check_uses: bool = True) -> tuple[str, ...]:
         c = state.contract
         reasons: list[str] = []
         if state.status != "active":
@@ -243,7 +286,7 @@ class CapabilityBroker:
             reasons.append("expired")
         if c.policy_sha256 != policy_sha:
             reasons.append("policy_mismatch")
-        if state.use_count >= c.max_uses:
+        if check_uses and state.use_count >= c.max_uses:
             reasons.append("use_exhausted")
         if not _scope_contains(c.capability_type, c.scope, scope):
             reasons.append("scope_mismatch")
