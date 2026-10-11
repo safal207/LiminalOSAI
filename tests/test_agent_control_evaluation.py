@@ -128,6 +128,25 @@ class EvaluationTests(unittest.TestCase):
         for path in self.bundle.iterdir():
             self.assertNotIn(KEY, path.read_bytes())
 
+    def test_controller_sidecar_pins_final_signed_snapshot_and_never_missing_observation(self):
+        sidecar_path = Path(self.result["expectations_file"])
+        self.assertFalse(sidecar_path.is_relative_to(self.bundle))
+        sidecar = json.loads(sidecar_path.read_text())
+        for case in self.report["cases"]:
+            snapshot = case["observation"].get("snapshot")
+            expected = sidecar[case["result_id"]]
+            if snapshot is None:
+                self.assertNotIn("snapshot_digest", expected)
+                continue
+            exact_document = json.dumps(snapshot, sort_keys=True, separators=(",", ":"),
+                                        ensure_ascii=False, allow_nan=False).encode("utf-8")
+            self.assertEqual(expected["snapshot_digest"], hashlib.sha256(exact_document).hexdigest())
+            # The signature itself is pinned, not only its unsigned body.
+            changed_signature = {**snapshot, "signature": "different-signature"}
+            changed_bytes = json.dumps(changed_signature, sort_keys=True, separators=(",", ":"),
+                                       ensure_ascii=False, allow_nan=False).encode("utf-8")
+            self.assertNotEqual(expected["snapshot_digest"], hashlib.sha256(changed_bytes).hexdigest())
+
     def test_required_docker_skip_fails_unless_explicitly_diagnostic(self):
         skipped = {"status": "SKIPPED", "reason": "DOCKER_RUNTIME_UNAVAILABLE",
                    "containment": {"verified": False, "zero_survivors": False}}

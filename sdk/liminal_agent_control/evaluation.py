@@ -202,6 +202,11 @@ def run_suite(output_root: Path | str, receipt_key: bytes, *, mode: str = "deter
         "attempted": case["case_id"] != "forged_success" and case["status"] != "SKIPPED",
         "channel": "owned-receiver-local", "snapshot_scope": "root",
         "receiver_id": case["observation"]["receiver_id"],
+        # Pin the final collection-barrier document, including its signature.
+        # Freshness alone cannot distinguish an authentic earlier inventory
+        # from this exact trusted collection; imported reports never set pins.
+        **({"snapshot_digest": hashlib.sha256(canonical(case["observation"]["snapshot"])).hexdigest()}
+           if case["observation"].get("snapshot") is not None else {}),
     } for case in cases}
     _write_json(expectations_path, expectations)
     manifest = {"schema": "liminal-agent-control-manifest-v1", "run_id": run_id,
