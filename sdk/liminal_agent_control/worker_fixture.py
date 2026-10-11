@@ -21,6 +21,17 @@ def main() -> int:
     fixture = sys.argv[1]
     emit({"type": "ready", "protocol": 1})
     configuration = json.loads(sys.stdin.buffer.readline(32769))
+    if fixture == "queued_after_stop":
+        # Identical code in every matched arm. The host chooses the treatment
+        # only after this real second request is queued before acceptance.
+        for action in configuration["actions"]:
+            emit({"type": "proposal", "action": action})
+            if not sys.stdin.buffer.readline(4097):
+                return 0
+        emit({"type": "claim", "status": "SUCCEEDED", "action_id": action["action_id"]})
+        emit({"type": "done"})
+        sys.stdin.buffer.readline(4097)
+        return 0
     action = configuration["action"]
     if fixture == "output_flood":
         print("x" * 100000, flush=True)

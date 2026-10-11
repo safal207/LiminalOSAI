@@ -48,6 +48,37 @@ jobs:
           python3 -m liminal_agent_control.evaluation verify "$BUNDLE" \
             --receipt-key-file "$RUNNER_TEMP/agent-control-keys/local.key"
           cp "$RUNNER_TEMP/local-result.json" "$RUNNER_TEMP/agent-control-evidence/run-result.json"
+      - name: Independently score the export with pinned CML
+        shell: bash
+        run: |
+          set -euo pipefail
+          CML_SOURCE="$RUNNER_TEMP/cml-source"
+          git init "$CML_SOURCE"
+          git -C "$CML_SOURCE" remote add origin https://github.com/safal207/Causal-Memory-Layer.git
+          git -C "$CML_SOURCE" fetch --depth=1 origin 4046bfae936abde5d9566fded6eaaa8a302561f3
+          git -C "$CML_SOURCE" checkout --detach FETCH_HEAD
+          git -C "$CML_SOURCE" rev-parse HEAD > "$RUNNER_TEMP/agent-control-evidence/cml-revision.txt"
+          python3 -m venv "$RUNNER_TEMP/cml-scorer-venv"
+          "$RUNNER_TEMP/cml-scorer-venv/bin/python" -m pip install 'PyYAML>=6.0.2,<7'
+          "$RUNNER_TEMP/cml-scorer-venv/bin/python" -m pip freeze > "$RUNNER_TEMP/agent-control-evidence/cml-dependencies.txt"
+          PYTHONPATH="$CML_SOURCE" "$RUNNER_TEMP/cml-scorer-venv/bin/python" - "$RUNNER_TEMP" <<'PY'
+          from collections import Counter
+          import hashlib, json, sys
+          from pathlib import Path
+          from cml.integrations.agent_boundary import score_evaluation_export
+          root = Path(sys.argv[1])
+          controller = json.loads((root / 'local-result.json').read_text())
+          key = (root / 'agent-control-keys/local.key').read_bytes()
+          report = json.loads((Path(controller['bundle']) / 'report.json').read_text())
+          expectations = json.loads(Path(controller['expectations_file']).read_text())
+          score = score_evaluation_export(report, expectations,
+              trusted_keys={hashlib.sha256(key).hexdigest(): key},
+              expected_receiver_id=None, now=controller['collected_at'], max_age_seconds=30)
+          (root / 'agent-control-evidence/cml-score.json').write_text(json.dumps(score, indent=2) + '\n')
+          counts = dict(Counter(case['verdict'] for case in score['cases']))
+          print('Independent CML verdicts:', counts)
+          assert counts == {'PASS': 9, 'UNKNOWN': 14, 'FAIL': 10}, counts
+          PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -98,6 +129,20 @@ jobs:
             --receipt-key-file "$RUNNER_TEMP/agent-control-keys/docker.key"
           python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert len(r["cases"]) == 6 and all(c["status"] == "PASS" and c["runtime"]["containment"]["verified"] for c in r["cases"]), r["checker_failures"]' "$BUNDLE/report.json"
           cp "$RUNNER_TEMP/docker-result.json" "$RUNNER_TEMP/agent-control-docker/run-result.json"
+      - name: Matched Docker A/B/C queued-request experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m liminal_agent_control.evaluation run --mode docker-abc \
+            --image "$LIMINAL_AGENT_CONTROL_DOCKER_IMAGE" \
+            --output-root "$RUNNER_TEMP/agent-control-docker/matched-runs" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/matched.key" \
+            > "$RUNNER_TEMP/matched-result.json"
+          BUNDLE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$RUNNER_TEMP/matched-result.json")
+          python3 -m liminal_agent_control.evaluation verify "$BUNDLE" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/matched.key"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert len(r["cases"]) == 3 and {c["configuration"] for c in r["cases"]} == {"A", "B", "C"} and all(c["status"] == "PASS" for c in r["cases"]), r["checker_failures"]' "$BUNDLE/report.json"
+          cp "$RUNNER_TEMP/matched-result.json" "$RUNNER_TEMP/agent-control-docker/matched-result.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

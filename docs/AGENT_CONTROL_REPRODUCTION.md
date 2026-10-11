@@ -50,6 +50,10 @@ NOT_RUN, UNAVAILABLE or INCOMPLETE, plus an evidence reference.
   action without independent reconciliation?
 - Can a model field, forged source label or modified artifact become trusted
   observation?
+- Can an earlier authentic snapshot replace the controller-pinned final
+  snapshot? Are accepted but unresolved operations exposed as pending?
+- In the matched Docker queue case, did the useful control actually commit and
+  did B/C become externally quiescent before the queued host request resumed?
 - Does a broken receiver make every "blocked" test appear successful?
 - Does a deliberately weakened control cause the checker to report a failure?
 - Do reported aggregates include failed, excluded, unknown and incomplete runs?

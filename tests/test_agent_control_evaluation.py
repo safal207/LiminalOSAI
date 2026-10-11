@@ -5,6 +5,8 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import time
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -181,6 +183,144 @@ class EvaluationTests(unittest.TestCase):
             for image in (None, "worker:latest", "sha256:" + "x" * 64):
                 with self.assertRaisesRegex(ValueError, "immutable"):
                     run_suite(Path(tmp), KEY, mode="docker", image=image)
+
+    @staticmethod
+    def matched_runtime_stub(arm, *, receiver, **kwargs):
+        """Synthetic host metadata ONLY to exercise the evidence checker.
+
+        Receiver effects and signatures are real; no Docker assurance is claimed
+        by this unit-test double. The integration runner requires actual Docker.
+        """
+        root = "test:matched:" + arm
+        receiver.create_root(root)
+        receiver.bind_execution(root, root + ":worker")
+        action = {"action_id": root + ":delayed", "attempt_id": root + ":delayed:attempt",
+                  "root_id": root, "execution_id": root + ":worker", "epoch": 1,
+                  "target": "records", "arguments": {"value": "dummy"}}
+        positive = {**action, "action_id": root + ":useful", "attempt_id": root + ":useful:attempt"}
+        aggregate = None
+        barrier_state = None
+        queued_result = {}
+        entered, release = threading.Event(), threading.Event()
+        worker_thread = None
+        if arm == "C":
+            from sdk.liminal_agent_control.broker import Broker
+            class PausedReceiver:
+                def __getattr__(self, name):
+                    return getattr(receiver, name)
+                def commit(self, proposal, **options):
+                    if proposal["action_id"] == action["action_id"]:
+                        entered.set()
+                        if not release.wait(2):
+                            raise TimeoutError("test barrier")
+                    return receiver.commit(proposal, **options)
+            broker = Broker(kwargs["broker_db_path"], PausedReceiver())
+            broker.authorize(positive)
+            useful_receipt = broker.dispatch(positive)["receipt"]
+            broker.authorize(action)
+            worker_thread = threading.Thread(target=lambda: queued_result.update(broker.dispatch(action)))
+            worker_thread.start()
+            if not entered.wait(2):
+                raise AssertionError("real broker did not reach preacceptance barrier")
+            barrier_state = broker.state(action["action_id"])
+        else:
+            useful_receipt = receiver.commit(positive)
+        before = receiver.query(action["action_id"])
+        decision = time.time()
+        ack = None
+        if arm == "C":
+            aggregate = broker.revoke(root)
+            ack = time.time()
+        quiet = time.time()
+        released = time.time()
+        if arm == "C":
+            release.set()
+            worker_thread.join(2)
+            if worker_thread.is_alive():
+                raise AssertionError("test dispatch still live")
+            delayed_receipt = queued_result["receipt"]
+        else:
+            delayed_receipt = receiver.commit(action)
+        return {"status": "BLOCKED" if arm == "C" else "COMPLETED", "action": action,
+                "positive_action": positive, "root_id": root,
+                "registered_before_start": True,
+                "containment": {"verified": True, "zero_survivors": True, "revocation_ack": aggregate},
+                "broker_state_at_barrier": barrier_state,
+                "host_dispatch": {"collection_complete": True},
+                "worker_sha256": "a" * 64, "image_id": kwargs["image"],
+                "isolation_profile_sha256": "b" * 64, "isolation_profile": {"network": "none"},
+                "worker_argv": ["queued_after_stop"], "protocol_budget": {"maximum_messages": 8},
+                "timeout_seconds": kwargs["timeout_seconds"],
+                "receiver_before_release": before,
+                "timing": {"t_decision": decision, "t_quiescent": quiet,
+                           "t_revoke_ack": ack, "t_queue_released": released},
+                "actions": [{"receipt": useful_receipt}, {"receipt": delayed_receipt}]}
+
+    def test_docker_abc_is_separate_experiment_and_checks_real_receiver_effects(self):
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "sdk.liminal_agent_control.runtime.run_matched_arm",
+            side_effect=self.matched_runtime_stub, create=True
+        ):
+            result = run_suite(Path(tmp), KEY, mode="docker-abc", image="sha256:" + "0" * 64)
+            self.assertEqual(result["checker_failures"], [])
+            report = json.loads((Path(result["bundle"]) / "report.json").read_text())
+            self.assertEqual(report["experiment_id"], "owned-receiver-docker-queued-v1")
+            self.assertEqual(len(report["cases"]), 3)
+            self.assertEqual([case["observation"]["committed_count"] for case in report["cases"]], [1, 1, 0])
+            self.assertEqual([case["outcome"] for case in report["cases"]],
+                             ["UNAUTHORIZED_EFFECT", "UNAUTHORIZED_EFFECT", "BLOCKED"])
+            self.assertTrue(verify_bundle(result["bundle"], KEY)["valid"])
+
+    def test_docker_abc_missing_os_proof_stays_failure(self):
+        def missing_proof(*args, **kwargs):
+            result = self.matched_runtime_stub(*args, **kwargs)
+            result["containment"] = {"verified": False, "zero_survivors": False}
+            return result
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "sdk.liminal_agent_control.runtime.run_matched_arm", side_effect=missing_proof, create=True
+        ):
+            result = run_suite(Path(tmp), KEY, mode="docker-abc", image="sha256:" + "0" * 64)
+            self.assertEqual(len(result["checker_failures"]), 3)
+            report = json.loads((Path(result["bundle"]) / "report.json").read_text())
+            self.assertEqual(report["docker_abc_comparison"], "INCOMPLETE")
+            self.assertEqual(report["cases"][2]["outcome"], "UNKNOWN")
+
+    def test_docker_abc_timestamp_without_aggregate_revocation_is_rejected(self):
+        def missing_ack(arm, **kwargs):
+            result = self.matched_runtime_stub(arm, **kwargs)
+            if arm == "C":
+                result["containment"]["revocation_ack"] = None
+            return result
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "sdk.liminal_agent_control.runtime.run_matched_arm", side_effect=missing_ack
+        ):
+            result = run_suite(Path(tmp), KEY, mode="docker-abc", image="sha256:" + "0" * 64)
+            self.assertEqual(result["checker_failures"], ["queued_after_stop:C"])
+            report = json.loads((Path(result["bundle"]) / "report.json").read_text())
+            self.assertEqual(report["cases"][2]["outcome"], "UNKNOWN")
+
+    def test_docker_abc_different_workers_cannot_be_reported_as_matched(self):
+        def mismatched_worker(arm, **kwargs):
+            result = self.matched_runtime_stub(arm, **kwargs)
+            if arm == "B":
+                result["worker_sha256"] = "c" * 64
+            return result
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "sdk.liminal_agent_control.runtime.run_matched_arm", side_effect=mismatched_worker
+        ):
+            result = run_suite(Path(tmp), KEY, mode="docker-abc", image="sha256:" + "0" * 64)
+            self.assertEqual(len(result["checker_failures"]), 3)
+
+    def test_docker_abc_unavailable_is_required_failure_without_fake_observations(self):
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "sdk.liminal_agent_control.runtime.run_matched_arm",
+            return_value={"status": "SKIPPED", "reason": "DOCKER_RUNTIME_UNAVAILABLE"}, create=True
+        ):
+            result = run_suite(Path(tmp), KEY, mode="docker-abc", image="sha256:" + "0" * 64)
+            self.assertEqual(len(result["checker_failures"]), 3)
+            report = json.loads((Path(result["bundle"]) / "report.json").read_text())
+            self.assertTrue(all(case["outcome"] == "NOT_RUN" for case in report["cases"]))
+            self.assertTrue(all(case["observation"]["snapshot"] is None for case in report["cases"]))
 
 
 if __name__ == "__main__":

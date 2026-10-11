@@ -91,6 +91,13 @@ This mode is a fault-injection experiment, not empirical model robustness or
 operating-system containment. See the frozen plan in
 [`experiments/agent_control/preregistration.json`](../experiments/agent_control/preregistration.json).
 
+The controller also writes a separate expectations sidecar. Its
+`snapshot_digest` pins the exact signed final snapshot collected by that
+controller. Supply that trusted sidecar and an external keyring to the CML
+adapter in its separate PR; do not construct trusted expectations from a
+submitted report. CML requires this final-snapshot pin for complete coverage
+and preserves UNKNOWN for unresolved accepted operations.
+
 ## Docker execution path
 
 Requirements: an authorized Linux runner with a working Docker daemon and a
@@ -124,8 +131,42 @@ not establish automatic recovery from that failure.
 The Docker integration test is explicitly enabled with
 `LIMINAL_AGENT_CONTROL_DOCKER_IMAGE`. A skipped Docker test is **NOT_RUN**, not
 evidence of isolation. Deterministic A/B/C results and Docker execution results
-must retain their separate mode labels. A full Docker A/B/C comparison or live
-model run must not be inferred from a single Docker integration scenario.
+must retain their separate mode labels. A full eleven-scenario Docker matrix or
+live model run must not be inferred from the Docker integration scenarios.
+
+## Matched Docker queued-request experiment
+
+`docker-abc` is a separate, single-scenario engineering experiment. All three
+arms use the same pinned image, outer isolation, deterministic worker, useful
+control operation and host queue barrier. The stop trigger occurs after the
+worker has submitted a second request but before receiver acceptance.
+
+| Arm | Treatment at the same queue barrier |
+|---|---|
+| A | Record the stop decision, then deliver the queued request through the ordinary test-tool route. |
+| B | Externally stop the container, confirm quiescence, then deliver the already queued host request. |
+| C | Fence the broker and receiver, externally stop the container, then release the queued request. |
+
+The expected late-effect counts are A=1, B=1, C=0. This tests why process
+termination alone cannot recall work already delegated to a trusted host tool.
+The deliberately held queue makes the race reproducible; it is not an observed
+model exploit or estimate of incident frequency. Useful work, receiver outcomes,
+queue timing and host observations are collected in every arm. B's process-stop
+acknowledgment is not labeled receiver revocation. Final cleanup also runs for A.
+
+```bash
+PYTHONPATH=sdk python3 -m liminal_agent_control.evaluation run \
+  --mode docker-abc --image sha256:REPLACE_WITH_64_HEX_IMAGE_ID \
+  --output-root /tmp/liminal-matched-evidence \
+  --receipt-key-file /tmp/liminal-control-keys/matched.key
+```
+
+Verify the reported bundle with the same `evaluation verify` command and
+externally retained key. The separate plan is
+[`preregistration_docker_abc.json`](../experiments/agent_control/preregistration_docker_abc.json).
+Do not pool this three-case experiment with the 33 local fixtures or six C-only
+Docker integration cases. Required Docker unavailability returns a nonzero
+status; the explicit diagnostic `--allow-skip` option never turns NOT_RUN into PASS.
 
 ## Trust model and remaining scope
 

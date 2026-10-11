@@ -7,6 +7,7 @@ Existing LiminalOS isolation profiles and session containment receipts are reuse
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import json
 import math
 import os
@@ -158,6 +159,10 @@ class WorkerBridge:
     claims: list[dict] = field(default_factory=list)
     dispatch_calls: list[BoundedHostCall] = field(default_factory=list, repr=False)
     dispatch_unresolved: bool = False
+    worker_stopped: bool = False
+
+    def dispatch_started(self, call: BoundedHostCall, proposed: dict, deadline: float) -> None:
+        """Trusted supervisor hook; never callable through the worker protocol."""
 
     def accept(self, line: bytes, *, deadline: float | None = None) -> dict | None:
         self.messages += 1
@@ -185,7 +190,9 @@ class WorkerBridge:
                 call = BoundedHostCall(lambda: self.broker.handle(proposed), name="liminal-broker-dispatch")
                 self.dispatch_calls.append(call)
                 try:
-                    result = call.result_before(deadline if deadline is not None else time.monotonic() + 3)
+                    dispatch_deadline = deadline if deadline is not None else time.monotonic() + 3
+                    self.dispatch_started(call, proposed, dispatch_deadline)
+                    result = call.result_before(dispatch_deadline)
                 except RuntimeBoundaryError:
                     self.dispatch_unresolved = True
                     self.actions.append({"status": "UNKNOWN", "reason": "HOST_DISPATCH_UNRESOLVED",
@@ -341,8 +348,8 @@ def _revoke(broker: Any, root_id: str) -> dict:
     return acknowledgment
 
 
-def contain_workload(supervisor: ProcessTreeSupervisor, controller: Any, *, session_id: str, broker: Any, root_id: str,
-                     revoke_timeout_seconds: float = 3.0) -> dict:
+def _contain_workload(supervisor: ProcessTreeSupervisor, controller: Any, *, session_id: str, broker: Any = None,
+                      root_id: str | None = None, revoke_timeout_seconds: float = 3.0) -> dict:
     """Best-effort termination persists even if freeze/revocation/observation fails."""
     started = time.monotonic()
     failures: list[str] = []
@@ -357,11 +364,15 @@ def contain_workload(supervisor: ProcessTreeSupervisor, controller: Any, *, sess
     if freeze["failure_codes"]:
         failures.append("FREEZE_INCOMPLETE")
     revoked = None
-    revocation_call = BoundedHostCall(lambda: _revoke(broker, root_id), name="liminal-broker-revocation")
-    try:
-        revoked = revocation_call.result_before(time.monotonic() + revoke_timeout_seconds)
-    except Exception:
-        failures.append("REVOCATION_UNVERIFIED")
+    revoked_at = None
+    revocation_call = None
+    if broker is not None:
+        revocation_call = BoundedHostCall(lambda: _revoke(broker, root_id), name="liminal-broker-revocation")
+        try:
+            revoked = revocation_call.result_before(time.monotonic() + revoke_timeout_seconds)
+            revoked_at = time.time()
+        except Exception:
+            failures.append("REVOCATION_UNVERIFIED")
     quiescence = supervisor.quiesce_all(incident_id="stop:" + session_id)
     if not quiescence["zero_survivors"]:
         failures.append("QUIESCENCE_INCOMPLETE")
@@ -381,7 +392,9 @@ def contain_workload(supervisor: ProcessTreeSupervisor, controller: Any, *, sess
     return {
         "freeze": freeze, "revocation_ack": revoked, "quiescence": quiescence,
         "pre_stop_observation": pre_stop, "pre_stop_process_evidence": process_evidence,
-        "revocation_call": revocation_call.observation(),
+        "revocation_call": revocation_call.observation() if revocation_call else None,
+        "authority_revocation_requested": broker is not None,
+        "t_revoke_ack": revoked_at, "t_quiescent": time.time() if absent else None,
         "revocation_wait_limit_seconds": revoke_timeout_seconds,
         "zero_survivors": absent, "partial_failures": failures,
         "verified": absent and not failures,
@@ -389,6 +402,17 @@ def contain_workload(supervisor: ProcessTreeSupervisor, controller: Any, *, sess
         "observation_source": "trusted_host_docker_daemon",
         "boundary": "container PID/cgroup lifecycle; excludes host/kernel/daemon compromise",
     }
+
+
+def contain_workload(supervisor: ProcessTreeSupervisor, controller: Any, *, session_id: str, broker: Any,
+                     root_id: str, revoke_timeout_seconds: float = 3.0) -> dict:
+    return _contain_workload(supervisor, controller, session_id=session_id, broker=broker,
+                             root_id=root_id, revoke_timeout_seconds=revoke_timeout_seconds)
+
+
+def contain_process_workload(supervisor: ProcessTreeSupervisor, controller: Any, *, session_id: str) -> dict:
+    """External OS stop only. This does not acknowledge authority revocation."""
+    return _contain_workload(supervisor, controller, session_id=session_id)
 
 
 def _write_bounded(process: subprocess.Popen, message: dict, deadline: float) -> None:
@@ -439,11 +463,298 @@ def _exchange(process: subprocess.Popen, bridge: WorkerBridge, timeout: float) -
                     line, _, tail = buffers["stdout"].partition(b"\n")
                     buffers["stdout"] = bytearray(tail)
                     response = bridge.accept(bytes(line), deadline=deadline)
+                    if bridge.worker_stopped:
+                        return {"output_bytes": byte_count, "message_count": bridge.messages,
+                                "stopped_by_host": True}
                     if response is not None:
                         _write_bounded(process, response, deadline)
                 if len(buffers["stdout"]) > MAX_LINE_BYTES:
                     raise RuntimeBoundaryError("FRAME_SIZE_EXCEEDED")
         return {"output_bytes": byte_count, "message_count": bridge.messages}
+
+
+class PreAcceptanceQueue:
+    """Host-only experimental queue holding an actual request before acceptance.
+
+    The queue is common to all three arms. It does not issue receipts or claim
+    acceptance. The receiver remains the only writer of owned effect records.
+    """
+
+    def __init__(self, receiver: Any, action: dict, *, wait_seconds: float) -> None:
+        self.receiver = receiver
+        self.action = validate_action(action)
+        self.wait_seconds = wait_seconds
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.cancelled = threading.Event()
+        self.entered_at: float | None = None
+        self.queued_action_sha256: str | None = None
+        self.queued_authorization_sha256: str | None = None
+        self._lock = threading.Lock()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.receiver, name)
+
+    def commit(self, action: dict, **kwargs: Any) -> dict:
+        frozen = validate_action(action)
+        frozen_kwargs = json.loads(json.dumps(kwargs, allow_nan=False))
+        if frozen["action_id"] == self.action["action_id"]:
+            if frozen != self.action:
+                raise RuntimeBoundaryError("QUEUED_ACTION_CHANGED")
+            with self._lock:
+                if self.entered.is_set():
+                    raise RuntimeBoundaryError("QUEUED_REQUEST_REPLAYED")
+                self.queued_action_sha256 = canonical_sha256(frozen)
+                self.queued_authorization_sha256 = canonical_sha256(frozen_kwargs) if frozen_kwargs else None
+                self.entered_at = time.time()
+                self.entered.set()
+            if not self.release.wait(self.wait_seconds) or self.cancelled.is_set():
+                raise RuntimeBoundaryError("QUEUED_REQUEST_ABORTED")
+        return self.receiver.commit(frozen, **frozen_kwargs)
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+        self.release.set()
+
+
+class OrdinaryRecordTool:
+    """Explicit A/B baseline: typed host route without broker grants or fencing."""
+
+    def __init__(self, receiver: Any) -> None:
+        self.receiver = receiver
+
+    def handle(self, action: dict) -> dict:
+        action = validate_action(action)
+        receipt = self.receiver.commit(action)
+        valid = (self.receiver.verify_receipt(receipt)
+                 and receipt.get("action_id") == action["action_id"]
+                 and receipt.get("action_digest") == canonical_sha256(action)
+                 and receipt.get("status") in {"COMMITTED", "DENIED"})
+        if not valid:
+            return {"status": "UNKNOWN", "reason": "RECEIVER_RECEIPT_INVALID",
+                    "action_id": action["action_id"], "receipt": None}
+        return {"status": "COMMITTED" if receipt["status"] == "COMMITTED" else "BLOCKED",
+                "reason": receipt["reason"], "action_id": action["action_id"], "receipt": receipt}
+
+
+class MatchedWorkerBridge(WorkerBridge):
+    """The same two-proposal worker protocol for the bounded matched experiment."""
+
+    def __init__(self, route: Any, positive_action: dict, action: dict, queue: PreAcceptanceQueue,
+                 on_queued: Any) -> None:
+        super().__init__(route, validate_action(positive_action))
+        self.positive_action = validate_action(positive_action)
+        self.queued_action = validate_action(action)
+        self.queue = queue
+        self.on_queued = on_queued
+        self.positive_completed = False
+
+    def accept(self, line: bytes, *, deadline: float | None = None) -> dict | None:
+        was_ready = self.ready
+        count = len(self.actions)
+        response = super().accept(line, deadline=deadline)
+        if not was_ready:
+            return {"actions": [self.positive_action, self.queued_action]}
+        if len(self.actions) > count and not self.positive_completed:
+            if self.actions[-1]["status"] != "COMMITTED":
+                raise RuntimeBoundaryError("POSITIVE_CONTROL_FAILED")
+            self.positive_completed = True
+            self.action = self.queued_action
+        return response
+
+    def dispatch_started(self, call: BoundedHostCall, proposed: dict, deadline: float) -> None:
+        if proposed["action_id"] != self.queued_action["action_id"]:
+            return
+        try:
+            if not self.positive_completed or not self.queue.entered.wait(max(0, deadline - time.monotonic())):
+                raise RuntimeBoundaryError("PREACCEPTANCE_BARRIER_UNAVAILABLE")
+            self.worker_stopped = self.on_queued(deadline)
+        except Exception as exc:
+            self.queue.cancel()
+            if isinstance(exc, RuntimeBoundaryError):
+                raise
+            raise RuntimeBoundaryError("QUEUED_SUPERVISION_FAILED") from exc
+
+
+def run_matched_arm(arm: str, *, image: str, broker_db_path: str | Path, receiver: Any,
+                    timeout_seconds: int = 15, docker_binary: str = "docker") -> dict:
+    """One controlled queued-request scenario under actual matched Docker arms.
+
+    A uses an ordinary host tool; B adds actual external process termination;
+    C adds exact broker grants and receiver-backed revocation. The host queue is
+    before receiver acceptance in every arm. This is not a model evaluation.
+    """
+    from .broker import Broker
+
+    if arm not in {"A", "B", "C"}:
+        raise RuntimeBoundaryError("INVALID_EXPERIMENT_ARM")
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 120:
+        raise RuntimeBoundaryError("INVALID_TIMEOUT")
+    report = {"mode": "docker-abc", "experiment_id": "owned-receiver-docker-queued-v1",
+              "fixture": "queued_after_stop", "arm": arm, "status": "ERROR", "reason": None,
+              "image_id": image, "model_run": False, "root_id": None, "action": None,
+              "positive_action": None, "actions": [], "worker_claims": [],
+              "registered_before_start": False, "containment": {"verified": False, "zero_survivors": False},
+              "timing": {"t_decision": None, "t_quiescent": None, "t_revoke_ack": None, "t_queue_released": None},
+              "queue_entered_at": None, "receiver_before_release": None, "broker_state_at_barrier": None,
+              "route": "exact_grant_broker" if arm == "C" else "ordinary_host_tool_no_grants",
+              "fixed_trigger": "second actual request queued before receiver acceptance after useful first record"}
+    if os.name != "posix" or shutil.which(docker_binary) is None:
+        return {**report, "status": "SKIPPED", "reason": "DOCKER_RUNTIME_UNAVAILABLE"}
+    controller = DockerController(docker_binary)
+    try:
+        controller.image_id(image)
+    except Exception as exc:
+        return {**report, "status": "SKIPPED", "reason": str(exc) if isinstance(exc, RuntimeBoundaryError) else "DOCKER_RUNTIME_UNAVAILABLE"}
+    identity = receiver.identity()
+    expected_profile = "guarded" if arm == "C" else "baseline_unfenced"
+    if not receiver.verify_receipt(identity) or identity.get("enforcement_profile") != expected_profile:
+        return {**report, "reason": "RECEIVER_PROFILE_MISMATCH"}
+    report["receiver_identity"] = identity
+    nonce = uuid.uuid4().hex
+    root_id, execution_id = "root:" + nonce, "execution:" + nonce
+    created = receiver.create_root(root_id)
+    bound = receiver.bind_execution(root_id, execution_id)
+    if not (receiver.verify_receipt(created) and receiver.verify_receipt(bound)
+            and created.get("status") == "ROOT_CREATED" and bound.get("status") == "BOUND"):
+        return {**report, "reason": "REGISTRATION_UNVERIFIED"}
+    action = validate_action({"action_id": "queued:" + nonce, "attempt_id": "queued-attempt:" + nonce,
+                              "root_id": root_id, "execution_id": execution_id, "epoch": created["epoch"],
+                              "target": "records", "arguments": {"value": "matched queued record"}})
+    positive = {**action, "action_id": "positive:" + nonce, "attempt_id": "positive-attempt:" + nonce,
+                "arguments": {"value": "matched useful first record"}}
+    report.update(root_id=root_id, action=action, positive_action=positive,
+                  registration={"root": created, "execution": bound})
+    queue = PreAcceptanceQueue(receiver, action, wait_seconds=timeout_seconds + 30)
+    route = Broker(broker_db_path, queue) if arm == "C" else OrdinaryRecordTool(queue)
+    if arm == "C":
+        route.authorize(positive, ttl_seconds=timeout_seconds + 60)
+        route.authorize(action, ttl_seconds=timeout_seconds + 60)
+    session_id = "liminal-matched-" + nonce
+    process = None
+    stop_evidence = None
+    with tempfile.TemporaryDirectory(prefix="liminal-matched-worker-") as workspace:
+        os.chmod(workspace, 0o755)
+        worker = Path(workspace) / "worker_fixture.py"
+        shutil.copyfile(Path(__file__).with_name("worker_fixture.py"), worker)
+        os.chmod(worker, 0o444)
+        plan = IsolatedExecutionPlan.build(
+            operation_id=action["action_id"], image_id=image,
+            argv=("-I", "-u", "/workspace/worker_fixture.py", "queued_after_stop"),
+            host_workspace=workspace, timeout_seconds=timeout_seconds,
+            profile=IsolationProfile(pids_limit=32, memory_mb=128, cpus="0.5"))
+        report["plan_sha256"] = plan.plan_sha256
+        report["worker_sha256"] = hashlib.sha256(worker.read_bytes()).hexdigest()
+        report["isolation_profile"] = plan.profile.body()
+        report["isolation_profile_sha256"] = plan.profile.profile_sha256
+        report["worker_argv"] = list(plan.argv)
+        report["protocol_budget"] = {"max_line_bytes": MAX_LINE_BYTES, "max_output_bytes": MAX_OUTPUT_BYTES,
+                                     "max_messages": MAX_MESSAGES}
+        report["timeout_seconds"] = timeout_seconds
+        supervisor = ProcessTreeSupervisor(inspect_session=controller.inspect_session,
+                                           freeze_session=controller.freeze_session,
+                                           terminate_session=controller.terminate_session)
+        supervisor.register_session(session_id=session_id, operation_id=action["action_id"],
+                                    plan_sha256=plan.plan_sha256,
+                                    backend_identity_sha256=canonical_sha256({"backend": "docker", "image_id": image}))
+        report["registered_before_start"] = True
+
+        def on_queued(deadline: float) -> bool:
+            nonlocal stop_evidence
+            report["queue_entered_at"] = queue.entered_at
+            report["queued_action_sha256"] = queue.queued_action_sha256
+            report["queued_authorization_sha256"] = queue.queued_authorization_sha256
+            report["timing"]["t_decision"] = time.time()
+            observation = BoundedHostCall(lambda: receiver.query(action["action_id"]), name="liminal-queue-observation")
+            before = observation.result_before(deadline)
+            report["receiver_before_release"] = before
+            if not (receiver.verify_receipt(before) and before.get("action_id") == action["action_id"]
+                    and before.get("status") == "UNKNOWN" and before.get("reason") == "NOT_OBSERVED"):
+                raise RuntimeBoundaryError("QUEUE_ALREADY_ACCEPTED_OR_UNVERIFIED")
+            report["worker_at_trigger"] = controller.inspect_session(session_id)
+            report["worker_processes_at_trigger"] = json.loads(json.dumps(controller.process_evidence.get(session_id)))
+            if not report["worker_at_trigger"]["exists"] or not report["worker_at_trigger"]["running"]:
+                raise RuntimeBoundaryError("LIVE_WORKER_NOT_OBSERVED_AT_TRIGGER")
+            if arm == "C":
+                report["broker_state_at_barrier"] = route.state(action["action_id"])
+                if report["broker_state_at_barrier"].get("status") != "UNKNOWN":
+                    raise RuntimeBoundaryError("BROKER_RESERVATION_UNVERIFIED")
+                stop_evidence = contain_workload(supervisor, controller, session_id=session_id,
+                                                broker=route, root_id=root_id,
+                                                revoke_timeout_seconds=max(0.0, min(3.0, deadline - time.monotonic())))
+            elif arm == "B":
+                stop_evidence = contain_process_workload(supervisor, controller, session_id=session_id)
+            if stop_evidence is not None:
+                report["stop_evidence"] = stop_evidence
+                report["timing"]["t_quiescent"] = stop_evidence["t_quiescent"]
+                report["timing"]["t_revoke_ack"] = stop_evidence["t_revoke_ack"]
+                if not stop_evidence["verified"]:
+                    raise RuntimeBoundaryError("EXPERIMENT_STOP_UNVERIFIED")
+            if time.monotonic() >= deadline:
+                raise RuntimeBoundaryError("EXPERIMENT_DEADLINE_EXCEEDED")
+            report["timing"]["t_queue_released"] = time.time()
+            queue.release.set()
+            return arm in {"B", "C"}
+
+        bridge = MatchedWorkerBridge(route, positive, action, queue, on_queued)
+        try:
+            argv = build_docker_argv(plan, docker_binary=docker_binary, container_name=session_id)
+            argv[1:3] = ["create", "--interactive"]
+            image_index = argv.index(image)
+            argv[image_index:image_index] = ["--entrypoint", "python3", "--log-driver", "none"]
+            if controller.command(argv[1:]).returncode:
+                raise RuntimeBoundaryError("CONTAINER_CREATE_FAILED")
+            controller.verify_configuration(session_id, plan)
+            process = subprocess.Popen([docker_binary, "start", "--attach", "--interactive", session_id],
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       shell=False, bufsize=0)
+            report["protocol"] = _exchange(process, bridge, timeout_seconds)
+            if len(bridge.actions) != 2 or report["timing"]["t_queue_released"] is None:
+                raise RuntimeBoundaryError("MATCHED_PROTOCOL_INCOMPLETE")
+            statuses = [result["status"] for result in bridge.actions]
+            report["status"] = "UNKNOWN" if "UNKNOWN" in statuses else "BLOCKED" if "BLOCKED" in statuses else "COMPLETED"
+        except Exception as exc:
+            report["status"] = "UNKNOWN" if bridge.dispatch_unresolved else "ERROR"
+            report["reason"] = str(exc) if isinstance(exc, RuntimeBoundaryError) else type(exc).__name__
+        finally:
+            # Aborts an unreleased queue; it does not cancel a request already
+            # handed to the receiver. A late callback stays externally scored.
+            if not queue.release.is_set():
+                queue.cancel()
+            if stop_evidence is not None and stop_evidence["verified"]:
+                report["containment"] = stop_evidence
+            elif arm == "C":
+                report["containment"] = contain_workload(supervisor, controller, session_id=session_id,
+                                                        broker=route, root_id=root_id)
+            else:
+                report["containment"] = contain_process_workload(supervisor, controller, session_id=session_id)
+            report["cleanup_after_queue_release"] = arm == "A" and report["timing"]["t_queue_released"] is not None
+            if process is not None:
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    stream.close()
+                attach_killed = False
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    attach_killed = True
+                    process.kill()
+                    process.wait(timeout=2)
+                report["worker_attach_exit"] = {"returncode": process.returncode,
+                                                "attach_cli_killed_by_host": attach_killed,
+                                                "worker_stopped_before_reply": bridge.worker_stopped}
+            for call in bridge.dispatch_calls:
+                call.thread.join(timeout=0.05)
+            report["actions"] = json.loads(json.dumps(bridge.actions))
+            report["worker_claims"] = json.loads(json.dumps(bridge.claims))
+            report["host_dispatch"] = {"calls": [call.observation() for call in bridge.dispatch_calls],
+                                       "outcome_unresolved": bridge.dispatch_unresolved, "automatic_retry": False,
+                                       "collection_complete": all(not call.thread.is_alive() for call in bridge.dispatch_calls),
+                                       "boundary": "host threads are not killed; receiver reconciliation required for UNKNOWN"}
+            report["effect_outcome"] = "UNKNOWN" if bridge.dispatch_unresolved else "RECEIVER_SCORING_REQUIRED"
+            if not report["containment"]["verified"]:
+                report["status"] = "UNKNOWN" if bridge.dispatch_unresolved else "ERROR"
+                report["reason"] = "CONTAINMENT_PARTIAL_FAILURE"
+    return report
 
 
 def run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int = 10, action: dict | None = None, docker_binary: str = "docker") -> dict:

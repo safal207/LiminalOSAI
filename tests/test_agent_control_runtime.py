@@ -13,7 +13,8 @@ import unittest
 from sdk.liminal_agent_control import Broker, Receiver
 from sdk.liminal_agent_control.runtime import (
     DockerController, RuntimeBoundaryError, WorkerBridge, contain_workload,
-    decode_message, run_fixture, validate_action,
+    MatchedWorkerBridge, OrdinaryRecordTool, PreAcceptanceQueue, contain_process_workload,
+    decode_message, run_fixture, run_matched_arm, validate_action,
     _exchange,
 )
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
@@ -239,6 +240,20 @@ class RuntimeCleanupTests(unittest.TestCase):
         self.assertTrue(result["verified"])
         self.assertTrue(result["zero_survivors"])
 
+    def test_process_only_stop_does_not_claim_authority_revocation(self):
+        host = StatefulHost()
+        supervisor = ProcessTreeSupervisor(inspect_session=host.inspect_session,
+                                           freeze_session=host.freeze_session, terminate_session=host.terminate_session)
+        supervisor.register_session(session_id="session", operation_id="operation",
+                                    plan_sha256="a" * 64, backend_identity_sha256="b" * 64)
+        result = contain_process_workload(supervisor, host, session_id="session")
+        self.assertEqual(host.events, ["freeze", "terminate"])
+        self.assertTrue(result["verified"])
+        self.assertFalse(result["authority_revocation_requested"])
+        self.assertIsNone(result["revocation_ack"])
+        self.assertIsNone(result["t_revoke_ack"])
+        self.assertIsNotNone(result["t_quiescent"])
+
     def test_freeze_failure_still_terminates_and_cannot_claim_clean_containment(self):
         host = StatefulHost(freeze_fails=True)
         result = self.contain(host)
@@ -306,8 +321,149 @@ class RuntimeCleanupTests(unittest.TestCase):
             DockerController().image_id("python:latest")
 
 
+class MatchedQueueProtocolTests(unittest.TestCase):
+    """Real receiver and worker pipes; these are not Docker isolation evidence."""
+
+    def test_same_worker_queue_produces_baseline_effect_but_revoked_receiver_denial(self):
+        fixture = Path(__file__).parents[1] / "sdk/liminal_agent_control/worker_fixture.py"
+        for arm in ("A", "B", "C"):
+            with self.subTest(arm=arm), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory)
+                receiver = Receiver(path / "receiver.db", b"b" * 32, b"r" * 32, enforce_epoch=arm == "C")
+                action = base_action()
+                positive = {**action, "action_id": "positive", "attempt_id": "positive-attempt"}
+                receiver.create_root(action["root_id"])
+                receiver.bind_execution(action["root_id"], action["execution_id"])
+                queue = PreAcceptanceQueue(receiver, action, wait_seconds=3)
+                route = Broker(path / "broker.db", queue) if arm == "C" else OrdinaryRecordTool(queue)
+                if arm == "C":
+                    route.authorize(positive)
+                    route.authorize(action)
+                process = subprocess.Popen([sys.executable, "-I", "-u", str(fixture), "queued_after_stop"],
+                                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+                barriers = []
+
+                def stop_and_release(_deadline):
+                    before = receiver.query(action["action_id"])
+                    self.assertTrue(receiver.verify_receipt(before))
+                    self.assertEqual(before["status"], "UNKNOWN")
+                    self.assertEqual(before["reason"], "NOT_OBSERVED")
+                    self.assertEqual(len(receiver.records()), 1)
+                    self.assertEqual(queue.queued_action_sha256, canonical_sha256(action))
+                    if arm == "C":
+                        self.assertEqual(route.state(action["action_id"])["status"], "UNKNOWN")
+                        self.assertEqual(route.revoke(action["root_id"])["status"], "REVOKED")
+                        self.assertIsNotNone(queue.queued_authorization_sha256)
+                    else:
+                        self.assertIsNone(queue.queued_authorization_sha256)
+                    if arm in {"B", "C"}:
+                        process.kill()  # Local pipe fixture only; real cgroup evidence is below.
+                        process.wait(timeout=1)
+                    barriers.append(before)
+                    queue.release.set()
+                    return arm in {"B", "C"}
+
+                bridge = MatchedWorkerBridge(route, positive, action, queue, stop_and_release)
+                try:
+                    protocol = _exchange(process, bridge, 3)
+                    self.assertEqual(len(barriers), 1)
+                    self.assertEqual(len(bridge.actions), 2)
+                    self.assertEqual(bridge.actions[0]["status"], "COMMITTED")
+                    self.assertEqual(bridge.actions[1]["status"], "BLOCKED" if arm == "C" else "COMMITTED")
+                    self.assertEqual(len(receiver.records()), 1 if arm == "C" else 2)
+                    self.assertEqual(protocol.get("stopped_by_host", False), arm in {"B", "C"})
+                    self.assertTrue(receiver.verify_receipt(bridge.actions[1]["receipt"]))
+                finally:
+                    queue.cancel()
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=1)
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        stream.close()
+
+    def test_aborted_supervision_leaves_unknown_without_receiver_acceptance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            receiver = Receiver(path / "receiver.db", b"b" * 32, b"r" * 32)
+            action = base_action()
+            positive = {**action, "action_id": "positive", "attempt_id": "positive-attempt"}
+            receiver.create_root(action["root_id"])
+            receiver.bind_execution(action["root_id"], action["execution_id"])
+            queue = PreAcceptanceQueue(receiver, action, wait_seconds=2)
+            route = Broker(path / "broker.db", queue)
+            route.authorize(positive)
+            route.authorize(action)
+
+            def fail_stop(_deadline):
+                raise RuntimeBoundaryError("STOP_FAILED")
+
+            bridge = MatchedWorkerBridge(route, positive, action, queue, fail_stop)
+            bridge.accept(encode({"type": "ready", "protocol": 1}))
+            bridge.accept(encode({"type": "proposal", "action": positive}))
+            with self.assertRaisesRegex(RuntimeBoundaryError, "STOP_FAILED"):
+                bridge.accept(encode({"type": "proposal", "action": action}))
+            for call in bridge.dispatch_calls:
+                call.thread.join(timeout=1)
+            self.assertTrue(queue.cancelled.is_set())
+            self.assertEqual(bridge.actions[-1]["status"], "UNKNOWN")
+            self.assertEqual(route.state(action["action_id"])["status"], "UNKNOWN")
+            self.assertEqual(receiver.query(action["action_id"])["reason"], "NOT_OBSERVED")
+            self.assertEqual(len(receiver.records()), 1)
+
+    def test_changed_queued_arguments_cannot_enter_barrier(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receiver = Receiver(Path(directory) / "receiver.db", b"b" * 32, b"r" * 32)
+            action = base_action()
+            queue = PreAcceptanceQueue(receiver, action, wait_seconds=0.1)
+            wrong = {**action, "arguments": {"value": "changed"}}
+            with self.assertRaisesRegex(RuntimeBoundaryError, "QUEUED_ACTION_CHANGED"):
+                queue.commit(wrong)
+            self.assertFalse(queue.entered.is_set())
+            self.assertEqual(receiver.records(), [])
+
+
 @unittest.skipUnless(os.environ.get("LIMINAL_AGENT_CONTROL_DOCKER_IMAGE"), "set explicit immutable Docker image to run real containment")
 class DockerRuntimeIntegrationTests(unittest.TestCase):
+    def test_matched_actual_docker_arms_queue_after_stop(self):
+        image = os.environ["LIMINAL_AGENT_CONTROL_DOCKER_IMAGE"]
+        worker_hashes = set()
+        for arm in ("A", "B", "C"):
+            with self.subTest(arm=arm), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory)
+                receiver = Receiver(path / "receiver.db", b"b" * 32, b"r" * 32, enforce_epoch=arm == "C")
+                result = run_matched_arm(arm, image=image, broker_db_path=path / "broker.db", receiver=receiver)
+                self.assertEqual(result["status"], "BLOCKED" if arm == "C" else "COMPLETED", result)
+                self.assertTrue(result["registered_before_start"], result)
+                self.assertTrue(result["containment"]["verified"], result)
+                self.assertTrue(result["containment"]["zero_survivors"], result)
+                self.assertTrue(result["worker_at_trigger"]["running"], result)
+                self.assertGreaterEqual(len(result["worker_processes_at_trigger"]["processes"]), 1, result)
+                worker_hashes.add(result["worker_sha256"])
+                self.assertEqual(len(receiver.records()), 1 if arm == "C" else 2, result)
+                self.assertTrue(receiver.verify_receipt(result["receiver_before_release"]), result)
+                self.assertEqual(result["receiver_before_release"]["reason"], "NOT_OBSERVED", result)
+                timing = result["timing"]
+                self.assertLessEqual(result["queue_entered_at"], timing["t_decision"], result)
+                self.assertLess(timing["t_decision"], timing["t_queue_released"], result)
+                self.assertEqual(receiver.query(result["positive_action"]["action_id"])["status"], "COMMITTED", result)
+                queued = result["actions"][1]["receipt"]
+                self.assertTrue(receiver.verify_receipt(queued), result)
+                if arm in {"B", "C"}:
+                    self.assertLess(timing["t_quiescent"], timing["t_queue_released"], result)
+                    self.assertTrue(result["protocol"]["stopped_by_host"], result)
+                else:
+                    self.assertIsNone(timing["t_quiescent"], result)
+                    self.assertTrue(result["cleanup_after_queue_release"], result)
+                if arm == "C":
+                    self.assertLess(timing["t_revoke_ack"], timing["t_queue_released"], result)
+                    self.assertEqual(result["broker_state_at_barrier"]["status"], "UNKNOWN", result)
+                    self.assertEqual(queued["status"], "DENIED", result)
+                else:
+                    self.assertIsNone(timing["t_revoke_ack"], result)
+                    self.assertIsNone(result["containment"]["revocation_ack"], result)
+                    self.assertGreaterEqual(queued["accepted_at"], timing["t_queue_released"], result)
+        self.assertEqual(len(worker_hashes), 1)
+
     def test_real_worker_effects_and_container_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
