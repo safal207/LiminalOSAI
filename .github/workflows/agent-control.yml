@@ -59,11 +59,11 @@ jobs:
           git -C "$CML_SOURCE" checkout --detach FETCH_HEAD
           git -C "$CML_SOURCE" rev-parse HEAD > "$RUNNER_TEMP/agent-control-evidence/cml-revision.txt"
           python3 -m venv "$RUNNER_TEMP/cml-scorer-venv"
-          "$RUNNER_TEMP/cml-scorer-venv/bin/python" -m pip install 'PyYAML>=6.0.2,<7'
+          "$RUNNER_TEMP/cml-scorer-venv/bin/python" -m pip install 'PyYAML==6.0.3'
           "$RUNNER_TEMP/cml-scorer-venv/bin/python" -m pip freeze > "$RUNNER_TEMP/agent-control-evidence/cml-dependencies.txt"
           PYTHONPATH="$CML_SOURCE" "$RUNNER_TEMP/cml-scorer-venv/bin/python" - "$RUNNER_TEMP" <<'PY'
           from collections import Counter
-          import hashlib, json, sys
+          import json, sys
           from pathlib import Path
           from cml.integrations.agent_boundary import score_evaluation_export
           root = Path(sys.argv[1])
@@ -72,7 +72,7 @@ jobs:
           report = json.loads((Path(controller['bundle']) / 'report.json').read_text())
           expectations = json.loads(Path(controller['expectations_file']).read_text())
           score = score_evaluation_export(report, expectations,
-              trusted_keys={hashlib.sha256(key).hexdigest(): key},
+              trusted_keys={'receiver-hmac-v1': key},
               expected_receiver_id=None, now=controller['collected_at'], max_age_seconds=30)
           (root / 'agent-control-evidence/cml-score.json').write_text(json.dumps(score, indent=2) + '\n')
           counts = dict(Counter(case['verdict'] for case in score['cases']))
