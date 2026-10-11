@@ -10,6 +10,17 @@ Experimental C11 sandbox combining many small cognitive-leaning subsystems (awar
 - [Experimental Scope](docs/EXPERIMENTAL_SCOPE.md) — clarifies that LiminalOSAI is an experimental cognitive-runtime sandbox, not a production OS, AGI claim, safety enforcement layer, or mature agent runtime.
 - Validation: `make`, `make check`, `make test`
 
+## Open agent-control experiment
+
+[Public roadmap and help-wanted tasks](https://github.com/safal207/LiminalOSAI/issues/195)
+
+A receiver-backed experiment for action authorization, revocation, crash recovery
+and independent evidence. See the [run guide](docs/AGENT_CONTROL.md),
+[EN/RU contributor guide](docs/AGENT_CONTROL_CONTRIBUTING.md), and
+[independent reproduction template](docs/AGENT_CONTROL_REPRODUCTION.md).
+Deterministic fixtures, Docker checks and live-model results have separate scopes;
+this work does not establish general sandbox-escape prevention.
+
 ## Build
 
 - Dependencies: gcc, make, python3

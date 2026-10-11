@@ -1,0 +1,106 @@
+name: Agent control
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_agent_control/**'
+      - 'sdk/liminal_isolated_execution/**'
+      - 'sdk/liminal_process_tree/**'
+      - 'sdk/liminal_post_sandbox_contracts/**'
+      - 'sdk/liminal_runtime_mediation/**'
+      - 'adapters/docker/**'
+      - 'tests/test_agent_control*'
+      - 'scripts/run_agent_control_docker.py'
+      - 'experiments/agent_control/**'
+      - 'docs/AGENT_CONTROL*'
+      - '.github/workflows/agent-control.yml'
+      - 'Makefile'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  local:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Existing and new regression suites
+        run: make test
+      - name: Deterministic A/B/C and external-key verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/agent-control-evidence" "$RUNNER_TEMP/agent-control-keys"
+          python3 -m liminal_agent_control.evaluation run \
+            --mode deterministic-local \
+            --output-root "$RUNNER_TEMP/agent-control-evidence" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/local.key" \
+            > "$RUNNER_TEMP/local-result.json"
+          BUNDLE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$RUNNER_TEMP/local-result.json")
+          python3 -m liminal_agent_control.evaluation verify "$BUNDLE" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/local.key"
+          cp "$RUNNER_TEMP/local-result.json" "$RUNNER_TEMP/agent-control-evidence/run-result.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-local-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-evidence/
+          if-no-files-found: warn
+
+  docker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Resolve and record the worker image
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/agent-control-docker" "$RUNNER_TEMP/agent-control-keys"
+          docker pull python:3.12-slim
+          IMAGE_ID=$(docker image inspect --format '{{.Id}}' python:3.12-slim)
+          echo "LIMINAL_AGENT_CONTROL_DOCKER_IMAGE=$IMAGE_ID" >> "$GITHUB_ENV"
+          docker image inspect "$IMAGE_ID" > "$RUNNER_TEMP/agent-control-docker/image.json"
+          docker version > "$RUNNER_TEMP/agent-control-docker/docker-version.txt"
+          git rev-parse HEAD > "$RUNNER_TEMP/agent-control-docker/source-revision.txt"
+      - name: Real container lifecycle, descendants and negative cases
+        run: python3 -m unittest discover -s tests -p test_agent_control_runtime.py -v
+      - name: Separate receiver process and worker container
+        run: |
+          python3 scripts/run_agent_control_docker.py \
+            --image "$LIMINAL_AGENT_CONTROL_DOCKER_IMAGE" --fixture honest \
+            --output "$RUNNER_TEMP/agent-control-docker/separate-receiver.json"
+      - name: Docker C integration evidence and verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m liminal_agent_control.evaluation run --mode docker \
+            --image "$LIMINAL_AGENT_CONTROL_DOCKER_IMAGE" \
+            --output-root "$RUNNER_TEMP/agent-control-docker/runs" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/docker.key" \
+            > "$RUNNER_TEMP/docker-result.json"
+          BUNDLE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$RUNNER_TEMP/docker-result.json")
+          python3 -m liminal_agent_control.evaluation verify "$BUNDLE" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/docker.key"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert len(r["cases"]) == 6 and all(c["status"] == "PASS" and c["runtime"]["containment"]["verified"] for c in r["cases"]), r["checker_failures"]' "$BUNDLE/report.json"
+          cp "$RUNNER_TEMP/docker-result.json" "$RUNNER_TEMP/agent-control-docker/run-result.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-docker-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-docker/
+          if-no-files-found: warn
