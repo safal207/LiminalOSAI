@@ -34,6 +34,7 @@ NOT_RUN, UNAVAILABLE or INCOMPLETE, plus an evidence reference.
 | Missing observer / receiver outage | | |
 | False model claim / omitted effect | | |
 | Docker execution and process-tree quiescence | | |
+| Supervisor crash, blocked restart and explicit owned-resource recovery | | |
 | Matched Docker A/B/C evaluation | | |
 | Live-model experiment | | |
 
@@ -54,6 +55,11 @@ NOT_RUN, UNAVAILABLE or INCOMPLETE, plus an evidence reference.
   snapshot? Are accepted but unresolved operations exposed as pending?
 - In the matched Docker queue case, did the useful control actually commit and
   did B/C become externally quiescent before the queued host request resumed?
+- After killing the owned supervisor, does its workload remain registered and
+  block fresh admission until authenticated revocation and termination? Does
+  recovery reject a live controller, replacement receiver or mismatched owner?
+- Does each worker proposal require a fresh bounded host observation, with
+  observer failure closing admission before broker dispatch?
 - Does a broken receiver make every "blocked" test appear successful?
 - Does a deliberately weakened control cause the checker to report a failure?
 - Do reported aggregates include failed, excluded, unknown and incomplete runs?

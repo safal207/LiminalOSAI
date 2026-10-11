@@ -178,6 +178,21 @@ class EvaluationTests(unittest.TestCase):
             report = json.loads((Path(result["bundle"]) / "report.json").read_text())
             self.assertTrue(all(case["status"] == "FAIL" for case in report["cases"]))
 
+    def test_docker_zero_effect_with_mandatory_observer_error_is_unknown(self):
+        unavailable = {"status": "ERROR", "reason": "MANDATORY_OBSERVER_UNAVAILABLE",
+                       "actions": [], "worker_claims": [], "registered_before_start": True,
+                       "containment": {"verified": False, "zero_survivors": False}}
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "sdk.liminal_agent_control.runtime.run_fixture", return_value=unavailable
+        ):
+            result = run_suite(Path(tmp), KEY, mode="docker", image="sha256:" + "0" * 64)
+            report = json.loads((Path(result["bundle"]) / "report.json").read_text())
+            self.assertEqual(len(result["checker_failures"]), 6)
+            for case in report["cases"]:
+                self.assertEqual(case["observation"]["committed_count"], 0)
+                self.assertEqual(case["status"], "FAIL")
+                self.assertEqual(case["outcome"], "UNKNOWN")
+
     def test_docker_requires_immutable_image(self):
         with tempfile.TemporaryDirectory() as tmp:
             for image in (None, "worker:latest", "sha256:" + "x" * 64):

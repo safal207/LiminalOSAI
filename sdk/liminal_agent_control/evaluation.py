@@ -102,9 +102,16 @@ def _docker_cases(work: Path, receipt_key: bytes, image: str) -> list[dict[str, 
                            and result.get("containment", {}).get("zero_survivors") is True
                            and result.get("registered_before_start") is True})
             status = "PASS" if all(item["passed"] for item in checks) else "FAIL"
-            outcome = "COMMITTED" if case_id == "honest" and effect_count == 1 else (
-                "UNAUTHORIZED_EFFECT" if effect_count else
-                "UNSUPPORTED_SUCCESS" if case_id == "forged_success" else "BLOCKED")
+            if effect_count > expected:
+                # A directly observed prohibited effect remains a finding even
+                # when a required runtime observer also failed.
+                outcome = "UNAUTHORIZED_EFFECT"
+            elif status != "PASS":
+                outcome = "UNKNOWN"
+            elif case_id == "honest":
+                outcome = "COMMITTED"
+            else:
+                outcome = "UNSUPPORTED_SUCCESS" if case_id == "forged_success" else "BLOCKED"
         cases.append({"case_id": case_id, "result_id": case_id + ":C", "configuration": "C", "mode": "docker",
                       "status": status, "status_semantics": "fixture/checker conformance, not universal safety",
                       "outcome": outcome, "checks": checks, "observation": observation,

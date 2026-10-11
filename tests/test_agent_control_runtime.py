@@ -14,11 +14,12 @@ from sdk.liminal_agent_control import Broker, Receiver
 from sdk.liminal_agent_control.runtime import (
     DockerController, RuntimeBoundaryError, WorkerBridge, contain_workload,
     MatchedWorkerBridge, OrdinaryRecordTool, PreAcceptanceQueue, contain_process_workload,
-    decode_message, run_fixture, run_matched_arm, validate_action,
+    decode_message, recover_workloads, run_fixture, run_matched_arm, validate_action,
     _exchange,
 )
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
 from sdk.liminal_process_tree import ProcessTreeSupervisor
+from sdk.liminal_agent_control.supervisor_registry import SupervisorRegistry
 
 
 def base_action():
@@ -81,6 +82,55 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.receiver.revoke(self.action["root_id"])
         self.assertEqual(self.propose(self.action)["status"], "BLOCKED")
         self.assertEqual(self.receiver.records(), [])
+
+    def test_mandatory_observer_failure_blocks_without_dispatch_and_stays_closed(self):
+        def unavailable():
+            raise OSError("host observation unavailable")
+        self.bridge.observer_required = True
+        self.bridge.observer = unavailable
+        with self.assertRaisesRegex(RuntimeBoundaryError, "MANDATORY_OBSERVER_UNAVAILABLE"):
+            self.propose(self.action)
+        self.assertTrue(self.bridge.admission_closed)
+        self.assertEqual(self.bridge.actions[-1]["status"], "BLOCKED")
+        self.assertEqual(self.bridge.dispatch_calls, [])
+        self.assertEqual(self.broker.state(self.action["action_id"])["status"], "AUTHORIZED")
+        self.assertEqual(self.receiver.records(), [])
+        self.bridge.observer = lambda: {"exists": True, "running": True}
+        with self.assertRaises(RuntimeBoundaryError):
+            self.propose(self.action)
+        self.assertEqual(self.bridge.dispatch_calls, [])
+
+    def test_observer_timeout_cannot_dispatch_or_reopen_admission_later(self):
+        release = threading.Event()
+        def delayed():
+            release.wait(2)
+            return {"exists": True, "running": True}
+        self.bridge.observer_required = True
+        self.bridge.observer = delayed
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(RuntimeBoundaryError, "MANDATORY_OBSERVER_UNAVAILABLE"):
+                self.bridge.accept(encode({"type": "proposal", "action": self.action}), deadline=time.monotonic() + 0.05)
+            self.assertLess(time.monotonic() - started, 0.4)
+            self.assertEqual(self.bridge.dispatch_calls, [])
+            frozen = copy.deepcopy(self.bridge.admission_observations)
+            release.set()
+            self.bridge.observer_calls[0].thread.join(timeout=1)
+            self.assertEqual(self.bridge.admission_observations, frozen)
+            self.assertTrue(self.bridge.admission_closed)
+            self.assertEqual(self.receiver.records(), [])
+        finally:
+            release.set()
+
+    def test_each_proposal_requires_fresh_observer_before_broker(self):
+        observations = iter([{"exists": True, "running": True}, {"exists": False, "running": False}])
+        self.bridge.observer_required = True
+        self.bridge.observer = lambda: next(observations)
+        self.assertEqual(self.propose(self.action)["status"], "COMMITTED")
+        with self.assertRaisesRegex(RuntimeBoundaryError, "MANDATORY_OBSERVER_UNAVAILABLE"):
+            self.propose(self.action)
+        self.assertEqual(len(self.bridge.dispatch_calls), 1)
+        self.assertEqual(len(self.bridge.admission_observations), 2)
 
     def test_protocol_rejects_duplicate_nonfinite_authority_and_network_fields(self):
         for line in [b'{"type":"done","type":"proposal"}', b'{"type":"proposal","action":NaN}',
@@ -424,6 +474,88 @@ class MatchedQueueProtocolTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("LIMINAL_AGENT_CONTROL_DOCKER_IMAGE"), "set explicit immutable Docker image to run real containment")
 class DockerRuntimeIntegrationTests(unittest.TestCase):
+    def test_crashed_supervisor_requires_explicit_owned_resource_recovery(self):
+        image = os.environ["LIMINAL_AGENT_CONTROL_DOCKER_IMAGE"]
+        project = Path(__file__).parents[1]
+        program = """
+from pathlib import Path
+import sys
+from sdk.liminal_agent_control import Broker, Receiver
+from sdk.liminal_agent_control.runtime import run_fixture
+path = Path(sys.argv[1])
+receiver = Receiver(path / 'receiver.db', b'b' * 32, b'r' * 32)
+broker = Broker(path / 'broker.db', receiver)
+run_fixture('descendant_timeout', broker=broker, image=sys.argv[2], timeout_seconds=120,
+            registry_path=path / 'supervisor.db')
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            receiver = Receiver(path / "receiver.db", b"b" * 32, b"r" * 32)
+            broker = Broker(path / "broker.db", receiver)
+            registry = SupervisorRegistry(path / "supervisor.db")
+            child = subprocess.Popen([sys.executable, "-c", program, str(path), image], cwd=project,
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            record = None
+            controller = DockerController()
+            try:
+                end = time.monotonic() + 20
+                observed = None
+                while time.monotonic() < end:
+                    pending = registry.unfinished()
+                    if pending:
+                        record = pending[0]
+                        controller.bind_ownership(record)
+                        observed = controller.inspect_session(record["session_id"])
+                        if observed["running"] and observed["descendant_count"] >= 1:
+                            break
+                    self.assertIsNone(child.poll(), "supervisor exited before the crash injection")
+                    time.sleep(0.05)
+                self.assertIsNotNone(record)
+                self.assertTrue(observed and observed["running"], observed)
+                self.assertGreaterEqual(observed["descendant_count"], 1, observed)
+                self.assertEqual(recover_workloads(registry.path, broker=broker)["status"], "BUSY")
+                child.kill()  # Deliberately bypass Python finally in this owned controller only.
+                child.wait(timeout=3)
+                after_crash = controller.inspect_session(record["session_id"])
+                self.assertTrue(after_crash["running"], after_crash)
+                blocked = run_fixture("honest", broker=broker, image=image, registry_path=registry.path)
+                self.assertEqual(blocked["reason"], "RECOVERY_REQUIRED", blocked)
+                self.assertEqual(receiver.records(), [])
+                recovered = recover_workloads(registry.path, broker=broker)
+                self.assertEqual(recovered["status"], "RECOVERED", recovered)
+                evidence = recovered["recovered"][0]["containment"]
+                self.assertTrue(evidence["verified"], recovered)
+                self.assertTrue(evidence["zero_survivors"], recovered)
+                self.assertTrue(receiver.verify_receipt(evidence["revocation_ack"]["receiver_ack"]))
+                self.assertEqual(registry.unfinished(), [])
+                self.assertFalse(controller.inspect_session(record["session_id"])["exists"])
+                resumed = run_fixture("honest", broker=broker, image=image, registry_path=registry.path)
+                self.assertEqual(resumed["status"], "COMPLETED", resumed)
+                self.assertTrue(resumed["admission_guard"]["mandatory"], resumed)
+                self.assertTrue(resumed["admission_guard"]["observations"][0]["admitted"], resumed)
+                self.assertEqual(resumed["supervisor_registry"]["status"], "CLOSED", resumed)
+                artifact_path = os.environ.get("LIMINAL_AGENT_CONTROL_RECOVERY_EVIDENCE")
+                if artifact_path:
+                    # Artifact capture is supplementary; assertions above are
+                    # the test oracle and must not depend on file availability.
+                    try:
+                        artifact = Path(artifact_path)
+                        artifact.parent.mkdir(parents=True, exist_ok=True)
+                        artifact.write_text(json.dumps({"mode": "actual-docker-supervisor-crash-recovery",
+                            "registered": record, "before_crash": observed, "after_crash": after_crash,
+                            "admission_before_recovery": blocked, "recovery": recovered,
+                            "resumed": resumed, "final_records": receiver.records()}, indent=2) + "\n")
+                    except OSError as exc:
+                        print("supplementary recovery artifact unavailable: " + type(exc).__name__)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=3)
+                if record is not None:
+                    # Exact recorded ownership is rechecked before any cleanup.
+                    controller.terminate_session(record["session_id"])
+                    broker.revoke(record["root_id"])
+
     def test_matched_actual_docker_arms_queue_after_stop(self):
         image = os.environ["LIMINAL_AGENT_CONTROL_DOCKER_IMAGE"]
         worker_hashes = set()

@@ -124,9 +124,51 @@ The bridge deadline bounds waiting for a trusted callback. A timed-out dispatch
 remains UNKNOWN; the host cannot kill a Python callback thread, and a late
 response cannot turn it into success. Receiver revocation and subsequent
 reconciliation determine effects. If receiver revocation cannot be confirmed,
-worker termination still proceeds and containment remains unverified. A host
-controller crash requires an external durable watchdog; this prototype does
-not establish automatic recovery from that failure.
+worker termination still proceeds and containment remains unverified.
+
+Every proposal also requires a bounded, external observation of its registered
+container. Observer failure blocks new broker dispatch. Observer time and
+operation time remain host measurements, separate from worker claims.
+
+## Supervisor restart and explicit recovery
+
+The host-only SQLite supervisor registry records one active workload before
+Docker creation, including its root, plan, image and ownership labels. It is
+stored next to the broker database by default and is never mounted into the
+worker. An exclusive host lease prevents a second live controller or recovery
+call from taking the same slot.
+
+A fresh launch finding an unfinished slot stops with `RECOVERY_REQUIRED`.
+After the prior controller has stopped, reopen the same trusted broker and
+receiver stores/keys and explicitly recover the registered workload:
+
+```python
+from sdk.liminal_agent_control.runtime import recover_workloads
+
+result = recover_workloads(registry_path, broker=trusted_broker)
+```
+
+This import assumes the repository root is the current directory. Runtime
+reports include `runtime_wall_seconds` and observer/dispatch durations under
+`admission_guard`; these are per-run measurements, not a statistical overhead
+estimate.
+
+Recovery verifies the recorded container identity, ownership labels and image
+before freeze/revoke/termination. `RECOVERED` or `EMPTY` permits a new launch;
+`BUSY` or `INCOMPLETE` does not. A missing container still requires authenticated
+root revocation before the slot is closed. Recovery does not infer ownership
+from a name alone or clean up unrelated containers. Broker UNKNOWN outcomes
+remain available for separate receiver reconciliation.
+
+Receiver-backed recovery requires the authenticated `guarded` receiver profile.
+The intentionally unenforced A/B baseline profile returns `INCOMPLETE` with
+`RECOVERY_REQUIRES_GUARDED_RECEIVER`; its epoch acknowledgment cannot establish
+receiver-side enforcement.
+
+This supplies explicit recovery after a supervisor process crash. It does not
+promise autonomous restart, a bounded recovery interval, host power-loss
+durability or recovery from kernel/Docker-daemon compromise. The host lease
+requires supported local filesystem locking; unsupported locking fails closed.
 
 The Docker integration test is explicitly enabled with
 `LIMINAL_AGENT_CONTROL_DOCKER_IMAGE`. A skipped Docker test is **NOT_RUN**, not

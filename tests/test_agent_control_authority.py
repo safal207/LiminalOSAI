@@ -127,6 +127,64 @@ class AgentControlAuthorityTests(unittest.TestCase):
         self.assertTrue({r["status"] for r in receipts} == {"COMMITTED"})
         self.assertTrue(len(receiver.records()) == 1)
 
+    def test_competing_acceptance_and_revocation_have_one_durable_order(self):
+        receiver = self.receiver
+        for trial in range(16):
+            with self.subTest(trial=trial):
+                root_id = f"race-root:{trial}"
+                execution_id = f"race-worker:{trial}"
+                receiver.create_root(root_id)
+                receiver.bind_execution(root_id, execution_id)
+                proposed = action(f"race-action:{trial}", execution_id, root_id)
+                start = threading.Barrier(3)
+
+                def accept():
+                    start.wait(timeout=5)
+                    return receiver.accept(proposed)
+
+                def revoke():
+                    start.wait(timeout=5)
+                    return receiver.revoke(root_id)
+
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    accepting = pool.submit(accept)
+                    revoking = pool.submit(revoke)
+                    start.wait(timeout=5)
+                    admitted = accepting.result(timeout=30)
+                    ack = revoking.result(timeout=30)
+
+                self.assertIn(admitted["status"], {"ACCEPTED", "DENIED"})
+                self.assertEqual(ack["status"], "REVOKED")
+                self.assertEqual(ack["epoch"], 2)
+                self.assertTrue(receiver.verify_receipt(admitted))
+                self.assertTrue(receiver.verify_receipt(ack))
+                restarted = Receiver(receiver.db_path, BROKER_KEY, RECEIPT_KEY)
+                self.assertEqual(restarted.revoke(root_id)["epoch"], 2)
+                later = action(f"race-later:{trial}", execution_id, root_id)
+                self.assertEqual(restarted.accept(later)["reason"], "AUTHORITY_REVOKED")
+
+                if admitted["status"] == "ACCEPTED":
+                    # Admission won the SQLite write ordering. Completion may
+                    # follow the ack because revocation does not undo admission.
+                    self.assertLessEqual(admitted["accepted_at"], ack["revoked_at"])
+                    self.assertEqual(admitted["accepted_epoch"], 1)
+                    self.assertEqual(restarted.query(proposed["action_id"])["status"], "ACCEPTED")
+                    committed = restarted.finalize(proposed["action_id"])
+                    self.assertEqual(committed["status"], "COMMITTED")
+                    self.assertEqual(committed["effect_count"], 1)
+                    self.assertEqual(restarted.finalize(proposed["action_id"]), committed)
+                    expected_effects = 1
+                else:
+                    # Revocation won. No accepted slot exists to finalize later.
+                    self.assertEqual(admitted["reason"], "AUTHORITY_REVOKED")
+                    self.assertEqual(restarted.query(proposed["action_id"])["status"], "UNKNOWN")
+                    self.assertEqual(restarted.finalize(proposed["action_id"])["status"], "UNKNOWN")
+                    expected_effects = 0
+                snapshot = restarted.snapshot(root_id, execution_id)
+                self.assertEqual(snapshot["epoch"], 2)
+                self.assertEqual(len(snapshot["receipts"]), expected_effects)
+                self.assertEqual(snapshot["accepted_action_ids"], [])
+
     def test_parallel_brokers_share_durable_reservation(self):
         receiver = self.receiver
         tmp_path = self.tmp_path

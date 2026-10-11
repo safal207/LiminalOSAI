@@ -66,6 +66,7 @@ PYTHON_TESTS := \
 	tests/test_pinned_http_transport.py \
 	tests/test_agent_control_authority.py \
 	tests/test_agent_control_runtime.py \
+	tests/test_agent_control_supervisor_registry.py \
 	tests/test_agent_control_evaluation.py \
 	tests/test_trace_visualizer.py \
 	tests/test_pulse_kernel_cli.py \

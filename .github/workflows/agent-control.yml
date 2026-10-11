@@ -109,6 +109,8 @@ jobs:
           docker version > "$RUNNER_TEMP/agent-control-docker/docker-version.txt"
           git rev-parse HEAD > "$RUNNER_TEMP/agent-control-docker/source-revision.txt"
       - name: Real container lifecycle, descendants and negative cases
+        env:
+          LIMINAL_AGENT_CONTROL_RECOVERY_EVIDENCE: ${{ runner.temp }}/agent-control-docker/supervisor-recovery.json
         run: python3 -m unittest discover -s tests -p test_agent_control_runtime.py -v
       - name: Separate receiver process and worker container
         run: |

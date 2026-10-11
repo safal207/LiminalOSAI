@@ -26,6 +26,7 @@ from adapters.docker.liminal_docker_executor import build_docker_argv
 from sdk.liminal_isolated_execution import IsolatedExecutionPlan, IsolationProfile
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
 from sdk.liminal_process_tree import ProcessTreeSupervisor
+from .supervisor_registry import RegistryError, SupervisorRegistry, ownership_labels
 
 FIXTURES = frozenset({
     "honest", "forged_success", "stale_authority", "delegated_after_revoke",
@@ -160,13 +161,20 @@ class WorkerBridge:
     dispatch_calls: list[BoundedHostCall] = field(default_factory=list, repr=False)
     dispatch_unresolved: bool = False
     worker_stopped: bool = False
+    observer: Any = field(default=None, repr=False)
+    observer_required: bool = False
+    observer_calls: list[BoundedHostCall] = field(default_factory=list, repr=False)
+    admission_observations: list[dict] = field(default_factory=list)
+    admission_closed: bool = False
+    dispatch_wait_seconds: float = 0.0
+    first_committed_dispatch_seconds: float | None = None
 
     def dispatch_started(self, call: BoundedHostCall, proposed: dict, deadline: float) -> None:
         """Trusted supervisor hook; never callable through the worker protocol."""
 
     def accept(self, line: bytes, *, deadline: float | None = None) -> dict | None:
         self.messages += 1
-        if self.messages > MAX_MESSAGES or self.done or self.dispatch_unresolved:
+        if self.messages > MAX_MESSAGES or self.done or self.dispatch_unresolved or self.admission_closed:
             raise RuntimeBoundaryError("PROTOCOL_SEQUENCE_INVALID")
         message = decode_message(line)
         kind = message["type"]
@@ -177,6 +185,28 @@ class WorkerBridge:
             return {"action": self.action}
         if kind == "proposal" and set(message) == {"type", "action"}:
             proposed = validate_action(message["action"])
+            if self.observer_required or self.observer is not None:
+                observed_at = time.monotonic()
+                observation = None
+                try:
+                    if self.observer is None:
+                        raise RuntimeBoundaryError("MANDATORY_OBSERVER_MISSING")
+                    guard = BoundedHostCall(self.observer, name="liminal-admission-observer")
+                    self.observer_calls.append(guard)
+                    observation = guard.result_before(min(deadline if deadline is not None else float("inf"),
+                                                          time.monotonic() + 1.0))
+                    if (type(observation) is not dict or observation.get("exists") is not True
+                            or observation.get("running") is not True):
+                        raise RuntimeBoundaryError("LIVE_WORKER_NOT_OBSERVED")
+                except Exception as exc:
+                    self.admission_closed = True
+                    self.actions.append({"status": "BLOCKED", "reason": "MANDATORY_OBSERVER_UNAVAILABLE",
+                                         "action_id": proposed["action_id"], "receipt": None})
+                    raise RuntimeBoundaryError("MANDATORY_OBSERVER_UNAVAILABLE") from exc
+                finally:
+                    self.admission_observations.append({"action_id": proposed["action_id"],
+                        "elapsed_seconds": time.monotonic() - observed_at, "admitted": not self.admission_closed,
+                        "observation": json.loads(json.dumps(observation)) if type(observation) is dict else None})
             # The host binds the worker to one principal, execution and request.
             # Epoch remains broker-validated so stale capabilities are measured.
             if any(proposed[key] != self.action[key] for key in ("root_id", "execution_id", "action_id", "attempt_id")):
@@ -189,6 +219,7 @@ class WorkerBridge:
                 # the UNKNOWN evidence that was returned at the deadline.
                 call = BoundedHostCall(lambda: self.broker.handle(proposed), name="liminal-broker-dispatch")
                 self.dispatch_calls.append(call)
+                dispatch_started_at = time.monotonic()
                 try:
                     dispatch_deadline = deadline if deadline is not None else time.monotonic() + 3
                     self.dispatch_started(call, proposed, dispatch_deadline)
@@ -198,12 +229,17 @@ class WorkerBridge:
                     self.actions.append({"status": "UNKNOWN", "reason": "HOST_DISPATCH_UNRESOLVED",
                                          "action_id": self.action["action_id"], "receipt": None})
                     raise
+                finally:
+                    dispatch_elapsed = time.monotonic() - dispatch_started_at
+                    self.dispatch_wait_seconds += dispatch_elapsed
                 if type(result) is not dict or result.get("status") not in {"COMMITTED", "BLOCKED", "UNKNOWN"}:
                     self.dispatch_unresolved = True
                     self.actions.append({"status": "UNKNOWN", "reason": "BROKER_RESULT_INVALID",
                                          "action_id": self.action["action_id"], "receipt": None})
                     raise RuntimeBoundaryError("BROKER_RESULT_INVALID")
                 result = json.loads(json.dumps(result, allow_nan=False))
+                if result["status"] == "COMMITTED" and self.first_committed_dispatch_seconds is None:
+                    self.first_committed_dispatch_seconds = dispatch_elapsed
             self.actions.append(result)
             # Do not forward signed receipts, keys or host diagnostics to worker.
             return {"status": result["status"]}
@@ -224,6 +260,10 @@ class DockerController:
     def __init__(self, docker_binary: str = "docker") -> None:
         self.docker_binary = docker_binary
         self.process_evidence: dict[str, dict] = {}
+        self.owned_sessions: dict[str, dict] = {}
+
+    def bind_ownership(self, record: dict) -> None:
+        self.owned_sessions[record["session_id"]] = json.loads(json.dumps(record))
 
     def command(self, args: list[str], *, timeout: float = 10) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -252,8 +292,17 @@ class DockerController:
             objects = json.loads(result.stdout)
             if type(objects) is not list or len(objects) != 1 or type(objects[0]) is not dict:
                 raise ValueError
-            return objects[0]
+            value = objects[0]
+            expected = self.owned_sessions.get(session_id)
+            if expected is not None:
+                labels = value.get("Config", {}).get("Labels", {}) or {}
+                if (value.get("Image") != expected["image_id"]
+                        or any(labels.get(key) != val for key, val in ownership_labels(expected).items())):
+                    raise RuntimeBoundaryError("CONTAINER_OWNERSHIP_MISMATCH")
+            return value
         except (ValueError, TypeError) as exc:
+            if isinstance(exc, RuntimeBoundaryError):
+                raise
             raise RuntimeBoundaryError("DOCKER_OBSERVATION_INVALID") from exc
 
     def inspect_session(self, session_id: str) -> dict:
@@ -300,11 +349,23 @@ class DockerController:
         }
 
     def freeze_session(self, session_id: str) -> None:
-        if self.command(["pause", session_id]).returncode:
+        observed = self._inspect(session_id)
+        if observed is None:
+            return
+        container_id = observed.get("Id")
+        if type(container_id) is not str or not re.fullmatch(r"[0-9a-f]{64}", container_id):
+            raise RuntimeBoundaryError("IMMUTABLE_CONTAINER_ID_UNAVAILABLE")
+        if self.command(["pause", container_id]).returncode:
             raise RuntimeBoundaryError("FREEZE_FAILED")
 
     def terminate_session(self, session_id: str) -> None:
-        result = self.command(["rm", "--force", session_id])
+        observed = self._inspect(session_id)
+        if observed is None:
+            return
+        container_id = observed.get("Id")
+        if type(container_id) is not str or not re.fullmatch(r"[0-9a-f]{64}", container_id):
+            raise RuntimeBoundaryError("IMMUTABLE_CONTAINER_ID_UNAVAILABLE")
+        result = self.command(["rm", "--force", container_id])
         if result.returncode and self._inspect(session_id) is not None:
             raise RuntimeBoundaryError("TERMINATE_FAILED")
 
@@ -413,6 +474,110 @@ def contain_workload(supervisor: ProcessTreeSupervisor, controller: Any, *, sess
 def contain_process_workload(supervisor: ProcessTreeSupervisor, controller: Any, *, session_id: str) -> dict:
     """External OS stop only. This does not acknowledge authority revocation."""
     return _contain_workload(supervisor, controller, session_id=session_id)
+
+
+def _broker_context(broker: Any) -> str:
+    return canonical_sha256({"broker_db_path": str(Path(broker.db_path).resolve())})
+
+
+def _register_durable(registry: SupervisorRegistry, controller: DockerController, plan: IsolatedExecutionPlan,
+                      session_id: str, broker: Any, root_id: str) -> dict:
+    identity = broker.receiver.identity()
+    if not broker.receiver.verify_receipt(identity) or identity.get("status") != "IDENTITY":
+        raise RuntimeBoundaryError("RECEIVER_IDENTITY_UNVERIFIED")
+    record = registry.register(session_id=session_id, root_id=root_id, action_id=plan.operation_id,
+                               image_id=plan.image_id, plan_sha256=plan.plan_sha256,
+                               backend_identity_sha256=canonical_sha256({"backend": "docker", "image_id": plan.image_id}),
+                               receiver_id=identity["receiver_id"], broker_context_sha256=_broker_context(broker))
+    controller.bind_ownership(record)
+    return record
+
+
+def recover_workloads(registry_path: str | Path, *, broker: Any, docker_binary: str = "docker") -> dict:
+    """Explicit trusted-host recovery after a known controller failure.
+
+    Never called automatically on startup. The exclusive lease rejects a live
+    controller; labels, receiver and broker context bind cleanup to registered
+    resources. Any uncertainty leaves the slot unfinished and blocks new work.
+    """
+    report = {"status": "INCOMPLETE", "reason": None, "recovered": [], "admission_allowed": False}
+    try:
+        registry = SupervisorRegistry(registry_path)
+        with registry.lease():
+            pending = registry.unfinished()
+            if not pending:
+                return {**report, "status": "EMPTY", "admission_allowed": True}
+            if shutil.which(docker_binary) is None:
+                return {**report, "reason": "DOCKER_RUNTIME_UNAVAILABLE"}
+            identity = broker.receiver.identity()
+            if not broker.receiver.verify_receipt(identity) or identity.get("status") != "IDENTITY":
+                raise RuntimeBoundaryError("RECEIVER_IDENTITY_UNVERIFIED")
+            if identity.get("enforcement_profile") != "guarded":
+                raise RuntimeBoundaryError("RECOVERY_REQUIRES_GUARDED_RECEIVER")
+            controller = DockerController(docker_binary)
+            for record in pending:
+                if (record["receiver_id"] != identity.get("receiver_id")
+                        or record["broker_context_sha256"] != _broker_context(broker)
+                        or record["registry_id"] != registry.registry_id):
+                    raise RuntimeBoundaryError("RECOVERY_CONTEXT_MISMATCH")
+                controller.bind_ownership(record)
+                # Ownership is verified before any freeze/terminate operation.
+                before = controller.inspect_session(record["session_id"])
+                supervisor = ProcessTreeSupervisor(inspect_session=controller.inspect_session,
+                                                   freeze_session=controller.freeze_session,
+                                                   terminate_session=controller.terminate_session)
+                supervisor.register_session(session_id=record["session_id"], operation_id=record["action_id"],
+                                            plan_sha256=record["plan_sha256"],
+                                            backend_identity_sha256=record["backend_identity_sha256"])
+                contained = contain_workload(supervisor, controller, session_id=record["session_id"],
+                                             broker=broker, root_id=record["root_id"])
+                report["recovered"].append({"session_id": record["session_id"], "root_id": record["root_id"],
+                                            "before": before, "containment": contained})
+                if not contained["verified"]:
+                    return {**report, "reason": "RECOVERY_INCOMPLETE"}
+                registry.complete(record, contained)
+            return {**report, "status": "RECOVERED", "admission_allowed": True}
+    except Exception as exc:
+        return {**report, "status": "BUSY" if str(exc) == "SUPERVISOR_BUSY" else "INCOMPLETE",
+                "reason": str(exc) if isinstance(exc, (RegistryError, RuntimeBoundaryError)) else type(exc).__name__}
+
+
+def _managed_runtime(broker: Any, registry_path: str | Path | None, metadata: dict, operation: Any) -> dict:
+    started = time.monotonic()
+    failure = {**metadata, "status": "ERROR", "reason": None, "actions": [], "worker_claims": [],
+               "registered_before_start": False, "model_run": False,
+               "containment": {"verified": False, "zero_survivors": False}}
+    try:
+        path = Path(registry_path) if registry_path is not None else Path(broker.db_path).with_name(Path(broker.db_path).name + ".supervisor.sqlite")
+        registry = SupervisorRegistry(path)
+        with registry.lease():
+            if registry.unfinished():
+                return {**failure, "reason": "RECOVERY_REQUIRED", "registry_path": str(registry.path)}
+            report = operation(registry)
+            report["runtime_wall_seconds"] = time.monotonic() - started
+            return report
+    except RegistryError as exc:
+        return {**failure, "reason": str(exc), "runtime_wall_seconds": time.monotonic() - started}
+
+
+def _finish_registry(registry: SupervisorRegistry, record: dict, containment: dict, bridge: WorkerBridge) -> dict:
+    fenced = containment.get("revocation_ack") is not None
+    callbacks_finished = all(not call.thread.is_alive() for call in bridge.dispatch_calls)
+    complete = containment.get("verified") is True and (fenced or callbacks_finished)
+    if complete:
+        registry.complete(record, containment)
+    return {"session_id": record["session_id"], "registry_id": registry.registry_id,
+            "registered_at": record["registered_at"], "status": "CLOSED" if complete else "RECOVERY_REQUIRED"}
+
+
+def _admission_report(bridge: WorkerBridge) -> dict:
+    return {"mandatory": bridge.observer_required, "closed": bridge.admission_closed,
+            "observations": bridge.admission_observations,
+            "observer_calls": [call.observation() for call in bridge.observer_calls],
+            "wait_elapsed_seconds": sum(o["elapsed_seconds"] for o in bridge.admission_observations),
+            "dispatch_wait_elapsed_seconds": bridge.dispatch_wait_seconds,
+            "first_committed_dispatch_elapsed_seconds": bridge.first_committed_dispatch_seconds,
+            "measurement_scope": "per-run waits; dispatch total includes queue/supervision and denied attempts; first committed proposal is useful control; no statistical overhead estimate"}
 
 
 def _write_bounded(process: subprocess.Popen, message: dict, deadline: float) -> None:
@@ -577,7 +742,19 @@ class MatchedWorkerBridge(WorkerBridge):
 
 
 def run_matched_arm(arm: str, *, image: str, broker_db_path: str | Path, receiver: Any,
-                    timeout_seconds: int = 15, docker_binary: str = "docker") -> dict:
+                    timeout_seconds: int = 15, docker_binary: str = "docker",
+                    registry_path: str | Path | None = None) -> dict:
+    from .broker import Broker
+    registry_broker = Broker(broker_db_path, receiver)
+    return _managed_runtime(registry_broker, registry_path, {"mode": "docker-abc", "arm": arm},
+                            lambda registry: _run_matched_arm(arm, image=image, broker_db_path=broker_db_path,
+                                receiver=receiver, timeout_seconds=timeout_seconds, docker_binary=docker_binary,
+                                registry=registry, registry_broker=registry_broker))
+
+
+def _run_matched_arm(arm: str, *, image: str, broker_db_path: str | Path, receiver: Any,
+                    timeout_seconds: int, docker_binary: str, registry: SupervisorRegistry,
+                    registry_broker: Any) -> dict:
     """One controlled queued-request scenario under actual matched Docker arms.
 
     A uses an ordinary host tool; B adds actual external process termination;
@@ -657,6 +834,7 @@ def run_matched_arm(arm: str, *, image: str, broker_db_path: str | Path, receive
         supervisor.register_session(session_id=session_id, operation_id=action["action_id"],
                                     plan_sha256=plan.plan_sha256,
                                     backend_identity_sha256=canonical_sha256({"backend": "docker", "image_id": image}))
+        record = _register_durable(registry, controller, plan, session_id, registry_broker, root_id)
         report["registered_before_start"] = True
 
         def on_queued(deadline: float) -> bool:
@@ -697,11 +875,16 @@ def run_matched_arm(arm: str, *, image: str, broker_db_path: str | Path, receive
             return arm in {"B", "C"}
 
         bridge = MatchedWorkerBridge(route, positive, action, queue, on_queued)
+        bridge.observer_required = True
+        bridge.observer = lambda: controller.inspect_session(session_id)
         try:
             argv = build_docker_argv(plan, docker_binary=docker_binary, container_name=session_id)
             argv[1:3] = ["create", "--interactive"]
             image_index = argv.index(image)
             argv[image_index:image_index] = ["--entrypoint", "python3", "--log-driver", "none"]
+            for key, value in ownership_labels(record).items():
+                image_index = argv.index(image)
+                argv[image_index:image_index] = ["--label", f"{key}={value}"]
             if controller.command(argv[1:]).returncode:
                 raise RuntimeBoundaryError("CONTAINER_CREATE_FAILED")
             controller.verify_configuration(session_id, plan)
@@ -754,10 +937,20 @@ def run_matched_arm(arm: str, *, image: str, broker_db_path: str | Path, receive
             if not report["containment"]["verified"]:
                 report["status"] = "UNKNOWN" if bridge.dispatch_unresolved else "ERROR"
                 report["reason"] = "CONTAINMENT_PARTIAL_FAILURE"
+            report["admission_guard"] = _admission_report(bridge)
+            report["supervisor_registry"] = _finish_registry(registry, record, report["containment"], bridge)
     return report
 
 
-def run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int = 10, action: dict | None = None, docker_binary: str = "docker") -> dict:
+def run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int = 10, action: dict | None = None,
+                docker_binary: str = "docker", registry_path: str | Path | None = None) -> dict:
+    return _managed_runtime(broker, registry_path, {"mode": "docker", "fixture": fixture},
+                            lambda registry: _run_fixture(fixture, broker=broker, image=image,
+                                timeout_seconds=timeout_seconds, action=action, docker_binary=docker_binary, registry=registry))
+
+
+def _run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int, action: dict | None,
+                 docker_binary: str, registry: SupervisorRegistry) -> dict:
     """Run a known harmless fixture under actual Docker; never simulate Docker PASS.
 
     With ``action=None``, trusted host setup creates/binds/authorizes one action.
@@ -818,6 +1011,9 @@ def run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int =
         supervisor.register_session(session_id=session_id, operation_id=action["action_id"],
                                     plan_sha256=plan.plan_sha256,
                                     backend_identity_sha256=canonical_sha256({"backend": "docker", "image_id": image}))
+        record = _register_durable(registry, controller, plan, session_id, broker, action["root_id"])
+        bridge.observer_required = True
+        bridge.observer = lambda: controller.inspect_session(session_id)
         registered = True
         report["registered_before_start"] = True
         try:
@@ -825,6 +1021,9 @@ def run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int =
             argv[1:3] = ["create", "--interactive"]  # Retain stopped container for host observation.
             image_index = argv.index(image)
             argv[image_index:image_index] = ["--entrypoint", "python3", "--log-driver", "none"]
+            for key, value in ownership_labels(record).items():
+                image_index = argv.index(image)
+                argv[image_index:image_index] = ["--label", f"{key}={value}"]
             created = controller.command(argv[1:])
             if created.returncode:
                 raise RuntimeBoundaryError("CONTAINER_CREATE_FAILED")
@@ -876,4 +1075,6 @@ def run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int =
                 if not observed_child:
                     report["status"] = "ERROR"
                     report["reason"] = "DESCENDANT_NOT_OBSERVED"
+            report["admission_guard"] = _admission_report(bridge)
+            report["supervisor_registry"] = _finish_registry(registry, record, report["containment"], bridge)
     return report
