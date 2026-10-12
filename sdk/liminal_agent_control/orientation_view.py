@@ -27,7 +27,7 @@ button:focus-visible,input:focus-visible{outline:3px solid #f4cd73;outline-offse
 .hold{color:#f4cd73}.ok{color:#73ddd0}#frameLabel{font-size:18px;line-height:1.5;margin:16px 0 4px}#time{font-variant-numeric:tabular-nums}
 .tablewrap{overflow:auto}table{border-collapse:collapse;width:100%;font-size:13px}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #304552;white-space:nowrap}
 th{color:#a2b7c7;font-weight:500}.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.facts b{display:block;font-size:22px;margin-bottom:7px}
-.check{padding:7px 0;color:#b2c4d2}.check:before{content:'✓ ';color:#73ddd0}.failed:before{content:'× ';color:#f19b98}
+.check{padding:7px 0;color:#b2c4d2;overflow-wrap:anywhere}.position{overflow-wrap:anywhere}.check:before{content:'✓ ';color:#73ddd0}.failed:before{content:'× ';color:#f19b98}
 footer{margin-top:22px;font-size:12px;word-break:break-word;color:#91a9bb}@media(max-width:760px){main{padding:24px 14px}.grid{grid-template-columns:1fr}.card{padding:16px}.facts{grid-template-columns:1fr 1fr}.controls{gap:8px}}
 </style>
 <main><header><div class="eyebrow">LIMINAL · НАБЛЮДАЕМЫЙ КОНТРОЛЬ</div>

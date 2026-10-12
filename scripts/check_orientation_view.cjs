@@ -26,9 +26,17 @@ const {chromium} = require(process.env.ORIENTATION_PLAYWRIGHT_MODULE);
     assert.equal(await page.locator('#budget').textContent(), '4 / 10');
     assert.equal(await page.locator('#pending').textContent(), '0');
     assert.equal(await page.locator('#next').isDisabled(), true);
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-    assert.deepEqual(errors, []);
     await page.screenshot({path: path.join(process.argv[3], 'orientation-mobile.png'), fullPage: true});
+    const overflow = await page.evaluate(() => ({
+      width: document.documentElement.scrollWidth,
+      viewport: innerWidth,
+      elements: [...document.querySelectorAll('main *')].filter(el => {
+        const rect = el.getBoundingClientRect();
+        return !el.closest('.tablewrap') && (rect.right > innerWidth || rect.left < 0);
+      }).map(el => ({tag: el.tagName, id: el.id, className: String(el.className)}))
+    }));
+    assert.ok(overflow.width <= overflow.viewport, JSON.stringify(overflow));
+    assert.deepEqual(errors, []);
     console.log(JSON.stringify({status: 'PASS', chromium: browser.version(), page_errors: errors,
       desktop: [1250,1000], mobile: [390,844], interactions: ['pending','claim_does_not_move','STOP']}));
   } finally {await browser.close();}
