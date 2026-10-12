@@ -4,8 +4,8 @@
   "sources": {
     "control": {
       "url": "https://github.com/safal207/LiminalOSAI.git",
-      "commit": "09980fbb223235a5102d94ad75050cef5511ad77",
-      "tree": "a8d5d6fb4dc22de0ba677c6f4062b01bdce96557"
+      "commit": "1b67a4d7b9cb9e3798c8a3bfc1bb2672a743f8d6",
+      "tree": "d66fbdfc8325d84d7bc883738d0686e0deebe0e3"
     },
     "cml": {
       "url": "https://github.com/safal207/Causal-Memory-Layer.git",
@@ -21,7 +21,7 @@
   "included_egress": {
     "commit": "91947604e71722f724878269091cabad47d56c50",
     "tree": "be6b0337607b348c1cb85d21272197b54701675f",
-    "relationship": "one of the direct parents of pinned control commit"
+    "relationship": "ancestor of pinned control commit"
   },
   "dependencies": {
     "requirements_file": "reproduction-requirements.txt",
@@ -35,7 +35,8 @@
   },
   "plans": {
     "local_sha256": "0b3e027d22ad2c6c2dc4389a227beae9bc44f71e248e90a157e66cfd05c2225b",
-    "docker_abc_sha256": "8204e1124beaa6d7de54ce4c6957a1379bf7fe4cb6c881d6c3f6057707fa3349"
+    "docker_abc_sha256": "8204e1124beaa6d7de54ce4c6957a1379bf7fe4cb6c881d6c3f6057707fa3349",
+    "docker_faults_sha256": "021c3e112aa2e49fd422acfaa9490b8f0213e6ac9e3f35a84a4d23e86369d1d7"
   },
   "expected": {
     "local_cases": 33,
@@ -69,7 +70,7 @@
     ],
     "egress_tests": 49,
     "claims_tests": 142,
-    "runtime_tests": 27,
+    "runtime_tests": 37,
     "docker_c_cases": 6,
     "docker_c_scenarios": [
       "honest",
@@ -85,7 +86,33 @@
       "B": 1,
       "C": 0
     },
-    "utility_successes_per_arm": 1
+    "utility_successes_per_arm": 1,
+    "runtime_test_files": [
+      "tests/test_agent_control_runtime.py",
+      "tests/test_agent_control_fault_runtime.py"
+    ],
+    "docker_fault_cases": 6,
+    "docker_fault_scenarios": [
+      "honest",
+      "pre_ack_inflight",
+      "lost_response_restart",
+      "receiver_down",
+      "observer_down",
+      "omitted_effect_claim"
+    ],
+    "docker_fault_outcomes": {
+      "honest": "COMMITTED",
+      "pre_ack_inflight": "PRE_ACK_INFLIGHT_COMMIT",
+      "lost_response_restart": "COMMITTED_AFTER_RECONCILIATION",
+      "receiver_down": "UNKNOWN",
+      "observer_down": "UNKNOWN",
+      "omitted_effect_claim": "CLAIM_CONTRADICTION"
+    },
+    "faults_cml_counts": {
+      "PASS": 3,
+      "UNKNOWN": 2,
+      "FAIL": 1
+    }
   },
   "provenance_note": "Hashes bind bytes; signed receiver observations require separately retained trusted keys. A repeated author run is not independent external human reproduction."
 }

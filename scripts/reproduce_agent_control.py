@@ -103,11 +103,10 @@ def environment_contract():
         raise ValueError("requires Linux x86_64, glibc >=2.17, CPython 3.11/3.12 and Git")
 
 
-def require_direct_parent(raw_commit: str, required: str):
-    parents = [line.split()[1] for line in raw_commit.partition("\n\n")[0].splitlines()
-               if line.startswith("parent ")]
-    if required not in parents:
-        raise ValueError("included egress is not a direct parent of the control commit")
+def require_ancestor(repository: Path, ancestor: str, descendant: str, run):
+    code, _, _ = run(["git", "-C", str(repository), "merge-base", "--is-ancestor", ancestor, descendant], allowed=(0, 1))
+    if code != 0:
+        raise ValueError("included egress is not an ancestor of the pinned control commit")
 
 
 def checked_paths(controller: dict, output_root: Path) -> tuple[Path, Path]:
@@ -132,11 +131,15 @@ def checked_paths(controller: dict, output_root: Path) -> tuple[Path, Path]:
 
 
 def validate_inventory(report: dict, mode: str, expected: dict):
+    if not isinstance(report, dict) or not isinstance(report.get("cases"), list) or any(
+            not isinstance(case, dict) for case in report["cases"]):
+        raise ValueError("case inventory must be an array of objects")
     cases = report.get("cases", [])
-    expected_ids = expected["local_scenarios"] if mode == "deterministic-local" else (
-        expected["docker_c_scenarios"] if mode == "docker" else ["queued_after_stop"])
+    expected_ids = {"deterministic-local": expected["local_scenarios"], "docker": expected["docker_c_scenarios"],
+                    "docker-abc": ["queued_after_stop"], "docker-faults": expected["docker_fault_scenarios"]}[mode]
+    c_only = mode in ("docker", "docker-faults")
     wanted = [(case, arm) for case in expected_ids
-              for arm in (["C"] if mode == "docker" else ["A", "B", "C"])]
+              for arm in (["C"] if c_only else ["A", "B", "C"])]
     actual = [(c.get("case_id"), c.get("configuration")) for c in cases]
     if actual != wanted or any(c.get("result_id") != c.get("case_id") + ":" + c.get("configuration") for c in cases):
         raise ValueError("case inventory differs from the frozen design")
@@ -144,16 +147,44 @@ def validate_inventory(report: dict, mode: str, expected: dict):
             or report.get("checker_failures") != [] or any(c.get("status") != "PASS" for c in cases)
             or report.get("negative_control", {}).get("detected") is not True):
         raise ValueError("native harness has an incomplete or failed required case")
-    if mode != "docker":
+    if mode in ("deterministic-local", "docker-abc"):
         effects = {arm: sum(c.get("outcome") == "UNAUTHORIZED_EFFECT" for c in cases
                             if c.get("configuration") == arm) for arm in ("A", "B", "C")}
         wanted_effects = expected["local_effects" if mode == "deterministic-local" else "docker_abc_effects"]
         if effects != wanted_effects:
             raise ValueError("observed effect counts differ from the frozen fixture expectation")
-    if mode == "docker" and any(c.get("runtime", {}).get("containment", {}).get("verified")
-                                is not True for c in cases):
-        raise ValueError("a required Docker containment observation is unverified")
-    arms = ["C"] if mode == "docker" else ["A", "B", "C"]
+    if c_only:
+        if any(not isinstance(c.get("runtime"), dict) or not isinstance(c["runtime"].get("containment"), dict) for c in cases):
+            raise ValueError("Docker runtime and containment evidence must contain objects")
+        if any(c["runtime"]["containment"].get("verified") is not True for c in cases):
+            raise ValueError("a required Docker containment observation is unverified")
+    if mode == "docker-faults":
+        if len(cases) != expected["docker_fault_cases"] or report.get("experiment_id") != "owned-receiver-docker-faults-v1":
+            raise ValueError("Docker fault experiment metadata differs from the frozen design")
+        for case in cases:
+            if any(not isinstance(case.get(field), dict) for field in ("runtime", "observation", "fault")):
+                raise ValueError("Docker fault evidence must contain objects")
+            name, runtime, observation = case["case_id"], case.get("runtime", {}), case.get("observation", {})
+            fault, containment = case.get("fault", {}), runtime.get("containment", {})
+            if not isinstance(containment, dict) or not isinstance(containment.get("revocation_ack"), dict):
+                raise ValueError("Docker cleanup and revocation evidence must contain objects")
+            aggregate = containment.get("revocation_ack", {})
+            if not isinstance(aggregate.get("receiver_ack"), dict):
+                raise ValueError("Docker receiver acknowledgement must be an object")
+            if (case.get("mode") != mode or case.get("experiment_id") != report["experiment_id"]
+                    or case.get("outcome") != expected["docker_fault_outcomes"][name]
+                    or fault.get("schema") != "liminal-agent-control-docker-fault-v1" or fault.get("scenario") != name
+                    or fault.get("fault_id") != "docker-fault:" + name or fault.get("activated") is not True
+                    or fault.get("collection_complete") is not True or containment.get("zero_survivors") is not True
+                    or aggregate.get("status") != "REVOKED" or aggregate.get("broker_fenced") is not True
+                    or aggregate.get("receiver_ack", {}).get("status") != "REVOKED"):
+                raise ValueError("required Docker fault, outcome, collection or cleanup evidence is missing")
+            if name in ("receiver_down", "observer_down") and (
+                    runtime.get("status") != ("UNKNOWN" if name == "receiver_down" else "ERROR")
+                    or observation.get("available") is not False or observation.get("receipts") != []
+                    or any(observation.get(field) is not None for field in ("committed_count", "accepted_count", "snapshot"))):
+                raise ValueError("Docker outage uncertainty or raw runtime failure was promoted")
+    arms = ["C"] if c_only else ["A", "B", "C"]
     if any(report.get("metrics", {}).get("by_configuration", {}).get(arm, {}).get("utility_successes")
            != expected["utility_successes_per_arm"] for arm in arms):
         raise ValueError("useful authorized operation is missing from a required arm")
@@ -221,7 +252,7 @@ class Reproduction:
         for name, pin in self.lock["sources"].items():
             path = self.private / "sources" / name
             self.run(["git", "init", str(path)])
-            self.run(["git", "-C", str(path), "fetch", "--depth=1", pin["url"], pin["commit"]])
+            self.run(["git", "-C", str(path), "fetch", "--depth=32" if name == "control" else "--depth=1", pin["url"], pin["commit"]])
             self.run(["git", "-C", str(path), "checkout", "--detach", "FETCH_HEAD"])
             observed = {}
             for field, revision in (("commit", "HEAD"), ("tree", "HEAD^{tree}")):
@@ -231,14 +262,15 @@ class Reproduction:
                 raise ValueError("fetched source revision/tree/cleanliness mismatch; execution blocked")
             self.sources[name] = path
         control = self.sources["control"]
-        for field, filename in (("local_sha256", "preregistration.json"), ("docker_abc_sha256", "preregistration_docker_abc.json")):
+        for field, filename in (("local_sha256", "preregistration.json"), ("docker_abc_sha256", "preregistration_docker_abc.json"),
+                                ("docker_faults_sha256", "preregistration_docker_faults.json")):
             if digest(control / "experiments" / "agent_control" / filename) != self.lock["plans"][field]:
                 raise ValueError("frozen preregistration differs from its explicit lock digest")
         included = self.lock["included_egress"]
-        require_direct_parent(self.run(["git", "-C", str(control), "cat-file", "-p", "HEAD"])[1], included["commit"])
         self.run(["git", "-C", str(control), "fetch", "--depth=1", self.lock["sources"]["control"]["url"], included["commit"]])
         if self.run(["git", "-C", str(control), "rev-parse", "FETCH_HEAD^{tree}"])[1].strip() != included["tree"]:
             raise ValueError("included egress tree differs from its explicit lock pin")
+        require_ancestor(control, included["commit"], self.lock["sources"]["control"]["commit"], self.run)
         self.summary["sources"] = self.lock["sources"]
         self.summary["plans"], self.summary["included_egress"] = self.lock["plans"], included
 
@@ -289,6 +321,8 @@ class Reproduction:
                 or report.get("source", {}).get("working_tree_dirty") is not False):
             raise ValueError("native run exit status, source or collection identity differs")
         validate_inventory(report, mode, self.lock["expected"])
+        if mode == "docker-faults" and report.get("execution_image_id") != image:
+            raise ValueError("Docker fault report differs from the controller-selected image")
         self.source_clean("control")
         _, stdout, _ = self.run([str(self.python), "-m", "liminal_agent_control.evaluation", "verify", str(bundle),
                                 "--receipt-key-file", str(key)], cwd=source, pythonpath=source / "sdk")
@@ -297,13 +331,16 @@ class Reproduction:
         self.summary.setdefault("experiments", {})[mode] = {"cases": len(report["cases"]), "metrics": report["metrics"]}
         return controller, bundle, expectations, key
 
-    def score(self, collected):
+    def score(self, collected, label="local"):
+        if label not in ("local", "docker-faults"):
+            raise ValueError("unsupported CML score label")
         controller, bundle, expectations, key = collected
-        keyring = self.private / "keys" / "cml-keyring.json"
+        filename, counts = ("cml-score.json", "cml_counts") if label == "local" else ("cml-score-docker-faults.json", "faults_cml_counts")
+        keyring = self.private / "keys" / ("cml-keyring-" + label + ".json")
         descriptor = os.open(keyring, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "w") as handle:
             json.dump({"receiver-hmac-v1": key.read_bytes().hex()}, handle)
-        output = self.private / "work" / "cml-score.json"
+        output = self.private / "work" / filename
         cml = self.sources["cml"]
         self.source_clean("cml")
         code, _, _ = self.run([str(self.python), str(cml / "benchmarks/agent_boundary/runners/score_receiver_export.py"),
@@ -311,9 +348,9 @@ class Reproduction:
                               "--keyring", str(keyring), "--now", str(controller["collected_at"]),
                               "--max-age-seconds", "30", "--output", str(output)], pythonpath=cml, allowed=(0, 1, 2))
         score = read_json(output)
-        shutil.copyfile(output, self.public / "cml-score.json")
+        shutil.copyfile(output, self.public / filename)
         ids = [case["result_id"] for case in read_json(bundle / "report.json")["cases"]]
-        self.summary["cml_counts"] = validate_cml(score, code, self.lock["expected"]["cml_counts"], ids)
+        self.summary[counts] = validate_cml(score, code, self.lock["expected"][counts], ids)
 
     def docker_image(self):
         reference = self.lock["image"]["reference"]
@@ -358,10 +395,12 @@ class Reproduction:
             if self.profile == "all":
                 image = self.check("docker-availability", self.docker_image)
                 self.summary["docker"] = "FAIL"
-                self.check("runtime-tests", lambda: self.unit_tests("control", ["tests/test_agent_control_runtime.py"],
+                self.check("runtime-tests", lambda: self.unit_tests("control", expected["runtime_test_files"],
                                                                   expected["runtime_tests"], image=image))
                 self.check("docker", lambda: self.evaluate("docker", image))
                 self.check("docker-abc", lambda: self.evaluate("docker-abc", image))
+                faults = self.check("docker-faults", lambda: self.evaluate("docker-faults", image))
+                self.check("cml-scoring-docker-faults", lambda: self.score(faults, label="docker-faults"))
                 self.summary["docker"] = "PASS"
             self.summary["status"] = "PASS"
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as exc:

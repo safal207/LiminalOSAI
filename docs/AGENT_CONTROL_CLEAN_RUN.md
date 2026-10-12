@@ -47,7 +47,7 @@ retain partial evidence when a run fails.
 ## Frozen inputs and expected results
 
 The [lock](../experiments/agent_control/reproduction.lock.json) binds commit and
-tree identities, the included egress parent, both experiment plans, the image
+tree identities, the included egress ancestor, all three experiment plans, the image
 digest and the SHA-256 of the
 [hashed dependency list](../experiments/agent_control/reproduction-requirements.txt).
 The launcher checks source identity and cleanliness before executing it. Pip
@@ -56,8 +56,8 @@ actual installed package list is retained as `public/dependencies.txt`.
 
 | Source | Frozen commit |
 |---|---|
-| Receiver, broker, runtime and experiments | `09980fbb223235a5102d94ad75050cef5511ad77` |
-| Included egress fix, a direct parent | `91947604e71722f724878269091cabad47d56c50` |
+| Receiver, broker, runtime and experiments | `1b67a4d7b9cb9e3798c8a3bfc1bb2672a743f8d6` |
+| Included egress fix, verified ancestor | `91947604e71722f724878269091cabad47d56c50` |
 | Claim/evidence benchmark | `987511b23d9edad01f083c9eb218a51ef72d2ce3` |
 | CML scorer | `4046bfae936abde5d9566fded6eaaa8a302561f3` |
 
@@ -67,9 +67,11 @@ actual installed package list is retained as `public/dependencies.txt`.
 | Claim/evidence benchmark | 142 tests pass |
 | Deterministic local A/B/C | 33 cases; forbidden effects A=4, B=3, C=0 |
 | CML scoring of those 33 local cases | 9 PASS, 14 UNKNOWN, 10 FAIL |
-| Docker runtime, `all` only | 27 tests pass, no skips |
+| Original and fault runtime suites, `all` only | 37 tests pass, no skips |
 | Docker C integration, `all` only | Six registered cases |
 | Matched Docker queued-request A/B/C, `all` only | Three cases; late effects A=1, B=1, C=0 |
+| Registered Docker faults, `all` only | Six C-only cases; receiver/observer outage outcomes stay UNKNOWN |
+| CML scoring of those six fault cases, `all` only | 3 PASS, 2 UNKNOWN, 1 FAIL |
 
 Each required arm must also complete its useful authorized operation. CML's
 `FAIL` and `UNKNOWN` results are expected outcomes of the adversarial and
@@ -77,7 +79,12 @@ deliberately weak baseline cases, and remain visible in `public/cml-score.json`.
 A launcher **PASS** means the harness reproduced those distinctions, including
 the expected failures. It does not mean that every arm is safe, that arbitrary
 sandbox escape is prevented or that model deception has been solved. Keep local,
-Docker C and matched Docker A/B/C results separate; this is not a live-model run.
+Docker C, matched Docker A/B/C and registered Docker fault results separate;
+this is not a live-model run. The [fault guide](AGENT_CONTROL_DOCKER_FAULTS.md)
+explains permitted pre-ACK completion, broker-store reopen, partial transport
+outages and the contradictory FAILED worker claim. Its raw UNKNOWN/ERROR
+statuses remain in the report and its CML score is retained separately in
+`public/cml-score-docker-faults.json`.
 
 ## Evidence and interrupted runs
 
@@ -125,6 +132,11 @@ x86_64 с CPython 3.11/3.12, Git и работающим Docker. Каталог 
 а не успешную проверку изоляции. Ожидаемые 9 PASS, 14 UNKNOWN и 10 FAIL относятся
 к отдельным сценариям CML; общий PASS подтверждает работу проверяющего набора,
 а не универсальную безопасность агентов.
+
+Полный профиль также выполняет шесть отдельных Docker-сценариев отказов.
+Их CML-результат сохраняется отдельно: 3 PASS, 2 UNKNOWN и 1 FAIL. Исходные
+UNKNOWN/ERROR и противоречие между выполненной записью и заявлением FAILED
+не скрываются общим статусом проверяющего.
 
 Публикуйте только `public/`. В `private/` находятся ключи, доверенные входы
 проверки, журналы и рабочие данные: сохраните их у себя. Таймаут процесса не
