@@ -1,8 +1,9 @@
 """Persisted host-collected evidence bindings for exact observer challenges.
 
 Distinct source IDs identify configured collection domains. They do not prove
-independent ownership or truth. Enrollment, collection and binding are trusted
-host operations; observers only read their role's packet and sign its digest.
+independent ownership or truth. Legacy sources trust host collection. A source
+with an enrolled issuer additionally requires the receiver's signature at bind,
+ingestion and every use; an observer signature cannot replace that evidence.
 """
 from __future__ import annotations
 
@@ -52,10 +53,19 @@ def _profile(value: Any) -> dict[str, Any]:
         raise ControlError("OBSERVER_SOURCE_PROFILE_MALFORMED")
     observers, sources = set(), set()
     for source in value["sources"]:
-        if not isinstance(source, dict) or set(source) != {"observer_id", "source_id"}:
+        if (not isinstance(source, dict)
+                or set(source) not in ({"observer_id", "source_id"}, {"observer_id", "source_id", "issuer"})):
             raise ControlError("OBSERVER_SOURCE_PROFILE_MALFORMED")
         validate_id(source["observer_id"], "observer_id")
         validate_id(source["source_id"], "source_id")
+        if "issuer" in source:
+            from .receiver_source import validate_issuer_pin
+            try:
+                issuer = validate_issuer_pin(source["issuer"])
+            except ControlError as exc:
+                raise ControlError("OBSERVER_SOURCE_PROFILE_MALFORMED") from exc
+            if issuer["source_id"] != source["source_id"]:
+                raise ControlError("OBSERVER_SOURCE_PROFILE_MALFORMED")
         if source["observer_id"] in observers or source["source_id"] in sources:
             raise ControlError("OBSERVER_SOURCE_DUPLICATE_SOURCE")
         observers.add(source["observer_id"])
@@ -63,6 +73,14 @@ def _profile(value: Any) -> dict[str, Any]:
     if _time(value["max_source_age_seconds"]) <= 0:
         raise ControlError("OBSERVER_SOURCE_PROFILE_MALFORMED")
     return value
+
+
+def _issuer_roles_valid(profile: dict[str, Any], ring_profile: dict[str, Any]) -> bool:
+    roles = {item["observer_id"]: item["role"] for item in ring_profile["observers"]}
+    # Receiver source statements currently implement reality evidence only.
+    # Other roles retain their explicit legacy collection mode.
+    return all("issuer" not in item or roles.get(item["observer_id"]) == "reality"
+               for item in profile["sources"])
 
 
 def _load(db: Any, root_id: str) -> tuple[Any, Any]:
@@ -92,7 +110,8 @@ def profile_reason_in_transaction(db: Any, root_id: str) -> str | None:
                 or {item["observer_id"] for item in profile["sources"]}
                 != {item["observer_id"] for item in auth_profile["keys"]}
                 or {item["observer_id"] for item in profile["sources"]}
-                != {item["observer_id"] for item in ring_profile["observers"]}):
+                != {item["observer_id"] for item in ring_profile["observers"]}
+                or not _issuer_roles_valid(profile, ring_profile)):
             return "OBSERVER_SOURCE_PROFILE_MISMATCH"
     except (ControlError, KeyError, TypeError, ValueError):
         return "OBSERVER_SOURCE_PROFILE_MISMATCH"
@@ -114,6 +133,37 @@ def validate_source_packet(request: dict[str, Any], packet: Any, *, source_id: s
             or (source_id is not None and packet["source_id"] != source_id)):
         raise ControlError("OBSERVER_SOURCE_BINDING_MISMATCH")
     return json.loads(canonical_bytes(packet))
+
+
+def _verified_issuer_statement(request: dict[str, Any], packet: dict[str, Any],
+                               source: dict[str, Any], *, now: float | None,
+                               max_age_seconds: float) -> dict[str, Any] | None:
+    """Verify enrolled receiver truth independently of an observer's process."""
+    if "issuer" not in source:
+        return None
+    statement = packet["payload"].get("receiver_source_statement")
+    if statement is None:
+        raise ControlError("RECEIVER_SOURCE_REQUIRED")
+    from .receiver_source import verify_source_statement
+    verified = verify_source_statement(request, statement, source["issuer"],
+        now=now, max_age_seconds=max_age_seconds)
+    payload = packet["payload"]
+    if (packet["source_id"] != source["issuer"]["source_id"]
+            or canonical_bytes(packet["observed_at"]) != canonical_bytes(verified["issued_at"])
+            or "receiver_records" not in payload or "receiver_snapshot" not in payload
+            or canonical_bytes({"receiver_records": payload["receiver_records"],
+                                "receiver_snapshot": payload["receiver_snapshot"]})
+            != canonical_bytes(verified["export"])):
+        raise ControlError("RECEIVER_SOURCE_BINDING_MISMATCH")
+    return verified
+
+
+def _packet_expiry(request: dict[str, Any], packet: dict[str, Any], profile: dict[str, Any],
+                   statement: dict[str, Any] | None) -> float:
+    expires_at = min(request["valid_until"], _time(packet["observed_at"]) + profile["max_source_age_seconds"])
+    # SQLite REAL columns reload as floats; the binding hash must preserve that
+    # same canonical type even when callers supplied integer clock values.
+    return _time(min(expires_at, statement["expires_at"]) if statement is not None else expires_at)
 
 
 def write_source_packet(source_directory: str | Path, request: dict[str, Any], packet: dict[str, Any]) -> Path:
@@ -199,6 +249,12 @@ Exact response retries may be read as history without granting new execution.
             return "OBSERVER_SOURCE_BINDING_REQUIRED"
         expected_source = next(item for item in profile["sources"] if item["observer_id"] == request["observer_id"])
         packet = validate_source_packet(request, json.loads(binding["packet_json"]), source_id=expected_source["source_id"])
+        when = consumed_at if consumed_at is not None else now
+        # Historical retries and a freshly consumed VETO retain their original
+        # verification instant. SUPPORT is checked against current gate time.
+        verify_now = when if now is None or envelope["verdict"] == "VETO" else now
+        statement = _verified_issuer_statement(request, packet, expected_source, now=verify_now,
+            max_age_seconds=profile["max_source_age_seconds"])
         if (challenge is None or challenge["request_digest"] != digest(request)
                 or challenge["request_json"] != canonical_bytes(request).decode()
                 or binding["root_id"] != request["root_id"] or binding["observer_id"] != request["observer_id"]
@@ -207,17 +263,18 @@ Exact response retries may be read as history without granting new execution.
                 or binding["packet_digest"] != digest(packet) or envelope["evidence_digest"] != binding["packet_digest"]
                 or binding["observed_at"] != packet["observed_at"]
                 or digest({field: binding[field] for field in _BINDING_FIELDS}) != binding["binding_digest"]
-                or binding["expires_at"] != min(request["valid_until"], binding["observed_at"] + profile["max_source_age_seconds"])
+                or binding["expires_at"] != _packet_expiry(request, packet, profile, statement)
                 or not request["issued_at"] <= binding["bound_at"] < request["valid_until"]
                 or not binding["observed_at"] <= binding["bound_at"] < binding["expires_at"]
                 or envelope["observed_at"] < binding["observed_at"]):
             return "OBSERVER_SOURCE_BINDING_MISMATCH"
-        when = consumed_at if consumed_at is not None else now
         if when is None or not binding["bound_at"] <= when < binding["expires_at"]:
             return "OBSERVER_SOURCE_STALE"
         if now is not None and envelope["verdict"] != "VETO" and not binding["bound_at"] <= now < binding["expires_at"]:
             return "OBSERVER_SOURCE_STALE"
-    except (ControlError, KeyError, TypeError, ValueError, StopIteration):
+    except ControlError as exc:
+        return str(exc) if str(exc).startswith("RECEIVER_SOURCE_") else "OBSERVER_SOURCE_BINDING_MISMATCH"
+    except (KeyError, TypeError, ValueError, StopIteration):
         return "OBSERVER_SOURCE_BINDING_MISMATCH"
     return None
 
@@ -242,11 +299,13 @@ class ObserverSourceStore:
             db.execute("BEGIN IMMEDIATE")
             self._active(db, root_id)
             from .observer_auth import ObserverAuthStore
-            auth_row, auth_profile, ring_row, _ = ObserverAuthStore._require(db, root_id)
+            auth_row, auth_profile, ring_row, ring_profile = ObserverAuthStore._require(db, root_id)
             if db.execute("SELECT 1 FROM observer_source_profiles WHERE root_id=?", (root_id,)).fetchone():
                 raise ControlError("observer source profile is immutable")
             if {item["observer_id"] for item in profile["sources"]} != {item["observer_id"] for item in auth_profile["keys"]}:
                 raise ControlError("OBSERVER_SOURCE_COVERAGE_REQUIRED")
+            if not _issuer_roles_valid(profile, ring_profile):
+                raise ControlError("OBSERVER_SOURCE_ISSUER_ROLE_UNSUPPORTED")
             for table in ("orientation_seeds", "orientation_tickets", "brakes_actions", "observer_auth_challenges"):
                 if db.execute(f"SELECT 1 FROM {table} WHERE root_id=?", (root_id,)).fetchone():
                     raise ControlError("observer source profile requires a root with no seeds, tickets or actions")
@@ -291,7 +350,9 @@ class ObserverSourceStore:
                 return {**{field: old[field] for field in _BINDING_FIELDS}, "binding_digest": old["binding_digest"],
                         "execution_authorized": False}
             now = session["last_now"]
-            expires_at = min(request["valid_until"], _time(packet["observed_at"]) + profile["max_source_age_seconds"])
+            statement = _verified_issuer_statement(request, packet, expected_source, now=now,
+                max_age_seconds=profile["max_source_age_seconds"])
+            expires_at = _packet_expiry(request, packet, profile, statement)
             if (challenge["consumed_at"] is not None or not request["issued_at"] <= now < request["valid_until"]
                     or not _time(packet["observed_at"]) <= now < expires_at):
                 raise ControlError("OBSERVER_SOURCE_STALE")

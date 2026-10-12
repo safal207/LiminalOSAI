@@ -83,17 +83,27 @@ def validate_source_directories(directories: list[str | Path] | tuple[str | Path
     return result
 
 
-def _receiver_export(request: dict[str, Any], payload: dict[str, Any]) -> str:
-    """Check the host-verified receiver export without receiving its HMAC key.
+def _receiver_export(request: dict[str, Any], payload: dict[str, Any], *,
+                     issuer_pin: dict[str,str] | None = None, now: float | None = None) -> str:
+    """Check receiver exports without receiving a receiver private key.
 
     The source binding pins the collector's complete packet, including its host
     verification assertion. This observer checks export consistency; it does not
-    independently authenticate the receiver or equate graph revisions with the
+    independently authenticate the receiver in legacy mode or equate graph revisions with the
     count of records (other channels have different effect evidence).
+    A fixed issuer pin instead requires a challenge-bound receiver signature;
+    it never trusts the collector's verification flag or a packet-carried key.
     """
     records, snapshot = payload.get("receiver_records"), payload.get("receiver_snapshot")
+    if issuer_pin is not None:
+        from .receiver_source import verify_source_statement
+        statement=verify_source_statement(request,payload.get('receiver_source_statement'),issuer_pin,
+                                          now=time.time() if now is None else now)
+        if (canonical_bytes({'receiver_records':records,'receiver_snapshot':snapshot})
+                != canonical_bytes(statement['export'])):
+            raise ControlError('RECEIVER_SOURCE_EXPORT_MISMATCH')
     if (not isinstance(records, list) or not isinstance(snapshot, dict)
-            or payload.get("receiver_snapshot_verified_by_host") is not True):
+            or (issuer_pin is None and payload.get("receiver_snapshot_verified_by_host") is not True)):
         return "UNKNOWN"
     fields = {"schema", "root_id", "execution_id", "epoch", "complete", "receipts",
               "accepted_action_ids", "receiver_id", "cutoff", "signature", "key_id",
@@ -160,16 +170,27 @@ def _receiver_export(request: dict[str, Any], payload: dict[str, Any]) -> str:
     return "SUPPORT"
 
 
-def evaluate_source_packet(request: dict[str, Any], packet: dict[str, Any]) -> tuple[str, str, float]:
+def evaluate_source_packet(request: dict[str, Any], packet: dict[str, Any], *,
+                           issuer_pin: dict[str,str] | None = None,
+                           now: float | None = None) -> tuple[str, str, float]:
     """Require each role's collected source before a fixture can give SUPPORT."""
     from .observer_sources import validate_source_packet
     packet = validate_source_packet(request, packet)
+    if issuer_pin is not None and request['role']!='reality':
+        raise ControlError('RECEIVER_SOURCE_ROLE_MISMATCH')
     payload = packet["payload"]
     fixture_verdict, _, observed_at = evaluate_fixture(request, payload)
     source_verdict = "UNKNOWN"
     try:
         if request["role"] == "reality":
-            source_verdict = _receiver_export(request, payload)
+            if issuer_pin is not None:
+                from .receiver_source import validate_issuer_pin
+                pin=validate_issuer_pin(issuer_pin)
+                statement=payload.get('receiver_source_statement')
+                if (packet['source_id']!=pin['source_id'] or not isinstance(statement,dict)
+                        or canonical_bytes(packet['observed_at'])!=canonical_bytes(statement.get('issued_at'))):
+                    raise ControlError('RECEIVER_SOURCE_BINDING_MISMATCH')
+            source_verdict = _receiver_export(request, payload,issuer_pin=issuer_pin,now=now)
         elif request["role"] == "continuity":
             if payload.get("collector_kind") == "append-only exported audit copy":
                 source_verdict = "SUPPORT"
@@ -180,6 +201,8 @@ def evaluate_source_packet(request: dict[str, Any], packet: dict[str, Any]) -> t
         source_verdict = "UNKNOWN"
     verdict = ("VETO" if "VETO" in (fixture_verdict, source_verdict)
                else "SUPPORT" if fixture_verdict == source_verdict == "SUPPORT" else "UNKNOWN")
+    if issuer_pin is not None:
+        observed_at = max(observed_at,_number(packet['observed_at']))
     return verdict, digest(packet), observed_at
 
 
@@ -195,11 +218,17 @@ class DockerObserver:
 
     def __init__(self, *, image_id: str, observer_id: str, role: str, key_id: str,
                  source_directory: str | Path, timeout_seconds: float = 5,
-                 docker_binary: str = "docker") -> None:
+                 docker_binary: str = "docker", source_issuer: dict[str,str] | None = None) -> None:
         if not isinstance(image_id, str) or not _IMAGE.fullmatch(image_id) or role not in _ROLES:
             raise ControlError("OBSERVER_CONTAINER_CONFIGURATION_INVALID")
         validate_id(observer_id, "observer_id")
         validate_id(key_id, "key_id")
+        self._source_issuer=None
+        if source_issuer is not None:
+            from .receiver_source import validate_issuer_pin
+            if role!='reality':
+                raise ControlError('RECEIVER_SOURCE_ROLE_MISMATCH')
+            self._source_issuer=validate_issuer_pin(source_issuer)
         timeout = _number(timeout_seconds)
         if not 0 < timeout <= 30:
             raise ControlError("OBSERVER_CONTAINER_CONFIGURATION_INVALID")
@@ -226,10 +255,16 @@ class DockerObserver:
         self.last_cleanup: dict[str, Any] | None = None
         self.lifecycle: Any = None  # Installed only by the trusted managed ring.
 
+    @property
+    def source_issuer(self) -> dict[str,str] | None:
+        return None if self._source_issuer is None else json.loads(canonical_bytes(self._source_issuer))
+
     def create_command(self) -> list[str]:
         """Reviewable fixed host command; no agent-provided flags or commands."""
         labels = ([] if self.lifecycle is None else [argument for key, value in self.lifecycle.labels().items()
                    for argument in ("--label", key + "=" + value)])
+        issuer = ([] if self._source_issuer is None else
+                  ['--source-issuer',canonical_bytes(self._source_issuer).decode()])
         return [self.docker_binary, "create", "-i", "--name", self.container_name, *labels,
                 "--pull=never", "--network=none", "--read-only", "--cap-drop=ALL",
                 "--security-opt=no-new-privileges", "--user=65532:65532", "--pids-limit=16",
@@ -239,7 +274,7 @@ class DockerObserver:
                 "--mount=type=bind,src=" + str(self.source_directory) + ",dst=/evidence,readonly",
                 "--entrypoint=/usr/local/bin/python", self.image_id,
                 "-I", "-c", _BOOTSTRAP, "--container-worker",
-                "--observer-id=" + self.observer_id, "--role=" + self.role, "--key-id=" + self.key_id]
+                "--observer-id=" + self.observer_id, "--role=" + self.role, "--key-id=" + self.key_id, *issuer]
 
     @staticmethod
     def _spawn(command: list[str]) -> subprocess.Popen[bytes]:
@@ -450,12 +485,18 @@ def _new_private_key() -> tuple[bytes, str]:
     return private_key, key.public_key().public_bytes_raw().hex()
 
 
-def _container_worker(observer_id: str, role: str, key_id: str) -> int:
+def _container_worker(observer_id: str, role: str, key_id: str,
+                       source_issuer: dict[str,str] | None = None) -> int:
     try:
         validate_id(observer_id, "observer_id")
         validate_id(key_id, "key_id")
         if role not in _ROLES:
             return 2
+        if source_issuer is not None:
+            from .receiver_source import validate_issuer_pin
+            if role!='reality':
+                return 2
+            source_issuer=validate_issuer_pin(source_issuer)
         private_key, public_key = _new_private_key()
         enrollment = {"observer_id": observer_id, "role": role, "key_id": key_id, "public_key": public_key}
         sys.stdout.buffer.write(canonical_bytes(enrollment) + b"\n")
@@ -472,7 +513,7 @@ def _container_worker(observer_id: str, role: str, key_id: str) -> int:
                 if (request["observer_id"] != observer_id or request["role"] != role or request["key_id"] != key_id):
                     raise ControlError("observer identity mismatch")
                 packet = _source_packet(request)
-                verdict, evidence_digest, observed_at = evaluate_source_packet(request, packet)
+                verdict, evidence_digest, observed_at = evaluate_source_packet(request, packet,issuer_pin=source_issuer)
                 from .observer_auth import sign_attestation
                 envelope = sign_attestation(request, private_key=private_key, verdict=verdict,
                     evidence_digest=evidence_digest, observed_at=observed_at, valid_until=request["valid_until"])
@@ -495,5 +536,6 @@ if __name__ == "__main__":
     parser.add_argument("--observer-id", required=True)
     parser.add_argument("--role", required=True, choices=sorted(_ROLES))
     parser.add_argument("--key-id", required=True)
+    parser.add_argument('--source-issuer',type=json.loads,default=None)
     args = parser.parse_args()
-    raise SystemExit(_container_worker(args.observer_id, args.role, args.key_id))
+    raise SystemExit(_container_worker(args.observer_id, args.role, args.key_id,args.source_issuer))

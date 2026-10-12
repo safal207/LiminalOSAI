@@ -357,6 +357,38 @@ class ObserverLifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex(ControlError, "RESTART_FORBIDDEN"):
                 supervisor.start()
 
+    def test_captured_watchdog_bootstrap_imports_owned_dependencies_from_hostile_cwd(self):
+        supervisor = self.supervisor()
+        with ExitStack() as stack:
+            _, watchdog = self.managed_fixture(supervisor, stack)
+            launch = stack.enter_context(patch.object(module.subprocess, "Popen", return_value=watchdog))
+            supervisor.start()
+            command = list(launch.call_args.args[0])
+            environment = dict(launch.call_args.kwargs["env"])
+            supervisor.close()
+
+        hostile = self.path / "hostile-cwd"
+        marker = self.path / "hostile-dependency-imported"
+        for name in ("liminal_agent_control", "adapters", "sdk"):
+            package = hostile / name
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text(
+                "from pathlib import Path\nPath(" + repr(str(marker)) + ").write_text(" + repr(name) + ")\n"
+                "raise RuntimeError('hostile working-directory dependency imported')\n",
+                encoding="utf-8")
+
+        # Execute the exact captured launch, adding only argparse's help exit.
+        # Importing its real runtime dependencies happens before that exit;
+        # missing repository imports cannot be hidden by mocked readiness.
+        completed = subprocess.run([*command, "--help"], cwd=hostile, env=environment,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stderr, "")
+        self.assertIn("--watchdog", completed.stdout)
+        self.assertIn("--registry", completed.stdout)
+        self.assertIn("--ring-id", completed.stdout)
+        self.assertFalse(marker.exists(), "the captured child imported a hostile cwd package")
+
     def test_readiness_failure_prevents_first_create_and_closes_root(self):
         supervisor = self.supervisor()
         with ExitStack() as stack:

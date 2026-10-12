@@ -22,6 +22,37 @@ from .brakes_store import SessionAuthority
 
 
 class Receiver:
+    @classmethod
+    def open_existing(cls, db_path: str | Path, broker_key: bytes, receipt_key: bytes) -> "Receiver":
+        """Bind a governed receiver for read-only source export without initialization.
+
+        This constructs no schema or identity. The source service only exposes
+        its challenge-bound issuer, never this receiver's mutating methods.
+        """
+        path = Path(db_path)
+        if (not path.is_absolute() or str(path) != str(path.resolve(strict=True))
+                or not path.is_file() or any(p.is_symlink() for p in (path, *path.parents))):
+            raise ControlError("RECEIVER_SOURCE_DATABASE_UNSAFE")
+        request_key, observation_key = require_key(broker_key), require_key(receipt_key)
+        if request_key == observation_key:
+            raise ControlError("request and receipt authentication keys must differ")
+        with connect(path, create=False) as db:
+            meta = {row["key"]: row["value"] for row in db.execute("SELECT * FROM receiver_meta")}
+            if meta.get("enforcement_profile") != "governed_v1":
+                raise ControlError("RECEIVER_SOURCE_GOVERNED_RECEIVER_REQUIRED")
+            validate_id(meta.get("receiver_id"), "receiver_id")
+            db.execute("SELECT action_id FROM accepted LIMIT 1")
+            db.execute("SELECT action_id FROM effects LIMIT 1")
+        result = cls.__new__(cls)
+        result.db_path = path
+        result.broker_key, result.receipt_key = request_key, observation_key
+        result.admission_controller = SessionAuthority(path, create=False)
+        result.authority = AuthorityStore.__new__(AuthorityStore)
+        result.authority.db_path = path
+        result.receiver_id = meta["receiver_id"]
+        result.enforce_epoch, result.enforcement_profile = True, "governed_v1"
+        return result
+
     def __init__(self, db_path: str | Path, broker_key: bytes, receipt_key: bytes, *,
                  enforce_epoch: bool = True, admission_controller: SessionAuthority | None = None) -> None:
         self.broker_key = require_key(broker_key)

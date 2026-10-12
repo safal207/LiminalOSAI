@@ -4,6 +4,11 @@ For durable ownership and cleanup after controller hard crashes, use the
 [managed observer lifecycle](AGENT_CONTROL_OBSERVER_LIFECYCLE.md). The low-level
 multi-root experiment on this page remains an unmanaged fixture interface.
 
+For reality exports authenticated directly by the receiver, see
+[receiver-owned source signatures](AGENT_CONTROL_RECEIVER_SOURCE.md). A pinned
+source profile makes that signature mandatory; the collector verification flag
+cannot satisfy the new mode.
+
 The signed ring authenticates observer statements. This experiment adds a
 runtime boundary around each signer and a separate, persisted source-binding
 boundary around its evidence. A trusted host starts three restricted Docker
