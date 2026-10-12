@@ -33,6 +33,11 @@ action budget, expiring authority and STOP gate for governed records and egress.
 The [portfolio review](docs/AGENT_CONTROL_PORTFOLIO_REVIEW.md) explains which
 mechanisms are reusable and which repositories provide diagnostics only.
 
+The [orientation graph](docs/AGENT_CONTROL_ORIENTATION.md) adds distinct
+per-agent observed trajectories, evidence freshness and bounded excursions
+from host-defined checkpoints. Its local timeline viewer separates pending
+transitions from confirmed state; orientation never issues authority.
+
 ## Build
 
 - Dependencies: gcc, make, python3

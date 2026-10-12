@@ -84,6 +84,10 @@ class SessionAuthority:
                     admitted_at REAL NOT NULL, PRIMARY KEY(action_id, stage_id)
                 );
             """)
+            # The persisted root profile is enforced by every reopened authority,
+            # including callers that do not use the OrientationStore facade.
+            from .orientation import initialize_schema
+            initialize_schema(db)
 
     def _now(self) -> float:
         try:
@@ -303,6 +307,12 @@ class SessionAuthority:
         used = db.execute("SELECT COUNT(*) FROM brakes_actions WHERE root_id=?", (action["root_id"],)).fetchone()[0]
         if used >= row["max_actions"]:
             return self._result("BLOCKED", "ACTION_BUDGET_EXHAUSTED", aid)
+        from .orientation import admission_in_transaction
+        reason = admission_in_transaction(
+            db, action, channel=channel, now=row["last_now"],
+            payload_digest=payload_digest, policy_digest=row["policy_digest"])
+        if reason:
+            return self._result("BLOCKED", reason, aid)
         db.execute("INSERT INTO brakes_actions VALUES (?,?,?,?,?,?,?,?,?,'RESERVED',?)",
                    (aid, action["attempt_id"], action["root_id"], action["execution_id"], action["epoch"],
                     channel, digest(action), payload_digest, row["policy_digest"], row["last_now"]))
@@ -333,6 +343,10 @@ class SessionAuthority:
             used = db.execute("SELECT COUNT(*) FROM brakes_stages s JOIN brakes_actions a USING(action_id) WHERE a.root_id=?", (action["root_id"],)).fetchone()[0]
             if used >= row["max_stages"]:
                 return self._result("BLOCKED", "STAGE_BUDGET_EXHAUSTED", action_id)
+            from .orientation import check_pending_in_transaction
+            reason = check_pending_in_transaction(db, action_id, now=row["last_now"])
+            if reason:
+                return self._result("BLOCKED", reason, action_id)
             db.execute("INSERT INTO brakes_stages VALUES (?,?,'RESERVED',?)", (action_id, stage_id, row["last_now"]))
             return self._result("ADMITTED", "STAGE_RESERVED", action_id, stage_id=stage_id)
 
