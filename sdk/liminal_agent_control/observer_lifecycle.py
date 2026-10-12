@@ -278,20 +278,24 @@ class ObserverRingSupervisor:
     """Host-only managed ring; caller still installs immutable auth/source profiles."""
     def __init__(self, authority: SessionAuthority, root_id: str, *, registry_path: str | Path,
                  image_id: str, source_directories: dict[str,str|Path], lifetime_seconds: float = 30,
-                 timeout_seconds: float = 5, docker_binary: str = 'docker') -> None:
+                 timeout_seconds: float = 5, docker_binary: str = 'docker',
+                 source_issuers: dict[str,dict[str,str]] | None = None) -> None:
         validate_id(root_id,'root_id')
         self.timeout_seconds = _positive(timeout_seconds,30)
         self.lifetime_seconds = _positive(lifetime_seconds,86400)
         if type(source_directories) is not dict or set(source_directories) != set(ROLES):
             raise ControlError('OBSERVER_LIFECYCLE_CONFIGURATION_INVALID')
         validate_source_directories(source_directories)
+        source_issuers={} if source_issuers is None else source_issuers
+        if type(source_issuers) is not dict or not set(source_issuers)<= {'reality'}:
+            raise ControlError('RECEIVER_SOURCE_ROLE_MISMATCH')
         self.authority,self.root_id = authority,root_id
         self.registry = ObserverRingRegistry(registry_path)
         if self.registry.path == authority.db_path.resolve():
             raise ControlError('OBSERVER_LIFECYCLE_CONFIGURATION_INVALID')
         self.services = {role:DockerObserver(image_id=image_id,observer_id=role+'-observer',role=role,
             key_id=role+'-key',source_directory=source_directories[role],timeout_seconds=self.timeout_seconds,
-            docker_binary=docker_binary) for role in ROLES}
+            docker_binary=docker_binary,source_issuer=source_issuers.get(role)) for role in ROLES}
         self.docker_binary = self.services[ROLES[0]].docker_binary
         self.image_id = image_id
         self.record = None; self.enrollments = []; self.watchdog = None; self.watchdog_output = None
@@ -350,7 +354,9 @@ class ObserverRingSupervisor:
                     for s in self.services.values()])
             self._monotonic_deadline=time.monotonic()+self.lifetime_seconds
             self.watchdog_output = self.registry.path.with_name(self.registry.path.name+'.'+self.record['ring_id']+'.watchdog.json')
-            command=[sys.executable,'-m','liminal_agent_control.observer_lifecycle','--watchdog','--registry',str(self.registry.path),
+            bootstrap=('import runpy,sys;sys.path.insert(0,'+repr(str(Path(__file__).resolve().parents[1]))+');'
+                       "runpy.run_module('liminal_agent_control.observer_lifecycle',run_name='__main__')")
+            command=[sys.executable,'-B','-I','-c',bootstrap,'--watchdog','--registry',str(self.registry.path),
                 '--root-id',self.root_id,'--ring-id',self.record['ring_id'],'--docker-binary',self.docker_binary,
                 '--output',str(self.watchdog_output),'--timeout',str(self.timeout_seconds)]
             self.watchdog=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
