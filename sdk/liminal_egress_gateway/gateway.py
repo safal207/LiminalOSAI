@@ -9,16 +9,20 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import re
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urljoin, urlparse
 
-from sdk.liminal_capability_broker import CapabilityBroker
+from sdk.liminal_capability_broker import BrokerError, CapabilityBroker
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
 
 RECEIPT_SCHEMA = "liminal-network-execution-receipt-v0.1"
 ZERO_SHA256 = "0" * 64
 ALLOWED_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
+_HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+_TRANSPORT_HEADERS = frozenset({"host", "connection", "proxy-connection", "content-length", "transfer-encoding", "upgrade", "trailer", "te"})
 
 GATEWAY_AUTHORITY = {
     "mode": "http_https_egress_mediation_only",
@@ -147,6 +151,7 @@ class EgressGateway:
         secret_resolver: SecretResolver | None = None,
         max_redirects: int = 3,
         allowed_methods: Sequence[str] = tuple(sorted(ALLOWED_METHODS)),
+        clock: Callable[[], int] = lambda: int(time.time()),
     ) -> None:
         if not isinstance(max_redirects, int) or isinstance(max_redirects, bool) or not 0 <= max_redirects <= 10:
             raise EgressError("max_redirects must be an integer between 0 and 10")
@@ -159,6 +164,7 @@ class EgressGateway:
         self.secret_resolver = secret_resolver
         self.max_redirects = max_redirects
         self.allowed_methods = methods
+        self.clock = clock
         self._receipts: list[NetworkExecutionReceipt] = []
 
     def execute(self, request: GatewayRequest) -> dict[str, Any]:
@@ -167,20 +173,15 @@ class EgressGateway:
         dns_chain: list[dict[str, Any]] = []
         redirects: list[dict[str, Any]] = []
         capability_receipt_sha = ZERO_SHA256
-        original_scheme = urlparse(current_url).scheme
+        original_target = _parse_target(current_url)
 
         for hop in range(self.max_redirects + 1):
             target = _parse_target(current_url)
-            if original_scheme == "https" and target["scheme"] != "https":
+            if original_target["scheme"] == "https" and target["scheme"] != "https":
                 raise EgressBlocked("https redirect downgrade is denied")
-            resolved_ips = _resolve_public(self.resolver, target["host"])
-            dns_entry = {
-                "hop": hop,
-                "host": target["host"],
-                "port": target["port"],
-                "resolved_ips": list(resolved_ips),
-            }
-            dns_chain.append(dns_entry)
+            cross_origin = target != original_target
+            if cross_origin and normalized.secret_refs:
+                raise EgressBlocked("credential-bearing redirects must remain on their authorized origin")
 
             capability = self.broker.authorize(
                 subject_id=normalized.subject_id,
@@ -198,24 +199,35 @@ class EgressGateway:
                     "destination": f"{target['scheme']}://{target['host']}:{target['port']}",
                     "url_sha256": _sha_text(current_url),
                     "body_sha256": normalized.body_sha256,
-                    "dns_sha256": canonical_sha256(dns_entry),
                     "redirect_hop": hop,
                 },
-                at_unix=normalized.at_unix,
+                at_unix=self._now(normalized),
             )
             capability_receipt_sha = capability["receipt_sha256"]
             if capability["decision"] != "ALLOW":
                 raise EgressBlocked("network capability denied: " + ",".join(capability["reason_codes"]))
 
-            transport_headers = dict(normalized.headers)
+            resolved_ips = self._stage(capability, normalized, lambda: _resolve_public(self.resolver, target["host"]))
+            dns_entry = {
+                "hop": hop,
+                "host": target["host"],
+                "port": target["port"],
+                "resolved_ips": list(resolved_ips),
+            }
+            dns_chain.append(dns_entry)
+
+            # Even unlabelled custom headers may carry credentials. Do not
+            # forward any caller header across origins; Host is transport-owned.
+            transport_headers = {} if cross_origin else dict(normalized.headers)
             secret_ids: dict[str, str] = {}
             for header_name, secret_id in normalized.secret_refs.items():
                 if self.secret_resolver is None:
                     raise EgressBlocked("secret reference provided without secret resolver")
                 secret_ids[header_name.lower()] = secret_id
-                transport_headers[header_name] = self.secret_resolver(secret_id)
+                transport_headers[header_name] = self._stage(
+                    capability, normalized, lambda: self.secret_resolver(secret_id))
 
-            response = self.transport(
+            response = self._stage(capability, normalized, lambda: self.transport(
                 TransportRequest(
                     method=normalized.method,
                     url=current_url,
@@ -223,7 +235,7 @@ class EgressGateway:
                     body_sha256=normalized.body_sha256,
                     resolved_ips=resolved_ips,
                 )
-            )
+            ))
             _validate_transport_response(response)
 
             location = _redirect_location(response)
@@ -253,6 +265,20 @@ class EgressGateway:
 
         raise EgressBlocked("unreachable redirect state")
 
+    def _now(self, request: GatewayRequest) -> int:
+        now = self.clock()
+        if not isinstance(now, int) or isinstance(now, bool) or now < 0:
+            raise EgressError("trusted clock must return non-negative Unix seconds")
+        # The request timestamp is evidence metadata, never authority over time.
+        return now
+
+    def _stage(self, capability: Mapping[str, Any], request: GatewayRequest, callback: Callable[[], Any]) -> Any:
+        try:
+            with self.broker.live_use(capability, at_unix=lambda: self._now(request)):
+                return callback()
+        except BrokerError as exc:
+            raise EgressBlocked(str(exc)) from exc
+
     def receipts(self) -> tuple[dict[str, Any], ...]:
         return tuple(item.as_document() for item in self._receipts)
 
@@ -271,15 +297,19 @@ class EgressGateway:
             raise EgressError("at_unix must be a non-negative integer")
         headers: dict[str, str] = {}
         for key, value in request.headers.items():
-            if not isinstance(key, str) or not key.strip() or not isinstance(value, str):
+            if not isinstance(key, str) or not _HEADER_NAME.fullmatch(key) or not isinstance(value, str):
                 raise EgressError("headers must contain string names and values")
+            if key.lower() in _TRANSPORT_HEADERS or any(c in value for c in "\r\n\x00"):
+                raise EgressBlocked("routing/framing headers and control characters are transport-owned")
             if key.lower() in {name.lower() for name in request.secret_refs}:
                 raise EgressBlocked("secret header must not be supplied in model-visible headers")
             headers[key] = value
         secret_refs: dict[str, str] = {}
         for header_name, secret_id in request.secret_refs.items():
-            if not isinstance(header_name, str) or not header_name.strip() or not isinstance(secret_id, str) or not secret_id.strip():
+            if not isinstance(header_name, str) or not _HEADER_NAME.fullmatch(header_name) or not isinstance(secret_id, str) or not secret_id.strip():
                 raise EgressError("secret_refs must map header names to non-empty secret IDs")
+            if header_name.lower() in _TRANSPORT_HEADERS:
+                raise EgressBlocked("secret references cannot override transport routing or framing")
             secret_refs[header_name] = secret_id
         return GatewayRequest(
             call_id=request.call_id,
@@ -347,21 +377,36 @@ class EgressGateway:
 def _parse_target(url: str) -> dict[str, Any]:
     if not isinstance(url, str) or not url.strip() or url != url.strip():
         raise EgressError("url must be a non-empty trimmed string")
+    if any(ord(c) <= 32 or ord(c) == 127 for c in url) or "\\" in url:
+        raise EgressBlocked("URL contains whitespace, control characters or backslash")
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()
     if scheme not in {"http", "https"}:
         raise EgressBlocked("only http and https are supported")
     if parsed.username is not None or parsed.password is not None:
         raise EgressBlocked("userinfo in URL is denied")
-    host = parsed.hostname.lower() if parsed.hostname else ""
+    try:
+        host = (parsed.hostname or "").encode("idna").decode("ascii").lower().rstrip(".")
+    except UnicodeError as exc:
+        raise EgressBlocked("invalid DNS hostname") from exc
     if not host or "." not in host:
         raise EgressBlocked("destination must be an explicit DNS hostname")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        raise EgressBlocked("IP-literal destinations are denied")
+    if len(host) > 253 or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in host.split(".")):
+        raise EgressBlocked("invalid DNS hostname")
     if parsed.fragment:
         raise EgressBlocked("URL fragments are not accepted at the gateway boundary")
     try:
-        port = parsed.port or (443 if scheme == "https" else 80)
+        port = parsed.port if parsed.port is not None else (443 if scheme == "https" else 80)
     except ValueError as exc:
         raise EgressBlocked("invalid destination port") from exc
+    if not 1 <= port <= 65535:
+        raise EgressBlocked("invalid destination port")
     return {"scheme": scheme, "host": host, "port": port}
 
 
@@ -376,7 +421,10 @@ def _resolve_public(resolver: Resolver, host: str) -> tuple[str, ...]:
         except ValueError as exc:
             raise EgressBlocked("DNS resolver returned an invalid IP address") from exc
         if (
-            address.is_private
+            # Shared address space (100.64.0.0/10), including mapped IPv6,
+            # is neither private nor reserved but is not globally reachable.
+            not address.is_global
+            or address.is_private
             or address.is_loopback
             or address.is_link_local
             or address.is_multicast

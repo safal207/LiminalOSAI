@@ -72,13 +72,14 @@ class GatewayTests(unittest.TestCase):
             broker.admit((cap or capability()).as_document(), at_unix=105)
         return broker
 
-    def gateway(self, *, broker=None, resolver=None, transport=None, secret_resolver=None, max_redirects=3):
+    def gateway(self, *, broker=None, resolver=None, transport=None, secret_resolver=None, max_redirects=3, clock=None):
         return EgressGateway(
             broker=broker or self.broker(),
             resolver=resolver or (lambda host: ["93.184.216.34"]),
             transport=transport or FakeTransport([TransportResponse(200, {"content-type": "application/json"}, RESP)]),
             secret_resolver=secret_resolver,
             max_redirects=max_redirects,
+            clock=clock or (lambda: 120),
         )
 
     def test_default_deny_without_capability(self):
@@ -218,7 +219,7 @@ class GatewayTests(unittest.TestCase):
 
     def test_expired_capability_blocks(self):
         with self.assertRaises(EgressBlocked):
-            self.gateway().execute(request(at_unix=200))
+            self.gateway(clock=lambda: 200).execute(request(at_unix=200))
 
     def test_policy_mismatch_blocks(self):
         with self.assertRaises(EgressBlocked):

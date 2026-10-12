@@ -61,6 +61,9 @@ PYTHON_TESTS := \
 	tests/test_chatgpt_portable_action_receipt.py \
 	tests/test_post_sandbox_phase0_contracts.py \
 	tests/test_capability_broker_phase1.py \
+	tests/test_egress_gateway_phase2.py \
+	tests/test_egress_admission_order.py \
+	tests/test_pinned_http_transport.py \
 	tests/test_trace_visualizer.py \
 	tests/test_pulse_kernel_cli.py \
 	tests/test_trcp_simulator.py \
