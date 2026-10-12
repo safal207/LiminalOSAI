@@ -354,7 +354,11 @@ class ObserverRingSupervisor:
                     for s in self.services.values()])
             self._monotonic_deadline=time.monotonic()+self.lifetime_seconds
             self.watchdog_output = self.registry.path.with_name(self.registry.path.name+'.'+self.record['ring_id']+'.watchdog.json')
-            bootstrap=('import runpy,sys;sys.path.insert(0,'+repr(str(Path(__file__).resolve().parents[1]))+');'
+            # The watchdog also imports the owned adapters and sdk packages.
+            # Isolated Python must receive both fixed roots, never inherited cwd.
+            module_path=Path(__file__).resolve()
+            bootstrap=('import runpy,sys;sys.path[:0]='+repr([
+                str(module_path.parents[2]),str(module_path.parents[1])])+';'
                        "runpy.run_module('liminal_agent_control.observer_lifecycle',run_name='__main__')")
             command=[sys.executable,'-B','-I','-c',bootstrap,'--watchdog','--registry',str(self.registry.path),
                 '--root-id',self.root_id,'--ring-id',self.record['ring_id'],'--docker-binary',self.docker_binary,
