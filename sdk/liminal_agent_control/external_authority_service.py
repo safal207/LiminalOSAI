@@ -320,13 +320,32 @@ def main() -> int:
         parser.add_argument("--" + field, type=Path, required=True)
     parser.add_argument("--initialize", action="store_true")
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--profile", choices=("records", "owned-loopback-network-v1"), default="records")
+    parser.add_argument("--endpoint-pin-file", type=Path)
     args = parser.parse_args()
     try:
         if args.initialize and args.db.exists():
             raise ControlError("EXTERNAL_AUTHORITY_INITIALIZATION_REQUIRES_NEW_STATE")
-        store = ExternalAuthorityStore(args.db, authority_id=args.authority_id, key_id=args.key_id,
+        options = dict(authority_id=args.authority_id, key_id=args.key_id,
             private_key=_private_key_file(args.signing_key_file, length=32),
             receipt_key=_private_key_file(args.receipt_key_file), create=args.initialize)
+        if args.profile == "records":
+            if args.endpoint_pin_file is not None:
+                raise ControlError("EXTERNAL_AUTHORITY_PROFILE_CONFIGURATION_INVALID")
+            store = ExternalAuthorityStore(args.db, **options)
+        else:
+            from .external_network_authority import ExternalNetworkAuthorityStore
+            if args.endpoint_pin_file is None:
+                raise ControlError("EXTERNAL_AUTHORITY_ENDPOINT_PIN_REQUIRED")
+            with args.endpoint_pin_file.open("rb") as stream:
+                pin_wire = stream.read(4097)
+            if len(pin_wire) > 4096:
+                raise ControlError("EXTERNAL_AUTHORITY_ENDPOINT_PIN_INVALID")
+            try:
+                endpoint_pin = json.loads(pin_wire)
+            except (ValueError, UnicodeError) as exc:
+                raise ControlError("EXTERNAL_AUTHORITY_ENDPOINT_PIN_INVALID") from exc
+            store = ExternalNetworkAuthorityStore(args.db, endpoint_pin=endpoint_pin, **options)
         server = make_server(store, _private_key_file(args.operator_key_file), _private_key_file(args.receiver_key_file), port=args.port)
         print(json.dumps({"url": "http://127.0.0.1:" + str(server.server_address[1]), "pin": store.pin()}), flush=True)
         try:

@@ -90,6 +90,7 @@ class ExternalAuthorityStore:
         self.db_path = path
         self._config = {"schema": SCHEMA, "pin": canonical_bytes(self._pin).decode(),
                         "receipt_key_digest": digest({"key": receipt_key.hex()})}
+        self._config.update(self._profile_configuration())
         if not path.exists():
             if not create:
                 raise ControlError("EXTERNAL_AUTHORITY_STATE_MISSING")
@@ -136,6 +137,42 @@ class ExternalAuthorityStore:
     def pin(self) -> dict[str, str]:
         return dict(self._pin)
 
+    def _profile_configuration(self) -> dict[str, str]:
+        """Persist subclass trust configuration without changing records metadata."""
+        return {}
+
+    def _validate_action(self, action: Any) -> dict[str, Any]:
+        return validate_action(action)
+
+    def _verify_terminal_receipt(self, receipt: Any) -> dict[str, Any]:
+        if (not isinstance(receipt, dict) or set(receipt) != _RECEIPT_FIELDS
+                or not verify_receipt(receipt, self._receipt_key)):
+            raise ControlError("EXTERNAL_AUTHORITY_RECEIPT_INVALID")
+        return json.loads(canonical_bytes(receipt))
+
+    def _bind_terminal_receipt(self, receipt: dict[str, Any], row: sqlite3.Row,
+                               root: sqlite3.Row, action: dict[str, Any]) -> str:
+        status = receipt["status"]
+        if (status not in ("COMMITTED", "DENIED") or receipt["schema"] != "liminal.agent-control.receipt.v1"
+                or receipt["receiver_id"] != root["receiver_id"] or receipt["enforcement_profile"] != EXTERNAL_PROFILE
+                or receipt["key_id"] != "receiver-hmac-v1" or receipt["action_digest"] != row["action_digest"]
+                or any(type(receipt[field]) is not type(action[field]) or receipt[field] != action[field]
+                       for field in ("action_id", "attempt_id", "root_id", "execution_id", "epoch"))
+                or type(receipt["effect_count"]) is not int or receipt["effect_count"] != (1 if status == "COMMITTED" else 0)):
+            raise ControlError("EXTERNAL_AUTHORITY_RECEIPT_BINDING_MISMATCH")
+        validate_id(receipt["reason"], "receipt reason")
+        _time(receipt["observed_at"])
+        if status == "COMMITTED":
+            if type(receipt["accepted_epoch"]) is not int or receipt["accepted_epoch"] != action["epoch"]:
+                raise ControlError("EXTERNAL_AUTHORITY_RECEIPT_BINDING_MISMATCH")
+            _time(receipt["accepted_at"])
+        elif receipt["accepted_epoch"] is not None or receipt["accepted_at"] is not None:
+            raise ControlError("EXTERNAL_AUTHORITY_RECEIPT_BINDING_MISMATCH")
+        return status
+
+    def _terminal_reason_prefix(self) -> str:
+        return "AUTHENTICATED_RECEIVER_"
+
     def _connection(self) -> sqlite3.Connection:
         db = None
         try:
@@ -157,6 +194,12 @@ class ExternalAuthorityStore:
             if not _TABLES <= tables:
                 raise ControlError("EXTERNAL_AUTHORITY_SCHEMA_INVALID")
             meta = {r["key"]: r["value"] for r in db.execute("SELECT * FROM external_meta")}
+            # Profile metadata is part of the identity. A network-profile file
+            # must not reopen as the records store, including on old snapshots.
+            if set(meta) != set(self._config) | {"last_now", "clock_fault"}:
+                raise ControlError("EXTERNAL_AUTHORITY_PROFILE_MISMATCH")
+            if any(self._config.get(k) != v for k, v in self._profile_configuration().items()):
+                raise ControlError("EXTERNAL_AUTHORITY_PROFILE_MISMATCH")
             if any(meta.get(k) != v for k, v in self._config.items()):
                 raise ControlError("EXTERNAL_AUTHORITY_PIN_MISMATCH")
             _time(float(meta["last_now"]))
@@ -291,7 +334,7 @@ class ExternalAuthorityStore:
                 "receipt": json.loads(row["receipt_json"]) if row["receipt_json"] is not None else None}
 
     def begin(self, action: dict[str, Any], authorization: dict[str, Any]) -> dict[str, Any]:
-        action = validate_action(action)
+        action = self._validate_action(action)
         if not isinstance(authorization, dict) or set(authorization) != _AUTHORIZATION_FIELDS:
             raise ControlError("EXTERNAL_AUTHORITY_GRANT_INVALID")
         authorization = json.loads(canonical_bytes(authorization))
@@ -344,10 +387,7 @@ class ExternalAuthorityStore:
 
     def finish(self, reservation_id: str, receipt: dict[str, Any]) -> dict[str, Any]:
         validate_id(reservation_id, "reservation_id")
-        if (not isinstance(receipt, dict) or set(receipt) != _RECEIPT_FIELDS
-                or not verify_receipt(receipt, self._receipt_key)):
-            raise ControlError("EXTERNAL_AUTHORITY_RECEIPT_INVALID")
-        receipt = json.loads(canonical_bytes(receipt))
+        receipt = self._verify_terminal_receipt(receipt)
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM external_actions WHERE reservation_id=?", (reservation_id,)).fetchone()
@@ -355,22 +395,7 @@ class ExternalAuthorityStore:
                 raise ControlError("EXTERNAL_AUTHORITY_RESERVATION_UNKNOWN")
             root = self._root(db, row["root_id"])
             action = json.loads(row["action_json"])
-            status = receipt["status"]
-            if (status not in ("COMMITTED", "DENIED") or receipt["schema"] != "liminal.agent-control.receipt.v1"
-                    or receipt["receiver_id"] != root["receiver_id"] or receipt["enforcement_profile"] != EXTERNAL_PROFILE
-                    or receipt["key_id"] != "receiver-hmac-v1" or receipt["action_digest"] != row["action_digest"]
-                    or any(type(receipt[field]) is not type(action[field]) or receipt[field] != action[field]
-                           for field in ("action_id", "attempt_id", "root_id", "execution_id", "epoch"))
-                    or type(receipt["effect_count"]) is not int or receipt["effect_count"] != (1 if status == "COMMITTED" else 0)):
-                raise ControlError("EXTERNAL_AUTHORITY_RECEIPT_BINDING_MISMATCH")
-            validate_id(receipt["reason"], "receipt reason")
-            _time(receipt["observed_at"])
-            if status == "COMMITTED":
-                if type(receipt["accepted_epoch"]) is not int or receipt["accepted_epoch"] != action["epoch"]:
-                    raise ControlError("EXTERNAL_AUTHORITY_RECEIPT_BINDING_MISMATCH")
-                _time(receipt["accepted_at"])
-            elif receipt["accepted_epoch"] is not None or receipt["accepted_at"] is not None:
-                raise ControlError("EXTERNAL_AUTHORITY_RECEIPT_BINDING_MISMATCH")
+            status = self._bind_terminal_receipt(receipt, row, root, action)
             receipt_hash = digest(receipt)
             if row["status"] != "PENDING":
                 if row["receipt_digest"] != receipt_hash:
@@ -379,7 +404,7 @@ class ExternalAuthorityStore:
             now = self._now(db)
             root = self._close_expired(db, root, now)
             db.execute("UPDATE external_actions SET status=?,reason=?,receipt_json=?,receipt_digest=? WHERE reservation_id=?",
-                       (status, "AUTHENTICATED_RECEIVER_" + status, canonical_bytes(receipt).decode(), receipt_hash, reservation_id))
+                       (status, self._terminal_reason_prefix() + status, canonical_bytes(receipt).decode(), receipt_hash, reservation_id))
             if root["state"] == "STOPPING" and self._state(db, row["root_id"])["pending_count"] == 0:
                 db.execute("UPDATE external_roots SET state='STOPPED' WHERE root_id=?", (row["root_id"],))
             self._checkpoint(db, row["root_id"], "FINISH_" + status, now,
