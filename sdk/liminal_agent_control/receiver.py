@@ -158,6 +158,13 @@ class Receiver:
         db.execute("UPDATE accepted SET status='COMMITTED',receipt_json=? WHERE action_id=?", (canonical_bytes(receipt).decode(), action_id))
         if self.admission_controller is not None:
             self.admission_controller.finish_action_in_transaction(db, action_id, outcome="COMMITTED")
+            # Observation advances only with this receiver's actual committed
+            # effect, in the same transaction; an exception rolls everything back.
+            from .orientation import confirm_record_in_transaction
+            if db.execute("SELECT 1 FROM orientation_profiles WHERE root_id=?", (action["root_id"],)).fetchone():
+                confirm_record_in_transaction(
+                    db, action_id, receiver_id=self.receiver_id,
+                    receipt_digest=digest(receipt), now=self.admission_controller._now())
         return receipt
 
     def finalize(self, action_id: str) -> dict[str, Any]:
