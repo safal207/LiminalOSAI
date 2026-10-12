@@ -193,6 +193,12 @@ def _inspect_service(service, image_id: str, directories: dict, pin: dict) -> di
     command = document["Config"]["Cmd"]
     bind_mounts = [item for item in document.get("Mounts", []) if item["Type"] == "bind"]
     return {"container_id": service.container_id, "image_id": document["Image"],
+        # Public command/enrollment and mounts let a separate artifact verifier
+        # check the pin and mount contract without trusting derived booleans.
+        "command": command, "mounts": document.get("Mounts", []),
+        "network_mode": document["HostConfig"]["NetworkMode"],
+        "readonly_rootfs": document["HostConfig"]["ReadonlyRootfs"],
+        "user": document["Config"]["User"],
         "pinned_image_matches": document["Image"] == image_id,
         "receiver_public_pin_in_fixed_command": pin["public_key"] in " ".join(command)
             and pin["receiver_id"] in " ".join(command),
@@ -303,6 +309,7 @@ def run_demo(image_id: str) -> dict:
                 result = _result(env, action, before=before)
                 outcomes[case_name] = {**result, "receiver_pin": pin,
                     "issuer_child_pid": issuer_pid, "controller_pid": os.getpid(),
+                    "observer_enrollments": [dict(item) for item in ring.enrollments],
                     "container": inspection, "witness": witness, "other_witnesses": other_witnesses,
                     "previous_real_record": previous, "source_failure": source_failure,
                     "freshness_check": freshness,

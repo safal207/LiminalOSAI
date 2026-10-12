@@ -1,9 +1,10 @@
 """Real fixed Python issuer processes expose signed owned receiver reads only."""
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import json
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -78,6 +79,12 @@ class ReceiverSourceServiceTests(unittest.TestCase):
     def raw(self, process, value):
         return json.loads(process._line(canonical_bytes(value) + b"\n"))
 
+    def logical_database_snapshot(self):
+        """Read the full schema and every table in one readonly transaction."""
+        with closing(sqlite3.connect(self.db_path.as_uri() + "?mode=ro", uri=True)) as db:
+            db.execute("BEGIN")
+            return tuple(db.iterdump())
+
     @contextmanager
     def cwd(self, directory):
         previous = Path.cwd()
@@ -107,7 +114,7 @@ class ReceiverSourceServiceTests(unittest.TestCase):
 
     def test_actual_committed_record_is_read_and_no_new_effect_is_created(self):
         action, receipt = self.record()
-        before = self.db_path.read_bytes()
+        before = self.logical_database_snapshot()
         process = self.process()
         process.start()
         statement = process.issue(self.request())
@@ -115,7 +122,28 @@ class ReceiverSourceServiceTests(unittest.TestCase):
             [{"action": action, "arguments": action["arguments"], "receipt": receipt}])
         self.assertEqual(statement["export"]["receiver_snapshot"]["receipts"], [receipt])
         self.assertEqual(len(self.receiver.records()), 1)
-        self.assertEqual(self.db_path.read_bytes(), before)
+        # SQLite may checkpoint WAL pages while opening/closing a reader. The
+        # invariant is unchanged schema and all rows, including authority data.
+        self.assertEqual(self.logical_database_snapshot(), before)
+
+    def test_logical_snapshot_survives_a_real_wal_checkpoint(self):
+        # Keep a connection open so an actual owned commit remains in the WAL.
+        # A checkpoint then deterministically changes main-file bytes while
+        # preserving the complete logical snapshot used by the source test.
+        with closing(sqlite3.connect(self.db_path, isolation_level=None)) as db:
+            db.execute("PRAGMA wal_autocheckpoint=0")
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self.record()
+            process = self.process()
+            process.start()
+            process.issue(self.request())
+            before = self.logical_database_snapshot()
+            main_file_before = self.db_path.read_bytes()
+            self.assertIsNone(process.process.poll())
+            self.assertEqual(db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone(), (0, 0, 0))
+            self.assertNotEqual(self.db_path.read_bytes(), main_file_before)
+            self.assertEqual(self.logical_database_snapshot(), before)
+            self.assertEqual(len(self.receiver.records()), 1)
 
     def test_enrollment_copies_cannot_replace_the_process_pin(self):
         process = self.process()

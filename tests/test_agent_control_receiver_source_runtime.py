@@ -2,11 +2,17 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import unittest
 
 from sdk.liminal_agent_control.receiver_source_demo import NEGATIVE_CASES, run_demo
+
+
+def _canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
 @unittest.skipUnless(os.environ.get("LIMINAL_OBSERVER_DOCKER_IMAGE"),
@@ -25,6 +31,32 @@ class ReceiverSourceDockerTests(unittest.TestCase):
         self.assertEqual(set(report["outcomes"]), {"positive", *NEGATIVE_CASES})
         self.assertEqual(report["outcomes"]["positive"]["record_count"], 1)
         self.assertEqual(report["outcomes"]["positive"]["candidate_effect_count"], 1)
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        for name, case in report["outcomes"].items():
+            with self.subTest(signature_case=name):
+                enrollment = {item["observer_id"]: item for item in case["observer_enrollments"]}
+                self.assertEqual(set(enrollment), {role + "-observer" for role in ("reality", "continuity", "projection")})
+                self.assertEqual(len({item["public_key"] for item in enrollment.values()}), 3)
+                for witness in [case["witness"], *case["other_witnesses"]]:
+                    envelope = witness["envelope"]
+                    self.assertIsNotNone(envelope)
+                    request = witness["request"]
+                    self.assertEqual(_canonical(envelope["request"]), _canonical(request))
+                    self.assertEqual(envelope["evidence_digest"], hashlib.sha256(_canonical(witness["packet"])).hexdigest())
+                    key = enrollment[request["observer_id"]]
+                    self.assertEqual(key["key_id"], request["key_id"])
+                    self.assertEqual(key["role"], request["role"])
+                    Ed25519PublicKey.from_public_bytes(bytes.fromhex(key["public_key"])).verify(
+                        bytes.fromhex(envelope["signature"]), b"liminal-observer-attestation-v1\x00"
+                        + _canonical({field: value for field, value in envelope.items() if field != "signature"}))
+                command = case["container"]["command"]
+                self.assertEqual(command.count("--source-issuer"), 1)
+                self.assertEqual(json.loads(command[command.index("--source-issuer") + 1]), case["receiver_pin"])
+                self.assertEqual(case["container"]["network_mode"], "none")
+                mounts = [item for item in case["container"]["mounts"] if item["Type"] == "bind"]
+                self.assertEqual({item["Destination"] for item in mounts}, {"/sdk", "/evidence"})
+                self.assertEqual(len(mounts), 2)
+                self.assertTrue(all(item["RW"] is False for item in mounts))
         for name in NEGATIVE_CASES:
             with self.subTest(case=name):
                 case = report["outcomes"][name]

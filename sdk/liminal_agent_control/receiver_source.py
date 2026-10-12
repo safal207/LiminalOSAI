@@ -204,10 +204,6 @@ class ReceiverSourceIssuer:
         request = _request(request)
         if request["role"] != "reality":
             raise ControlError("RECEIVER_SOURCE_ROLE_MISMATCH")
-        issued = _time(self.__clock())
-        expiry = min(request["valid_until"], issued + self.__max_age)
-        if not request["issued_at"] <= issued < expiry:
-            raise ControlError("RECEIVER_SOURCE_STALE")
         receiver = self.__receiver
         try:
             with connect(receiver.db_path, create=False) as db:
@@ -216,6 +212,14 @@ class ReceiverSourceIssuer:
                 root = db.execute("SELECT * FROM roots WHERE root_id=?", (request["root_id"],)).fetchone()
                 execution = db.execute("SELECT * FROM executions WHERE execution_id=?", (request["execution_id"],)).fetchone()
                 session = db.execute("SELECT * FROM brakes_sessions WHERE root_id=?", (request["root_id"],)).fetchone()
+                # Establish the read view before sampling its capture time. A
+                # watchdog may advance last_now while we open the connection;
+                # comparing that new watermark with a pre-snapshot timestamp
+                # would falsely reject an otherwise fresh receiver statement.
+                issued = _time(self.__clock())
+                expiry = min(request["valid_until"], issued + self.__max_age)
+                if not request["issued_at"] <= issued < expiry:
+                    raise ControlError("RECEIVER_SOURCE_STALE")
                 if (meta.get("receiver_id") != self.__pin["receiver_id"]
                         or meta.get("enforcement_profile") != "governed_v1"
                         or root is None or root["revoked"] or root["epoch"] != request["epoch"]

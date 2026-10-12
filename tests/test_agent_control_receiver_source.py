@@ -140,6 +140,23 @@ class ReceiverSourceTests(unittest.TestCase):
         self.assertEqual(export["receiver_snapshot"]["cutoff"], 1)
         self.assertEqual(self.statement()["export"]["receiver_snapshot"]["cutoff"], 2)
 
+    def test_watchdog_watermark_advance_before_first_read_does_not_false_expire_export(self):
+        issuer = self.new_issuer(max_age_seconds=3)
+
+        def advance_before_read(*args, **kwargs):
+            # A real authority refresh models the managed watchdog running
+            # after issue starts, before SQLite establishes its read view.
+            self.now = 100.25
+            self.assertEqual(self.authority.status("root")["state"], "ACTIVE")
+            return connect(*args, **kwargs)
+
+        with patch("sdk.liminal_agent_control.receiver_source.connect", side_effect=advance_before_read):
+            statement = issuer.issue(request())
+        self.assertEqual(statement["issued_at"], 100.25)
+        self.assertEqual(statement["expires_at"], 103.25)
+        verify_source_statement(request(), statement, issuer.enrollment(), now=100.25, max_age_seconds=3)
+        self.assertEqual(statement["export"]["receiver_snapshot"]["cutoff"], 0)
+
     def test_no_arbitrary_export_or_signing_api(self):
         with self.assertRaises(TypeError):
             self.issuer.issue(request(), {"receiver_records": []})
