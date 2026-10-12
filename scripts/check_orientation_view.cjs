@@ -36,8 +36,12 @@ const {chromium} = require(process.env.ORIENTATION_PLAYWRIGHT_MODULE);
       }).map(el => ({tag: el.tagName, id: el.id, className: String(el.className)}))
     }));
     assert.ok(overflow.width <= overflow.viewport, JSON.stringify(overflow));
+    const graphLabelPixels = await page.locator('#graph text').evaluateAll(labels =>
+      labels.map(el => parseFloat(getComputedStyle(el).fontSize) * el.getScreenCTM().a));
+    assert.ok(graphLabelPixels.length > 0 && Math.min(...graphLabelPixels) >= 10,
+      'Mobile graph labels must remain readable: ' + JSON.stringify(graphLabelPixels));
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({status: 'PASS', chromium: browser.version(), page_errors: errors,
-      desktop: [1250,1000], mobile: [390,844], interactions: ['pending','claim_does_not_move','STOP']}));
+      desktop: [1250,1000], mobile: [390,844], minimum_graph_label_pixels: Math.min(...graphLabelPixels), interactions: ['pending','claim_does_not_move','STOP']}));
   } finally {await browser.close();}
 })().catch(error => {console.error(error); process.exitCode = 1;});
