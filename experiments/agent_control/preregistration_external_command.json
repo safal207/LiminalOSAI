@@ -1,0 +1,32 @@
+{
+  "experiment_id": "liminal-external-command-runtime-v1",
+  "profile": "owned-docker-command-v1",
+  "scenario_ids": [
+    "command_positive",
+    "command_binding_swap",
+    "command_stop_before_create",
+    "command_stop_between_create_start",
+    "command_pending_launch_stop",
+    "command_lost_launch_response",
+    "command_restore_local_state",
+    "command_descendant_cleanup",
+    "command_observation_unavailable",
+    "command_authority_restart_outage"
+  ],
+  "model_calls_budget": 0,
+  "max_actions_per_root": 2,
+  "live_internet": false,
+  "required_backend": "real Linux Docker daemon and explicit locally available immutable image ID",
+  "fixture_path": "experiments/agent_control/external_command_fixture.py",
+  "fixture_sha256": "3127babde5158f2838b4e7859621651fc8deab2e2c74208c7aae10c79c79dd81",
+  "trusted_roles": ["external_authority", "owned_workload_supervisor", "fixture_operator"],
+  "untrusted_role": "proposal_dispatcher",
+  "rollback_target": "dispatcher proposal-cache SQLite only",
+  "supervisor_registry_rollback": "NOT_SUPPORTED",
+  "authority_database_rollback": "NOT_SUPPORTED",
+  "settlement_requires": ["positive create confirmation", "all owned launch callbacks complete", "exact owned workload fresh quiescence", "independently signed lifecycle receipt"],
+  "failure_policy": "Missing launch, daemon, inspection or terminal evidence preserves UNKNOWN and STOP_PENDING; no retries of consumed stages.",
+  "local_missing_backend": "NOT_RUN; Docker-gated runtime unittest skips explicitly",
+  "ci_missing_backend": "hard failure; runtime unittest required with zero skips",
+  "non_claims": ["arbitrary shell", "arbitrary effect rollback", "supervisor state rollback safety", "dispatcher host-process OS isolation", "compromised Docker daemon or host", "kernel escape resistance", "model training", "live LLM behavior"]
+}

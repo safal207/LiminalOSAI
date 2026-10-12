@@ -144,6 +144,16 @@ class ExternalAuthorityStore:
     def _validate_action(self, action: Any) -> dict[str, Any]:
         return validate_action(action)
 
+    def _additional_begin_reason(self, db: sqlite3.Connection, root: sqlite3.Row,
+                                 action: dict[str, Any], authorization: dict[str, Any]) -> str | None:
+        """Profile admission extension, evaluated inside the BEGIN writer lock."""
+        return None
+
+    def _additional_finish_check(self, db: sqlite3.Connection, receipt: dict[str, Any],
+                                 row: sqlite3.Row, root: sqlite3.Row, action: dict[str, Any]) -> None:
+        """Profile lifecycle extension, checked inside the FINISH writer lock."""
+        return None
+
     def _verify_terminal_receipt(self, receipt: Any) -> dict[str, Any]:
         if (not isinstance(receipt, dict) or set(receipt) != _RECEIPT_FIELDS
                 or not verify_receipt(receipt, self._receipt_key)):
@@ -373,6 +383,8 @@ class ExternalAuthorityStore:
                 reason = "EXTERNAL_AUTHORITY_LINEAGE_MISMATCH"
             elif root["issued_count"] >= root["max_actions"]:
                 reason = "EXTERNAL_AUTHORITY_BUDGET_EXHAUSTED"
+            if reason is None:
+                reason = self._additional_begin_reason(db, root, action, authorization)
             status = "DENIED" if reason else "PENDING"
             reservation_id = "reservation:" + secrets.token_hex(24)
             db.execute("INSERT INTO external_actions VALUES (?,?,?,?,?,?,?,?,?,?,NULL,NULL)",
@@ -396,6 +408,7 @@ class ExternalAuthorityStore:
             root = self._root(db, row["root_id"])
             action = json.loads(row["action_json"])
             status = self._bind_terminal_receipt(receipt, row, root, action)
+            self._additional_finish_check(db, receipt, row, root, action)
             receipt_hash = digest(receipt)
             if row["status"] != "PENDING":
                 if row["receipt_digest"] != receipt_hash:

@@ -44,6 +44,11 @@ real loopback HTTP boundary with independently signed endpoint commit receipts.
 Lost responses remain uncertain, reconciliation does not redispatch, and
 external STOP stays pending until the owned endpoint result is confirmed.
 
+The [owned command STOP profile](docs/AGENT_CONTROL_EXTERNAL_COMMAND.md) adds
+a separately admitted Docker create/start lifecycle. Its trusted supervisor
+requires finished callbacks and verified owned process quiescence before
+settling external reservations.
+
 The [orientation graph](docs/AGENT_CONTROL_ORIENTATION.md) adds distinct
 per-agent observed trajectories, evidence freshness and bounded excursions
 from host-defined checkpoints. Its local timeline viewer separates pending

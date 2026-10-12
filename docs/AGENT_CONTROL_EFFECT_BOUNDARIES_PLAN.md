@@ -1,8 +1,10 @@
 # External STOP at command and network boundaries
 
-This is an implementation plan for two bounded follow-on experiments. It is
-not evidence that these extensions are implemented, deployed, or effective
-against an adaptive model. The current reference is the records-only
+This plan defines two bounded follow-on experiments. The
+[owned network profile](AGENT_CONTROL_EXTERNAL_NETWORK.md) and
+[owned Docker command profile](AGENT_CONTROL_EXTERNAL_COMMAND.md) document their
+implemented contracts and required evidence. This plan alone does not establish
+deployment or effectiveness against an adaptive model. The starting reference is the records-only
 [draft PR #212](https://github.com/safal207/LiminalOSAI/pull/212), documented in
 [External STOP](AGENT_CONTROL_EXTERNAL_STOP.md).
 
@@ -117,6 +119,12 @@ profile-specific settlement are necessary before connecting lifecycle cleanup.
 | `command_descendant_cleanup` | Fixture creates an owned descendant and ignores graceful stop. | Forced recovery targets only the matching ownership; zero-survivor claim requires fresh process/container observations. |
 | `command_observation_unavailable` | Trusted inspection or recovery is unavailable. | UNKNOWN and STOP_PENDING; no quiescence claim from elapsed timeout. |
 | `command_authority_restart_outage` | Restart the original authority, then remove its route. | Durable consumption/STOP survive restart; outage permits no new launch. |
+
+The first implemented command slice narrows `command_restore_local_state` to
+the worker dispatcher's proposal cache. The trusted supervisor and registry
+remain outside that rollback domain. Their rollback is unsupported; this
+experiment does not establish recovery from erased callback/ownership history.
+See the command profile for the actual boundary and evidence requirements.
 
 Do not claim arbitrary shell support, exactly-once arbitrary effects,
 unrestricted host process control, kernel isolation or cancellation of Python
