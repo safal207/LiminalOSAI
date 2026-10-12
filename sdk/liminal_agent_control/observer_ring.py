@@ -44,6 +44,8 @@ def initialize_schema(db: Any) -> None:
             reason TEXT NOT NULL, observed_at REAL NOT NULL)""",
     ):
         db.execute(statement)
+    from .observer_auth import initialize_schema as initialize_auth
+    initialize_auth(db)
 
 
 def _profile(value: Any) -> dict[str, Any]:
@@ -164,6 +166,11 @@ def _assessment(db: Any, action_id: str, *, now: float, root_id: str | None = No
         result["reason"] = _projection_reason(db, projection, row)
     if result["reason"]:
         return result
+    from .observer_auth import profile_reason_in_transaction, attestation_reason_in_transaction
+    auth_reason = profile_reason_in_transaction(db, root_id, ring_row=row, ring_profile=profile)
+    if auth_reason:
+        result["reason"] = auth_reason
+        return result
     lineage_reason = _lineage_reason(db, projection["execution_id"], row, session)
     if lineage_reason:
         result["reason"] = lineage_reason
@@ -171,8 +178,18 @@ def _assessment(db: Any, action_id: str, *, now: float, root_id: str | None = No
     identities = {item["observer_id"]: item["role"] for item in profile["observers"]}
     reasons, supported = set(), set()
     for stored in db.execute("SELECT * FROM observer_ring_attestations WHERE action_id=? ORDER BY rowid", (action_id,)):
-        attestation = json.loads(stored["attestation_json"])
-        observer = attestation["observer_id"]
+        try:
+            attestation = json.loads(stored["attestation_json"])
+            observer = attestation["observer_id"]
+            if not isinstance(attestation, dict):
+                raise ValueError("invalid attestation")
+        except (TypeError, ValueError, KeyError):
+            reasons.add("OBSERVER_RING_BINDING_MISMATCH")
+            continue
+        auth_reason = attestation_reason_in_transaction(db, stored, attestation)
+        if auth_reason:
+            result["reason"] = auth_reason
+            return result
         if (digest(attestation) != stored["attestation_digest"] or observer not in identities
                 or attestation["role"] != identities[observer] or observer == projection["execution_id"]
                 or attestation["ring_profile_digest"] != row["profile_digest"]
@@ -216,6 +233,69 @@ def check_in_transaction(db: Any, action_id: str, *, now: float, root_id: str | 
     return _assessment(db, action_id, now=_time(now), root_id=root_id)["reason"]
 
 
+def _attest_in_transaction(db: Any, action_id: str, *, observer_id: str, verdict: str,
+                           evidence_digest: str, observed_at: float, valid_until: float,
+                           session: Any) -> dict[str, Any]:
+    """Append under the caller's write lock; signed ingestion adds its proof atomically."""
+    if not db.in_transaction:
+        raise ControlError("observer attestation requires transaction")
+    validate_id(action_id, "action_id")
+    validate_id(observer_id, "observer_id")
+    if verdict not in {"SUPPORT", "UNKNOWN", "VETO"}:
+        raise ControlError("invalid observer verdict")
+    _hash(evidence_digest)
+    observed_at, valid_until = _time(observed_at), _time(valid_until)
+    projection = _projection(db, action_id)
+    if projection is None:
+        raise ControlError("OBSERVER_RING_PROJECTION_REQUIRED")
+    row, profile = _load(db, projection["root_id"])
+    if profile is None:
+        raise ControlError("OBSERVER_RING_PROFILE_REQUIRED")
+    reason = _projection_reason(db, projection, row)
+    if reason:
+        raise ControlError(reason)
+    observer = next((item for item in profile["observers"] if item["observer_id"] == observer_id), None)
+    if observer is None:
+        raise ControlError("OBSERVER_RING_UNKNOWN_OBSERVER")
+    if observer_id == projection["execution_id"]:
+        raise ControlError("OBSERVER_RING_SELF_ENDORSEMENT")
+    body = {key: projection[key] for key in _BINDINGS}
+    body.update(observer_id=observer_id, role=observer["role"], verdict=verdict,
+                evidence_digest=evidence_digest, observed_at=observed_at, valid_until=valid_until,
+                ring_profile_digest=row["profile_digest"])
+    slot = "VETO" if verdict == "VETO" else "ASSESSMENT"
+    old = db.execute("SELECT * FROM observer_ring_attestations WHERE action_id=? AND observer_id=? AND slot=?",
+                     (action_id, observer_id, slot)).fetchone()
+    if old:
+        if old["attestation_digest"] != digest(body):
+            raise ControlError("OBSERVER_RING_ATTESTATION_IMMUTABLE")
+        return {**body, "attestation_digest": old["attestation_digest"], "execution_authorized": False}
+    if slot != "VETO" and db.execute("SELECT 1 FROM observer_ring_attestations WHERE action_id=? AND observer_id=? AND slot='VETO'",
+                                     (action_id, observer_id)).fetchone():
+        raise ControlError("OBSERVER_RING_VETO_LATCHED")
+    now = session["last_now"]
+    projection_body = json.loads(projection["projection_json"])
+    if (observed_at < projection["created_at"] or observed_at > now
+            or now - observed_at > profile["max_attestation_age_seconds"]
+            or valid_until <= now or valid_until <= observed_at
+            or valid_until > observed_at + profile["max_attestation_age_seconds"]
+            or (verdict != "VETO" and valid_until > projection_body["deadline"])):
+        raise ControlError("OBSERVER_RING_ATTESTATION_STALE")
+    count = db.execute("SELECT COUNT(*) FROM observer_ring_attestations WHERE root_id=?", (projection["root_id"],)).fetchone()[0]
+    if count >= profile["max_attestations"]:
+        # A full history must not silently drop a later safety signal.
+        db.execute("INSERT OR IGNORE INTO observer_ring_holds VALUES (?, 'OBSERVER_RING_ATTESTATION_LIMIT', ?)",
+                   (projection["root_id"], now))
+        db.commit()
+        raise ControlError("OBSERVER_RING_ATTESTATION_LIMIT")
+    db.execute("INSERT INTO observer_ring_attestations VALUES (?,?,?,?,?,?,?)", (digest(body), action_id,
+               projection["root_id"], observer_id, slot, canonical_bytes(body).decode(), now))
+    if verdict == "VETO":
+        db.execute("INSERT OR IGNORE INTO observer_ring_execution_holds VALUES (?,?,?,?, 'OBSERVER_RING_VETO', ?)",
+                   (projection["execution_id"], projection["root_id"], action_id, projection["projection_digest"], now))
+    return {**body, "attestation_digest": digest(body), "execution_authorized": False}
+
+
 class ObserverRingStore:
     def __init__(self, authority: SessionAuthority) -> None:
         self.authority, self.db_path = authority, authority.db_path
@@ -252,63 +332,17 @@ class ObserverRingStore:
     def attest(self, action_id: str, *, observer_id: str, verdict: str, evidence_digest: str,
                observed_at: float, valid_until: float) -> dict[str, Any]:
         validate_id(action_id, "action_id")
-        validate_id(observer_id, "observer_id")
-        if verdict not in {"SUPPORT", "UNKNOWN", "VETO"}:
-            raise ControlError("invalid observer verdict")
-        _hash(evidence_digest)
-        observed_at, valid_until = _time(observed_at), _time(valid_until)
         with connect(self.db_path) as db:
             db.execute("BEGIN IMMEDIATE")
             projection = _projection(db, action_id)
             if projection is None:
                 raise ControlError("OBSERVER_RING_PROJECTION_REQUIRED")
             session = self._active(db, projection["root_id"])
-            row, profile = _load(db, projection["root_id"])
-            if profile is None:
-                raise ControlError("OBSERVER_RING_PROFILE_REQUIRED")
-            reason = _projection_reason(db, projection, row)
-            if reason:
-                raise ControlError(reason)
-            observer = next((item for item in profile["observers"] if item["observer_id"] == observer_id), None)
-            if observer is None:
-                raise ControlError("OBSERVER_RING_UNKNOWN_OBSERVER")
-            if observer_id == projection["execution_id"]:
-                raise ControlError("OBSERVER_RING_SELF_ENDORSEMENT")
-            body = {key: projection[key] for key in _BINDINGS}
-            body.update(observer_id=observer_id, role=observer["role"], verdict=verdict,
-                        evidence_digest=evidence_digest, observed_at=observed_at, valid_until=valid_until,
-                        ring_profile_digest=row["profile_digest"])
-            slot = "VETO" if verdict == "VETO" else "ASSESSMENT"
-            old = db.execute("SELECT * FROM observer_ring_attestations WHERE action_id=? AND observer_id=? AND slot=?",
-                             (action_id, observer_id, slot)).fetchone()
-            if old:
-                if old["attestation_digest"] != digest(body):
-                    raise ControlError("OBSERVER_RING_ATTESTATION_IMMUTABLE")
-                return {**body, "attestation_digest": old["attestation_digest"], "execution_authorized": False}
-            if slot != "VETO" and db.execute("SELECT 1 FROM observer_ring_attestations WHERE action_id=? AND observer_id=? AND slot='VETO'",
-                                             (action_id, observer_id)).fetchone():
-                raise ControlError("OBSERVER_RING_VETO_LATCHED")
-            now = session["last_now"]
-            projection_body = json.loads(projection["projection_json"])
-            if (observed_at < projection["created_at"] or observed_at > now
-                    or now - observed_at > profile["max_attestation_age_seconds"]
-                    or valid_until <= now or valid_until <= observed_at
-                    or valid_until > observed_at + profile["max_attestation_age_seconds"]
-                    or (verdict != "VETO" and valid_until > projection_body["deadline"])):
-                raise ControlError("OBSERVER_RING_ATTESTATION_STALE")
-            count = db.execute("SELECT COUNT(*) FROM observer_ring_attestations WHERE root_id=?", (projection["root_id"],)).fetchone()[0]
-            if count >= profile["max_attestations"]:
-                # A full history must not silently drop a later safety signal.
-                db.execute("INSERT OR IGNORE INTO observer_ring_holds VALUES (?, 'OBSERVER_RING_ATTESTATION_LIMIT', ?)",
-                           (projection["root_id"], now))
-                db.commit()
-                raise ControlError("OBSERVER_RING_ATTESTATION_LIMIT")
-            db.execute("INSERT INTO observer_ring_attestations VALUES (?,?,?,?,?,?,?)", (digest(body), action_id,
-                       projection["root_id"], observer_id, slot, canonical_bytes(body).decode(), now))
-            if verdict == "VETO":
-                db.execute("INSERT OR IGNORE INTO observer_ring_execution_holds VALUES (?,?,?,?, 'OBSERVER_RING_VETO', ?)",
-                           (projection["execution_id"], projection["root_id"], action_id, projection["projection_digest"], now))
-            return {**body, "attestation_digest": digest(body), "execution_authorized": False}
+            from .observer_auth import auth_required_in_transaction
+            if auth_required_in_transaction(db, projection["root_id"]):
+                raise ControlError("OBSERVER_RING_AUTH_REQUIRED")
+            return _attest_in_transaction(db, action_id, observer_id=observer_id, verdict=verdict,
+                evidence_digest=evidence_digest, observed_at=observed_at, valid_until=valid_until, session=session)
 
     def snapshot(self, root_id: str) -> dict[str, Any]:
         with connect(self.db_path) as db:
