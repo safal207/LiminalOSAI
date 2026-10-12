@@ -13,6 +13,8 @@ on:
       - 'scripts/run_agent_control_docker.py'
       - 'scripts/reproduce_agent_control.py'
       - 'scripts/verify_external_stop_evidence.py'
+      - 'scripts/reproduce_reinforcement_contract.py'
+      - 'scripts/verify_reinforcement_bundle.py'
       - 'scripts/check_orientation_view.cjs'
       - 'scripts/check_center_view.cjs'
       - 'experiments/agent_control/**'
@@ -25,6 +27,55 @@ permissions:
   contents: read
 
 jobs:
+  reinforcement:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install pinned evidence signing dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/reinforcement-venv"
+          "$RUNNER_TEMP/reinforcement-venv/bin/python" -m pip --isolated install -r experiments/agent_control/observer-requirements.txt
+          echo "$RUNNER_TEMP/reinforcement-venv/bin" >> "$GITHUB_PATH"
+      - name: Contract and independent adversarial regressions
+        run: >-
+          python3 -m unittest
+          tests/test_agent_control_reinforcement.py
+          tests/test_agent_control_reinforcement_adversarial.py
+          tests/test_agent_control_reinforcement_bundle.py -v
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: safal207/ContractGraph-QA
+          ref: 38755bb5f056ea6f9a1c5a2b0c52401fb1d70021
+          path: artifacts/contractgraph-oracle
+          persist-credentials: false
+      - name: Real external STOP evidence and scripted response preferences
+        run: >-
+          python3 scripts/reproduce_reinforcement_contract.py
+          --bundle "$RUNNER_TEMP/agent-control-reinforcement/bundle"
+          --expected-source-sha "$EXPECTED_SOURCE_SHA"
+          --contractgraph-root artifacts/contractgraph-oracle
+      - name: Verify byte inventory, evidence, source and assessment replay
+        run: >-
+          python3 scripts/verify_reinforcement_bundle.py
+          "$RUNNER_TEMP/agent-control-reinforcement/bundle"
+          --expected-source-sha "$EXPECTED_SOURCE_SHA"
+          --contractgraph-root artifacts/contractgraph-oracle
+          > "$RUNNER_TEMP/agent-control-reinforcement/verification.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-reinforcement-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-reinforcement/
+          if-no-files-found: error
+
   external-stop:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
