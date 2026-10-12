@@ -72,6 +72,9 @@ PYTHON_TESTS := \
 	tests/test_agent_control_observer_ring.py \
 	tests/test_agent_control_center_gate.py \
 	tests/test_agent_control_center_demo.py \
+	tests/test_agent_control_observer_auth.py \
+	tests/test_agent_control_observer_process.py \
+	tests/test_agent_control_observer_auth_gate.py \
 	tests/test_agent_control_brakes_store.py \
 	tests/test_agent_control_brakes_receiver.py \
 	tests/test_agent_control_brakes_egress.py \

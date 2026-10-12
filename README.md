@@ -43,6 +43,13 @@ add immutable time windows, hash-linked history, separate ideas and projections,
 and required observer roles. Missing or contradictory evidence holds continuation;
 observer agreement never overrides action authority.
 
+The [signed observer boundary](docs/AGENT_CONTROL_SIGNED_OBSERVERS.md) pins
+distinct Ed25519 public keys, binds replies to one-time challenges and rejects
+unsigned endorsements once installed. Its local example runs separate observer
+processes; process separation does not establish independent evidence sources.
+This optional profile requires the pinned dependencies in
+`experiments/agent_control/observer-requirements.txt`.
+
 ## Build
 
 - Dependencies: gcc, make, python3
