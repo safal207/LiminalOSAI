@@ -6,7 +6,51 @@ virtual environment and check the owned synthetic fixtures. Record the exact
 launcher checkout with `git rev-parse HEAD`; its revision is separate from the
 experiment sources below.
 
-## One command
+## First external run: no Docker or model key
+
+Start with the local profile on Linux x86_64 with glibc 2.17 or later, CPython
+**3.11 or 3.12** with `venv`, and Git. It needs direct public access to GitHub
+and PyPI. Docker and model-provider keys are not required.
+
+Use two distinct, nonexistent directories. These commands fetch the published
+launcher revision rather than a moving branch:
+
+```bash
+git init /tmp/liminal-review-launcher-001
+git -C /tmp/liminal-review-launcher-001 fetch --depth=1 \
+  https://github.com/safal207/LiminalOSAI.git \
+  b0d6af8ce6a2858a094e9c7639bcea5fd68eb61c
+git -C /tmp/liminal-review-launcher-001 checkout --detach FETCH_HEAD
+git -C /tmp/liminal-review-launcher-001 rev-parse HEAD
+cd /tmp/liminal-review-launcher-001
+python3 scripts/reproduce_agent_control.py \
+  --destination /tmp/liminal-review-local-001 --profile local
+```
+
+Confirm that `rev-parse HEAD` reports
+`b0d6af8ce6a2858a094e9c7639bcea5fd68eb61c`. The launcher then fetches its separately
+locked experiment sources and creates a fresh virtual environment. Choose new
+directory names for another attempt; the evidence destination's parent must
+already exist and its ancestors must not be symlinks.
+If a setup command fails or the SHA differs, stop and report that failure.
+
+The local profile checks the egress and claim/evidence regressions, the 33
+deterministic A/B/C cases and their CML scores. Docker remains **NOT_RUN**;
+a local PASS does not establish container isolation or a successful full run.
+Its child environment does not inherit ambient proxy settings, provider keys
+or Git credential helpers. Direct public network access is required even if
+your normal shell uses a proxy.
+
+Your first contribution can be a comment in
+[reproduction issue #201](https://github.com/safal207/LiminalOSAI/issues/201);
+no fork or PR is needed. Include the launcher SHA, profile, Python/OS/glibc/
+architecture, the status from `public/summary.json`, a summary of stages in
+`public/checks.json`, and any error or discrepancy. Share only `public/` evidence.
+A failed or unavailable run is useful when reported honestly; do not turn an
+unrun stage into PASS. The [report template](AGENT_CONTROL_REPRODUCTION.md) is
+available for a more detailed review.
+
+## Full Docker profile
 
 Requirements: Linux x86_64, glibc 2.17 or later, CPython **3.11 or 3.12** with
 `venv`, Git, and an authorized working local Docker daemon. The destination must
@@ -30,15 +74,8 @@ configuration. It makes no model-provider calls and requires no API credits.
 This also means an ambient proxy or signed-in private registry cannot silently
 substitute for public access.
 
-Without Docker, select the narrower profile explicitly and use another new
-destination:
-
-```bash
-python3 scripts/reproduce_agent_control.py \
-  --destination /tmp/liminal-clean-local-001 --profile local
-```
-
-`local` records Docker as **NOT_RUN**. A missing daemon or image in `all` fails
+The first-run `local` profile above records Docker as **NOT_RUN**.
+A missing daemon or image in `all` fails
 the required Docker stage with a nonzero status; it cannot become a full pass.
 Exit `0` means the selected profile met its frozen expectations. Exit `2` means
 a required check failed or was unavailable. Inspect `public/checks.json` and
@@ -119,13 +156,16 @@ partial reproduction is a useful completed contribution.
 
 ## По-русски
 
-Из корня checkout с новым скриптом выполните первую команду выше на Linux
-x86_64 с CPython 3.11/3.12, Git и работающим Docker. Каталог назначения должен
-быть новым; следующий запуск требует другого каталога. Скрипт сам получает
+Для первого внешнего запуска используйте команды из первого раздела: они
+получают конкретную опубликованную ревизию скрипта и выполняют `--profile local`
+на Linux x86_64 с glibc 2.17+, CPython 3.11/3.12 с `venv` и Git. Docker и ключи
+моделей не нужны. Каталоги checkout и результатов должны быть разными и новыми;
+следующий запуск требует других имён. Скрипт сам получает
 закреплённые версии трёх репозиториев, проверяет их commit/tree и устанавливает
 зависимости по хешам. Ключи моделей и платные вызовы не нужны. Нужен прямой
-доступ к публичным GitHub, PyPI и реестру образов: настройки прокси и учётные
-данные из вашего окружения не передаются дочерним процессам.
+доступ к публичным GitHub и PyPI; для загрузки образа в полном профиле — также
+к реестру образов. Настройки прокси и учётные данные из вашего окружения
+не передаются дочерним процессам.
 
 Если Docker недоступен, явно выберите `--profile local`: контейнерные проверки
 останутся **NOT_RUN**. В полном профиле недоступный Docker означает ошибку,
@@ -145,3 +185,5 @@ UNKNOWN/ERROR и противоречие между выполненной за
 ключами. Запишите ревизию скрипта отдельно от закреплённых версий эксперимента
 и добавьте результат, включая ошибки и пропуски, в
 [задачу #201](https://github.com/safal207/LiminalOSAI/issues/201).
+Для первого вклада достаточно комментария с SHA, профилем, версией Python,
+ОС/glibc/архитектурой и итогом `summary.json`/`checks.json`; fork и PR не нужны.

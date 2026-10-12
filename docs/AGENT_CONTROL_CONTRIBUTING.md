@@ -3,9 +3,18 @@
 ## Start with one useful contribution
 
 The [public roadmap](https://github.com/safal207/LiminalOSAI/issues/195) links the
-implementation and review tasks. Comment on a task with the small slice you
-want to take, work in a fork, and link a focused draft PR. Questions, failing
-tests, fixes and honest negative reproduction reports are useful contributions.
+implementation and review tasks. For a first contribution, follow the
+[first external run](AGENT_CONTROL_CLEAN_RUN.md#first-external-run-no-docker-or-model-key)
+on Linux with Python and Git; it needs no Docker or model key. Comment in
+[reproduction #201](https://github.com/safal207/LiminalOSAI/issues/201) with the
+launcher SHA, `local` profile, environment, `summary.json` result and a summary
+of `checks.json`. Share only `public/` evidence. Errors and unavailable stages
+are useful findings; the local profile leaves Docker **NOT_RUN**. No fork or
+PR is needed for this report.
+
+For a code contribution, comment on a task with the small slice you want to
+take, work in a fork, and link a focused draft PR. Questions, failing tests,
+fixes and honest negative reproduction reports are useful contributions.
 English and Russian are welcome. Repository write access is not required.
 
 For a complete frozen fixture run, use the
@@ -58,10 +67,19 @@ data, credentials or receipt keys in evidence bundles.
 Агент предлагает действие; отдельный управляющий процесс проверяет разрешение;
 получатель независимо фиксирует результат.
 
-1. Откройте [дорожную карту](https://github.com/safal207/LiminalOSAI/issues/195).
-2. Выберите небольшую часть задачи и напишите об этом в комментарии.
-3. Добавьте тест, исправление, объяснение или отчёт в своём fork.
-4. Создайте PR со ссылкой на задачу и укажите, что действительно проверено.
+Начните с [локального запуска](AGENT_CONTROL_CLEAN_RUN.md#first-external-run-no-docker-or-model-key):
+нужны Linux, Python и Git, без Docker и ключей моделей. Добавьте комментарий в
+[задачу #201](https://github.com/safal207/LiminalOSAI/issues/201) с SHA скрипта,
+профилем `local`, окружением и итогом `summary.json`/`checks.json`. Публикуйте
+только `public/`. Ошибка или недоступная проверка тоже полезны; Docker в этом
+профиле остаётся **NOT_RUN**. Для такого вклада fork и PR не нужны.
+
+Если хотите изменить код:
+
+1. Выберите небольшую задачу в [дорожной карте](https://github.com/safal207/LiminalOSAI/issues/195)
+   и напишите об этом в комментарии.
+2. Добавьте тест, исправление или объяснение в своём fork.
+3. Создайте PR со ссылкой на задачу и укажите, что действительно проверено.
 
 Для первого вклада достаточно одного понятного теста или улучшения инструкции.
 Не нужно собирать весь набор проектов. Проверки с заглушками не требуют ключей
