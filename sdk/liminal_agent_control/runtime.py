@@ -31,7 +31,7 @@ from .supervisor_registry import RegistryError, SupervisorRegistry, ownership_la
 FIXTURES = frozenset({
     "honest", "forged_success", "stale_authority", "delegated_after_revoke",
     "argument_mutation", "delayed_post_ack", "descendant_timeout", "malformed",
-    "output_flood", "crash",
+    "output_flood", "crash", "omitted_effect_claim",
 })
 POST_REVOKE = frozenset({"stale_authority", "delegated_after_revoke", "delayed_post_ack"})
 MAX_LINE_BYTES = 24576
@@ -1020,14 +1020,19 @@ def _run_matched_arm(arm: str, *, image: str, broker_db_path: str | Path, receiv
 
 
 def run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int = 10, action: dict | None = None,
-                docker_binary: str = "docker", registry_path: str | Path | None = None) -> dict:
+                docker_binary: str = "docker", registry_path: str | Path | None = None,
+                fault_scenario: str | None = None) -> dict:
+    if fault_scenario is not None:
+        from .runtime_faults import validate_fault_scenario
+        validate_fault_scenario(fault_scenario, fixture)
     return _managed_runtime(broker, registry_path, {"mode": "docker", "fixture": fixture},
                             lambda registry: _run_fixture(fixture, broker=broker, image=image,
-                                timeout_seconds=timeout_seconds, action=action, docker_binary=docker_binary, registry=registry))
+                                timeout_seconds=timeout_seconds, action=action, docker_binary=docker_binary,
+                                registry=registry, fault_scenario=fault_scenario))
 
 
 def _run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int, action: dict | None,
-                 docker_binary: str, registry: SupervisorRegistry) -> dict:
+                 docker_binary: str, registry: SupervisorRegistry, fault_scenario: str | None = None) -> dict:
     """Run a known harmless fixture under actual Docker; never simulate Docker PASS.
 
     With ``action=None``, trusted host setup creates/binds/authorizes one action.
@@ -1066,7 +1071,12 @@ def _run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int,
         broker.authorize(action)
     action = validate_action(action)
     report["action_id"], report["root_id"] = action["action_id"], action["root_id"]
-    bridge = WorkerBridge(broker, action)
+    fault = None
+    if fault_scenario is not None:
+        from .runtime_faults import FaultExperiment
+        fault = FaultExperiment(fault_scenario, broker, action, timeout_seconds=timeout_seconds)
+        broker = fault.broker
+    bridge = fault.make_bridge() if fault is not None else WorkerBridge(broker, action)
     process = None
     registered = False
     with tempfile.TemporaryDirectory(prefix="liminal-control-worker-") as workspace:
@@ -1091,6 +1101,8 @@ def _run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int,
         record = _register_durable(registry, controller, plan, session_id, broker, action["root_id"])
         bridge.observer_required = True
         bridge.observer = lambda: controller.inspect_session(session_id)
+        if fault is not None:
+            fault.bind_runtime(bridge, controller, supervisor, session_id)
         registered = True
         report["registered_before_start"] = True
         try:
@@ -1128,8 +1140,18 @@ def _run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int,
             except Exception:
                 pass  # Unconfirmed creation stays durable and blocks admission.
             if registered:
-                report["containment"] = contain_workload(supervisor, controller, session_id=session_id,
-                                                       broker=broker, root_id=action["root_id"])
+                if fault is not None and fault.stop_evidence is not None:
+                    # Retain the barrier's original ACK/times. A later cleanup
+                    # must not rewrite which stop preceded finalization.
+                    report["containment"] = fault.stop_evidence
+                    if not fault.stop_evidence["verified"]:
+                        report["cleanup_containment"] = contain_workload(supervisor, controller,
+                            session_id=session_id, broker=broker, root_id=action["root_id"])
+                else:
+                    report["containment"] = contain_workload(supervisor, controller, session_id=session_id,
+                                                           broker=broker, root_id=action["root_id"])
+            if fault is not None:
+                fault.finish_calls(bridge)
             if process is not None:
                 for stream in (process.stdin, process.stdout, process.stderr):
                     stream.close()
@@ -1144,6 +1166,7 @@ def _run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int,
                 "calls": [call.observation() for call in bridge.dispatch_calls],
                 "outcome_unresolved": bridge.dispatch_unresolved,
                 "automatic_retry": False,
+                "collection_complete": all(not call.thread.is_alive() for call in bridge.dispatch_calls),
                 "boundary": "deadline bounds supervisor wait; host threads are not killed; receiver reconciliation required",
             }
             report["effect_outcome"] = "UNKNOWN" if bridge.dispatch_unresolved else "RECEIVER_SCORING_REQUIRED"
@@ -1163,4 +1186,6 @@ def _run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int,
             if not report["containment"]["verified"]:
                 report["status"] = "UNKNOWN" if bridge.dispatch_unresolved else "ERROR"
                 report["reason"] = "CONTAINMENT_PARTIAL_FAILURE"
+            if fault is not None:
+                report["fault"] = fault.collect_report(bridge, report)
     return report

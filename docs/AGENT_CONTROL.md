@@ -9,6 +9,7 @@ has been solved.
 [Public roadmap and contributor tasks](https://github.com/safal207/LiminalOSAI/issues/195)
 · [Contributor guide / Участие](AGENT_CONTROL_CONTRIBUTING.md)
 · [Clean reproduction / Запуск с нуля](AGENT_CONTROL_CLEAN_RUN.md)
+· [Docker fault experiment / Отказы в Docker](AGENT_CONTROL_DOCKER_FAULTS.md)
 · [Independent reproduction template](AGENT_CONTROL_REPRODUCTION.md)
 
 ## What the boundary controls

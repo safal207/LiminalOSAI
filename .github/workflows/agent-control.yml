@@ -103,8 +103,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/agent-control-docker" "$RUNNER_TEMP/agent-control-keys"
-          docker pull python:3.12-slim
-          IMAGE_ID=$(docker image inspect --format '{{.Id}}' python:3.12-slim)
+          WORKER_IMAGE=python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+          docker pull --platform linux/amd64 "$WORKER_IMAGE"
+          IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$WORKER_IMAGE")
           echo "LIMINAL_AGENT_CONTROL_DOCKER_IMAGE=$IMAGE_ID" >> "$GITHUB_ENV"
           docker image inspect "$IMAGE_ID" > "$RUNNER_TEMP/agent-control-docker/image.json"
           docker version > "$RUNNER_TEMP/agent-control-docker/docker-version.txt"
@@ -112,7 +113,7 @@ jobs:
       - name: Real container lifecycle, descendants and negative cases
         env:
           LIMINAL_AGENT_CONTROL_RECOVERY_EVIDENCE: ${{ runner.temp }}/agent-control-docker/supervisor-recovery.json
-        run: python3 -m unittest discover -s tests -p test_agent_control_runtime.py -v
+        run: python3 -m unittest tests/test_agent_control_runtime.py tests/test_agent_control_fault_runtime.py -v
       - name: Separate receiver process and worker container
         run: |
           python3 scripts/run_agent_control_docker.py \
@@ -146,6 +147,51 @@ jobs:
             --receipt-key-file "$RUNNER_TEMP/agent-control-keys/matched.key"
           python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert len(r["cases"]) == 3 and {c["configuration"] for c in r["cases"]} == {"A", "B", "C"} and all(c["status"] == "PASS" for c in r["cases"]), r["checker_failures"]' "$BUNDLE/report.json"
           cp "$RUNNER_TEMP/matched-result.json" "$RUNNER_TEMP/agent-control-docker/matched-result.json"
+      - name: Registered Docker fault experiment with independent receiver evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m liminal_agent_control.evaluation run --mode docker-faults \
+            --image "$LIMINAL_AGENT_CONTROL_DOCKER_IMAGE" \
+            --output-root "$RUNNER_TEMP/agent-control-docker/fault-runs" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/faults.key" \
+            > "$RUNNER_TEMP/faults-result.json"
+          BUNDLE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$RUNNER_TEMP/faults-result.json")
+          python3 -m liminal_agent_control.evaluation verify "$BUNDLE" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/faults.key"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert len(r["cases"]) == 6 and all(c["status"] == "PASS" for c in r["cases"]) and r["required_execution_completed"], r["checker_failures"]' "$BUNDLE/report.json"
+          cp "$RUNNER_TEMP/faults-result.json" "$RUNNER_TEMP/agent-control-docker/faults-result.json"
+      - name: Score real Docker faults with the pinned CML component
+        shell: bash
+        run: |
+          set -euo pipefail
+          CML_SOURCE="$RUNNER_TEMP/cml-faults-source"
+          git init "$CML_SOURCE"
+          git -C "$CML_SOURCE" fetch --depth=1 https://github.com/safal207/Causal-Memory-Layer.git 4046bfae936abde5d9566fded6eaaa8a302561f3
+          git -C "$CML_SOURCE" checkout --detach FETCH_HEAD
+          test "$(git -C "$CML_SOURCE" rev-parse HEAD^{tree})" = bff5aafd2e9930c00540f34e24c2316249439664
+          python3 -m venv "$RUNNER_TEMP/cml-faults-venv"
+          "$RUNNER_TEMP/cml-faults-venv/bin/python" -m pip --isolated install \
+            --index-url https://pypi.org/simple --only-binary=:all: --require-hashes \
+            -r experiments/agent_control/reproduction-requirements.txt
+          PYTHONPATH="$CML_SOURCE" "$RUNNER_TEMP/cml-faults-venv/bin/python" - "$RUNNER_TEMP" <<'PY'
+          from collections import Counter
+          import json, sys
+          from pathlib import Path
+          from cml.integrations.agent_boundary import score_evaluation_export
+          root = Path(sys.argv[1])
+          controller = json.loads((root / 'faults-result.json').read_text())
+          report = json.loads((Path(controller['bundle']) / 'report.json').read_text())
+          expectations = json.loads(Path(controller['expectations_file']).read_text())
+          key = (root / 'agent-control-keys/faults.key').read_bytes()
+          score = score_evaluation_export(report, expectations,
+              trusted_keys={'receiver-hmac-v1': key}, expected_receiver_id=None,
+              now=controller['collected_at'], max_age_seconds=30)
+          (root / 'agent-control-docker/cml-faults-score.json').write_text(json.dumps(score, indent=2) + '\n')
+          counts = dict(Counter(case['verdict'] for case in score['cases']))
+          print('CML Docker fault verdicts:', counts)
+          assert counts == {'PASS': 3, 'UNKNOWN': 2, 'FAIL': 1}, counts
+          PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

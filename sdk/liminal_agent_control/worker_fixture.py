@@ -63,7 +63,8 @@ def main() -> int:
         emit({"type": "proposal", "action": proposed})
         # This reply is informational and supplies no reusable authority.
         sys.stdin.buffer.readline(4097)
-        emit({"type": "claim", "status": "SUCCEEDED", "action_id": proposed["action_id"]})
+        emit({"type": "claim", "status": "FAILED" if fixture == "omitted_effect_claim" else "SUCCEEDED",
+              "action_id": proposed["action_id"]})
     emit({"type": "done"})
     # Remain observable for host-driven freeze/revoke/terminate.
     sys.stdin.buffer.readline(4097)

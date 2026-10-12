@@ -13,6 +13,11 @@ For a complete frozen fixture run, use the
 It fetches the required source revisions and keeps private verification inputs
 separate from publishable evidence.
 
+The separate [Docker fault experiment](AGENT_CONTROL_DOCKER_FAULTS.md) covers
+accepted-before-revoke completion, lost responses, partial transport outages
+and contradictory worker claims. Review its raw UNKNOWN/ERROR states alongside
+the fixture checks.
+
 | Your interest | Starting point |
 |---|---|
 | Python / offline testing | [DNS admission regression #196](https://github.com/safal207/LiminalOSAI/issues/196) |
