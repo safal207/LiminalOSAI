@@ -320,8 +320,9 @@ def main() -> int:
         parser.add_argument("--" + field, type=Path, required=True)
     parser.add_argument("--initialize", action="store_true")
     parser.add_argument("--port", type=int, default=0)
-    parser.add_argument("--profile", choices=("records", "owned-loopback-network-v1"), default="records")
+    parser.add_argument("--profile", choices=("records", "owned-loopback-network-v1", "owned-docker-command-v1"), default="records")
     parser.add_argument("--endpoint-pin-file", type=Path)
+    parser.add_argument("--supervisor-pin-file", type=Path)
     args = parser.parse_args()
     try:
         if args.initialize and args.db.exists():
@@ -330,11 +331,13 @@ def main() -> int:
             private_key=_private_key_file(args.signing_key_file, length=32),
             receipt_key=_private_key_file(args.receipt_key_file), create=args.initialize)
         if args.profile == "records":
-            if args.endpoint_pin_file is not None:
+            if args.endpoint_pin_file is not None or args.supervisor_pin_file is not None:
                 raise ControlError("EXTERNAL_AUTHORITY_PROFILE_CONFIGURATION_INVALID")
             store = ExternalAuthorityStore(args.db, **options)
-        else:
+        elif args.profile == "owned-loopback-network-v1":
             from .external_network_authority import ExternalNetworkAuthorityStore
+            if args.supervisor_pin_file is not None:
+                raise ControlError("EXTERNAL_AUTHORITY_PROFILE_CONFIGURATION_INVALID")
             if args.endpoint_pin_file is None:
                 raise ControlError("EXTERNAL_AUTHORITY_ENDPOINT_PIN_REQUIRED")
             with args.endpoint_pin_file.open("rb") as stream:
@@ -346,6 +349,21 @@ def main() -> int:
             except (ValueError, UnicodeError) as exc:
                 raise ControlError("EXTERNAL_AUTHORITY_ENDPOINT_PIN_INVALID") from exc
             store = ExternalNetworkAuthorityStore(args.db, endpoint_pin=endpoint_pin, **options)
+        else:
+            from .external_command_authority import ExternalCommandAuthorityStore
+            if args.endpoint_pin_file is not None:
+                raise ControlError("EXTERNAL_AUTHORITY_PROFILE_CONFIGURATION_INVALID")
+            if args.supervisor_pin_file is None:
+                raise ControlError("EXTERNAL_AUTHORITY_SUPERVISOR_PIN_REQUIRED")
+            with args.supervisor_pin_file.open("rb") as stream:
+                pin_wire = stream.read(4097)
+            if len(pin_wire) > 4096:
+                raise ControlError("EXTERNAL_AUTHORITY_SUPERVISOR_PIN_INVALID")
+            try:
+                supervisor_pin = json.loads(pin_wire)
+            except (ValueError, UnicodeError) as exc:
+                raise ControlError("EXTERNAL_AUTHORITY_SUPERVISOR_PIN_INVALID") from exc
+            store = ExternalCommandAuthorityStore(args.db, supervisor_pin=supervisor_pin, **options)
         server = make_server(store, _private_key_file(args.operator_key_file), _private_key_file(args.receiver_key_file), port=args.port)
         print(json.dumps({"url": "http://127.0.0.1:" + str(server.server_address[1]), "pin": store.pin()}), flush=True)
         try:
