@@ -224,10 +224,13 @@ class DockerObserver:
         self._started = False
         self._closed = False
         self.last_cleanup: dict[str, Any] | None = None
+        self.lifecycle: Any = None  # Installed only by the trusted managed ring.
 
     def create_command(self) -> list[str]:
         """Reviewable fixed host command; no agent-provided flags or commands."""
-        return [self.docker_binary, "create", "-i", "--name", self.container_name,
+        labels = ([] if self.lifecycle is None else [argument for key, value in self.lifecycle.labels().items()
+                   for argument in ("--label", key + "=" + value)])
+        return [self.docker_binary, "create", "-i", "--name", self.container_name, *labels,
                 "--pull=never", "--network=none", "--read-only", "--cap-drop=ALL",
                 "--security-opt=no-new-privileges", "--user=65532:65532", "--pids-limit=16",
                 "--memory=128m", "--memory-swap=128m", "--cpus=0.25",
@@ -319,12 +322,16 @@ class DockerObserver:
         self._started = True
         try:
             _directory(self.source_directory)
+            if self.lifecycle is not None:
+                self.lifecycle.prepare()
             code, output, failure = self._command(self.create_command())
             container_id = output.decode("ascii", errors="strict").strip()
             if code != 0 or failure or not _HEX64.fullmatch(container_id):
                 raise ControlError("OBSERVER_CONTAINER_CREATE_FAILED")
             self.container_id = container_id
-            self._process = self._spawn([self.docker_binary, "start", "-a", "-i", self.container_name])
+            if self.lifecycle is not None:
+                self.lifecycle.created(container_id)
+            self._process = self._spawn([self.docker_binary, "start", "-a", "-i", container_id])
             enrollment = json.loads(self._line())
             if (not isinstance(enrollment, dict)
                     or set(enrollment) != {"observer_id", "role", "key_id", "public_key"}
@@ -333,6 +340,8 @@ class DockerObserver:
                     or not _HEX64.fullmatch(enrollment["public_key"])):
                 raise ControlError("OBSERVER_CONTAINER_ENROLLMENT_INVALID")
             self.enrollment = enrollment
+            if self.lifecycle is not None:
+                self.lifecycle.enrolled(enrollment)
             return dict(enrollment)
         except (ControlError, OSError, ValueError, TypeError, UnicodeError) as exc:
             self.stop()
@@ -345,12 +354,16 @@ class DockerObserver:
         metadata = {"container_id": self.container_id, "status": "HOLD", "reason": "OBSERVER_CONTAINER_INPUT_INVALID"}
         result = {"envelope": None, "process": metadata, "execution_authorized": False}
         try:
+            if self.lifecycle is not None:
+                self.lifecycle.check(request)
             _request(request)
             wire = canonical_bytes(request)
             if (len(wire) > MAX_CHALLENGE_BYTES or request["observer_id"] != self.observer_id
                     or request["role"] != self.role or request["key_id"] != self.key_id):
                 return result
         except (ControlError, TypeError, ValueError, OverflowError, RecursionError):
+            if self.lifecycle is not None:
+                self.stop()
             return result
         if self._closed or self.enrollment is None:
             metadata["reason"] = "OBSERVER_CONTAINER_NOT_RUNNING"
@@ -372,6 +385,8 @@ class DockerObserver:
                     or not _envelope(envelope, request, envelope["evidence_digest"])):
                 raise ControlError("OBSERVER_CONTAINER_REPORT_INVALID")
             _verify(envelope, self.enrollment["public_key"])
+            if self.lifecycle is not None:
+                self.lifecycle.check(request)
             result["envelope"] = envelope
             metadata.update(status="PASS", reason=None)
             return result
@@ -389,6 +404,9 @@ class DockerObserver:
             for stream in (self._process.stdin, self._process.stdout, self._process.stderr):
                 if stream is not None and not stream.closed:
                     stream.close()
+        if self.lifecycle is not None:
+            self.last_cleanup = self.lifecycle.close()
+            return dict(self.last_cleanup)
         self._command([self.docker_binary, "rm", "--force", self.container_name])
         code, output, failure = self._command([self.docker_binary, "container", "ls", "--all",
             "--filter", "name=^/" + self.container_name + "$", "--format", "{{.ID}}"])

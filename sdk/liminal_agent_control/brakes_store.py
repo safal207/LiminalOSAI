@@ -48,10 +48,15 @@ class SessionAuthority:
     failure. A trusted new controller needs a new root, never renewed old state.
     """
 
-    def __init__(self, db_path: str | Path, clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, db_path: str | Path, clock: Callable[[], float] = time.time, *, create: bool = True) -> None:
         self.db_path, self.clock = Path(db_path), clock
+        if not create:
+            with self._connect() as db:
+                db.execute("SELECT root_id FROM roots LIMIT 1")
+                db.execute("SELECT root_id FROM brakes_sessions LIMIT 1")
+            return  # Existing-only watchdogs never create or migrate lost state.
         AuthorityStore(self.db_path)
-        with connect(self.db_path) as db:
+        with self._connect() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS brakes_sessions (
                     root_id TEXT PRIMARY KEY REFERENCES roots(root_id),
@@ -88,6 +93,11 @@ class SessionAuthority:
             # including callers that do not use the OrientationStore facade.
             from .orientation import initialize_schema
             initialize_schema(db)
+
+    def _connect(self):
+        # Initialization owns schema creation. All subsequent session operations
+        # refuse a missing store, including deletion after watchdog startup.
+        return connect(self.db_path, create=False)
 
     def _now(self) -> float:
         try:
@@ -168,7 +178,7 @@ class SessionAuthority:
                 raise ControlError(f"invalid {name}")
         lifetime = _number(lifetime_seconds, "lifetime_seconds", positive=True)
         lease = _number(lease_seconds, "lease_seconds", positive=True)
-        with connect(self.db_path) as db:
+        with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             now = self._now()
             deadline = _number(now + lifetime, "hard_deadline", positive=True)
@@ -187,7 +197,7 @@ class SessionAuthority:
         if parent_execution_id is not None:
             validate_id(parent_execution_id, "parent_execution_id")
         failure = None
-        with connect(self.db_path) as db:
+        with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             session, failure = self._fresh(db, root_id)
             if failure is None:
@@ -226,7 +236,7 @@ class SessionAuthority:
               expected_revision: int) -> dict[str, Any]:
         validate_id(root_id, "root_id")
         failure = None
-        with connect(self.db_path) as db:
+        with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row, failure = self._fresh(db, root_id)
             if failure is None:
@@ -246,7 +256,7 @@ class SessionAuthority:
     def stop(self, root_id: str, reason: str = "OPERATOR_STOP") -> dict[str, Any]:
         validate_id(root_id, "root_id")
         validate_id(reason, "reason")
-        with connect(self.db_path) as db:
+        with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM brakes_sessions WHERE root_id=?", (root_id,)).fetchone()
             if row is None:
@@ -256,7 +266,7 @@ class SessionAuthority:
 
     def status(self, root_id: str) -> dict[str, Any]:
         validate_id(root_id, "root_id")
-        with connect(self.db_path) as db:
+        with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row, reason = self._fresh(db, root_id)
             if row is None:
@@ -321,14 +331,14 @@ class SessionAuthority:
 
     def reserve(self, action: dict[str, Any], *, channel: str, payload_digest: str | None = None,
                 policy_digest: str | None = None) -> dict[str, Any]:
-        with connect(self.db_path) as db:
+        with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             return self.admit_in_transaction(db, action, channel=channel, payload_digest=payload_digest, policy_digest=policy_digest)
 
     def begin_stage(self, action_id: str, *, stage_id: str) -> dict[str, Any]:
         validate_id(action_id, "action_id")
         validate_id(stage_id, "stage_id")
-        with connect(self.db_path) as db:
+        with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             action = db.execute("SELECT * FROM brakes_actions WHERE action_id=?", (action_id,)).fetchone()
             if action is None:
@@ -364,14 +374,14 @@ class SessionAuthority:
     def finish_action(self, action_id: str, *, outcome: str) -> None:
         if outcome not in {"RETURNED", "UNKNOWN"}:
             raise ControlError("invalid action outcome")
-        with connect(self.db_path) as db:
+        with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self.finish_action_in_transaction(db, action_id, outcome=outcome)
 
     def finish_stage(self, action_id: str, stage_id: str, *, outcome: str) -> None:
         if outcome not in {"RETURNED", "UNKNOWN"}:
             raise ControlError("invalid stage outcome")
-        with connect(self.db_path) as db:
+        with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT status FROM brakes_stages WHERE action_id=? AND stage_id=?", (action_id, stage_id)).fetchone()
             if row is None or row["status"] not in {"RESERVED", outcome}:
