@@ -38,6 +38,11 @@ per-agent observed trajectories, evidence freshness and bounded excursions
 from host-defined checkpoints. Its local timeline viewer separates pending
 transitions from confirmed state; orientation never issues authority.
 
+The [center timeline and observer ring](docs/AGENT_CONTROL_CENTER_CONTINUITY.md)
+add immutable time windows, hash-linked history, separate ideas and projections,
+and required observer roles. Missing or contradictory evidence holds continuation;
+observer agreement never overrides action authority.
+
 ## Build
 
 - Dependencies: gcc, make, python3

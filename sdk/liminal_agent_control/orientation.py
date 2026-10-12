@@ -53,6 +53,10 @@ def initialize_schema(db: Any) -> None:
             observation_json TEXT NOT NULL, ingested_at REAL NOT NULL)""",
     ):
         db.execute(statement)
+    from .center_continuity import initialize_schema as initialize_centers
+    from .observer_ring import initialize_schema as initialize_ring
+    initialize_centers(db)
+    initialize_ring(db)
 
 
 def _hash(value: Any) -> str:
@@ -176,15 +180,24 @@ def admission_in_transaction(db: Any, action: dict[str, Any], *, channel: str, n
         receiver = db.execute("SELECT value FROM receiver_meta WHERE key='receiver_id'").fetchone()
         if receiver is None or receiver[0] != profile["observers"]["records"]:
             return "ORIENTATION_OBSERVER_MISMATCH"
+    from . import center_continuity, observer_ring
+    active_centers = center_continuity.center_nodes_in_transaction(db, action["root_id"], now=now)
+    centers = profile["center_nodes"] if active_centers is None else active_centers
     visits = json.loads(state["visits_json"])
     # Reserving a return does not establish that the center was reached.
-    away = state["away_steps"] if edge["destination"] in profile["center_nodes"] else state["away_steps"] + 1
+    away = state["away_steps"] if edge["destination"] in centers else state["away_steps"] + 1
     if state["steps"] >= profile["max_steps"]:
         return "ORIENTATION_STEP_LIMIT"
     if visits.get(edge["destination"], 0) >= profile["max_visits"]:
         return "ORIENTATION_VISIT_LIMIT"
     if away > profile["max_away_steps"]:
         return "ORIENTATION_AWAY_LIMIT"
+    reason = observer_ring.check_in_transaction(db, action["action_id"], now=now, root_id=action["root_id"])
+    if reason:
+        return reason
+    reason = center_continuity.admission_in_transaction(db, action, edge=edge, now=now)
+    if reason:
+        return reason
     visits[edge["destination"]] = visits.get(edge["destination"], 0) + 1
     db.execute("UPDATE orientation_states SET steps=steps+1,away_steps=?,visits_json=?,pending_action_id=? WHERE execution_id=?",
                (away, canonical_bytes(visits).decode(), action["action_id"], action["execution_id"]))
@@ -210,7 +223,9 @@ def check_pending_in_transaction(db: Any, action_id: str, *, now: float) -> str 
     if (state["pending_action_id"] != action_id or occurrence is None or occurrence["status"] != "PENDING"
             or occurrence["revision"] != state["revision"] + 1):
         return "ORIENTATION_PENDING_MISMATCH"
-    return None
+    from . import center_continuity, observer_ring
+    return (observer_ring.check_in_transaction(db, action_id, now=now)
+            or center_continuity.pending_in_transaction(db, action_id, now=now))
 
 
 def _observe(db: Any, action_id: str, observation: dict[str, Any], *, now: float,
@@ -252,7 +267,12 @@ def _observe(db: Any, action_id: str, observation: dict[str, Any], *, now: float
         pending = db.execute("SELECT 1 FROM brakes_stages WHERE action_id=? AND status='RESERVED'", (action_id,)).fetchone()
         if action is None or action[0] not in required or pending:
             raise ControlError("ORIENTATION_EFFECT_STILL_IN_FLIGHT")
-        away = 0 if occurrence["destination"] in profile["center_nodes"] else state["away_steps"]
+    from . import center_continuity
+    timely = center_continuity.observe_in_transaction(db, action_id, observation, now=now)
+    if observation["outcome"] == "CONFIRMED":
+        active_centers = center_continuity.center_nodes_in_transaction(db, occurrence["root_id"], now=observed)
+        centers = profile["center_nodes"] if active_centers is None else active_centers
+        away = 0 if timely and occurrence["destination"] in centers else state["away_steps"]
         db.execute("UPDATE orientation_states SET node_id=?,revision=?,observed_at=?,evidence_digest=?,away_steps=?,pending_action_id=NULL WHERE execution_id=?",
                    (occurrence["destination"], occurrence["revision"], observed, observation["evidence_digest"], away, occurrence["execution_id"]))
     elif observation["outcome"] == "CONTRADICTED":
@@ -330,6 +350,8 @@ class OrientationStore:
                        (execution_id, root_id, node_id, observed_at, evidence_digest, canonical_bytes({node_id: 1}).decode()))
             db.execute("INSERT INTO orientation_seeds VALUES (?,?,?,?,?)",
                        (execution_id, root_id, node_id, observed_at, evidence_digest))
+            from .center_continuity import seed_in_transaction
+            seed_in_transaction(db, root_id, execution_id, now=session["last_now"])
             return dict(db.execute("SELECT * FROM orientation_states WHERE execution_id=?", (execution_id,)).fetchone())
 
     def prepare(self, action: dict[str, Any], *, edge_id: str, expected_revision: int) -> dict[str, Any]:
@@ -391,12 +413,34 @@ class OrientationStore:
             row, profile = _load(db, root_id)
             if profile is None:
                 return {"root_id": root_id, "profile": None, "executions": [], "occurrences": [], "observations": [], "seeds": [], "tickets": []}
-            distances = _distances(profile)
+            temporal = db.execute("SELECT profile_digest FROM center_profiles WHERE root_id=?", (root_id,)).fetchone()
+            centers, reference_at = profile["center_nodes"], None
+            if temporal:
+                from .center_continuity import center_nodes_in_transaction
+                try:
+                    reference_at = self.authority._now()
+                    last_now = db.execute("SELECT last_now FROM brakes_sessions WHERE root_id=?", (root_id,)).fetchone()[0]
+                    if reference_at < last_now:
+                        raise ControlError("CLOCK_UNSAFE")
+                    centers = center_nodes_in_transaction(db, root_id, now=reference_at)
+                except ControlError:
+                    centers, reference_at = [], None
+            distances = _distances({**profile, "center_nodes": centers})
+            ring_profile = db.execute("SELECT * FROM observer_ring_profiles WHERE root_id=?", (root_id,)).fetchone()
+            ring_hold, ring_session = None, None
+            if ring_profile:
+                ring_hold = db.execute("SELECT reason FROM observer_ring_holds WHERE root_id=?", (root_id,)).fetchone()
+                ring_session = db.execute("SELECT * FROM brakes_sessions WHERE root_id=?", (root_id,)).fetchone()
             states = []
             for state in db.execute("SELECT * FROM orientation_states WHERE root_id=? ORDER BY execution_id", (root_id,)):
                 item = dict(state)
                 item["visits"] = json.loads(item.pop("visits_json"))
-                item["distance_to_center"] = distances[item["node_id"]]
+                item["distance_to_center"] = distances.get(item["node_id"])
+                item["observer_hold_reason"] = None
+                if ring_profile:
+                    from .observer_ring import _lineage_reason
+                    item["observer_hold_reason"] = (ring_hold[0] if ring_hold else
+                        _lineage_reason(db, state["execution_id"], ring_profile, ring_session))
                 states.append(item)
             occurrences = [dict(o) for o in db.execute("SELECT * FROM orientation_occurrences WHERE root_id=? ORDER BY execution_id,revision", (root_id,))]
             observations = [json.loads(o[0]) for o in db.execute("SELECT observation_json FROM orientation_observations o JOIN orientation_occurrences c USING(action_id) WHERE c.root_id=? ORDER BY o.rowid", (root_id,))]
@@ -404,5 +448,8 @@ class OrientationStore:
             tickets = [dict(t) for t in db.execute("SELECT * FROM orientation_tickets WHERE root_id=? ORDER BY action_id", (root_id,))]
             return {"root_id": root_id, "profile": profile, "profile_digest": row["profile_digest"],
                     "policy_digest": row["policy_digest"], "objective_digest": row["objective_digest"],
+                    "requires_center_context": bool(temporal), "active_center_nodes": centers,
+                    "center_profile_digest": temporal["profile_digest"] if temporal else None,
+                    "center_reference_at": reference_at,
                     "epoch": row["epoch"], "executions": states, "occurrences": occurrences, "observations": observations,
                     "seeds": seeds, "tickets": tickets}

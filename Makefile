@@ -68,6 +68,10 @@ PYTHON_TESTS := \
 	tests/test_agent_control_orientation_store.py \
 	tests/test_agent_control_orientation_gate.py \
 	tests/test_agent_control_orientation_demo.py \
+	tests/test_agent_control_center_continuity.py \
+	tests/test_agent_control_observer_ring.py \
+	tests/test_agent_control_center_gate.py \
+	tests/test_agent_control_center_demo.py \
 	tests/test_agent_control_brakes_store.py \
 	tests/test_agent_control_brakes_receiver.py \
 	tests/test_agent_control_brakes_egress.py \

@@ -13,6 +13,7 @@ on:
       - 'scripts/run_agent_control_docker.py'
       - 'scripts/reproduce_agent_control.py'
       - 'scripts/check_orientation_view.cjs'
+      - 'scripts/check_center_view.cjs'
       - 'experiments/agent_control/**'
       - 'docs/AGENT_CONTROL*'
       - '.github/workflows/agent-control.yml'
@@ -70,6 +71,56 @@ jobs:
         with:
           name: agent-control-orientation-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/agent-control-orientation/
+          if-no-files-found: warn
+
+  center-continuity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Center continuity and observer-ring effect-boundary regressions
+        run: >-
+          python3 -m unittest
+          tests/test_agent_control_center_continuity.py
+          tests/test_agent_control_observer_ring.py
+          tests/test_agent_control_center_gate.py
+          tests/test_agent_control_center_demo.py -v
+      - name: Execute center timeline example and bind actual source files
+        run: |
+          python3 -m liminal_agent_control.center_demo \
+            --output "$RUNNER_TEMP/agent-control-center/report.json" \
+            --html "$RUNNER_TEMP/agent-control-center/center.html"
+          python3 - "$RUNNER_TEMP/agent-control-center/report.json" <<'PY'
+          import json, os, sys
+          from liminal_agent_control.multi_agent import _source_digests
+          report = json.load(open(sys.argv[1]))
+          assert report['passed'] is True and all(report['checks'].values())
+          assert report['source']['commit'] == os.environ['EXPECTED_SOURCE_SHA']
+          assert report['source']['dirty'] is False
+          assert report['source_digests'] == _source_digests()
+          PY
+      - name: Inspect timeline and observer ring in real Chromium
+        run: |
+          npm install --prefix "$RUNNER_TEMP/center-ui" --ignore-scripts --no-audit --no-fund playwright@1.62.1
+          export ORIENTATION_PLAYWRIGHT_MODULE="$RUNNER_TEMP/center-ui/node_modules/playwright"
+          export ORIENTATION_CHROME="$(command -v google-chrome)"
+          test -n "$ORIENTATION_CHROME"
+          node scripts/check_center_view.cjs \
+            "$RUNNER_TEMP/agent-control-center/center.html" \
+            "$RUNNER_TEMP/agent-control-center" \
+            > "$RUNNER_TEMP/agent-control-center/browser-check.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-center-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-center/
           if-no-files-found: warn
 
   brakes:
