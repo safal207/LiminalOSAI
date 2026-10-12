@@ -32,7 +32,6 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONPATH: sdk
       EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      LIMINAL_EXTERNAL_STOP_EVIDENCE: ${{ runner.temp }}/agent-control-external-stop/report.json
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -44,6 +43,7 @@ jobs:
           "$RUNNER_TEMP/external-stop-venv/bin/python" -m pip --isolated install -r experiments/agent_control/observer-requirements.txt
           echo "$RUNNER_TEMP/external-stop-venv/bin" >> "$GITHUB_PATH"
           mkdir -p "$RUNNER_TEMP/agent-control-external-stop"
+          echo "LIMINAL_EXTERNAL_STOP_EVIDENCE=$RUNNER_TEMP/agent-control-external-stop/report.json" >> "$GITHUB_ENV"
       - name: External authority, receiver races and signed checkpoint regressions
         run: >-
           python3 -m unittest
