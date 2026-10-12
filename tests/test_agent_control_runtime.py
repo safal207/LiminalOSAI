@@ -19,7 +19,7 @@ from sdk.liminal_agent_control.runtime import (
 )
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
 from sdk.liminal_process_tree import ProcessTreeSupervisor
-from sdk.liminal_agent_control.supervisor_registry import SupervisorRegistry
+from sdk.liminal_agent_control.supervisor_registry import SupervisorRegistry, ownership_labels
 
 
 def base_action():
@@ -371,6 +371,132 @@ class RuntimeCleanupTests(unittest.TestCase):
             DockerController().image_id("python:latest")
 
 
+class DockerObservationRaceTests(unittest.TestCase):
+    """Deterministic Docker command interleavings, not real OS evidence."""
+
+    def payload(self, *, running=True, paused=False):
+        return {"Id": "a" * 64, "Image": "sha256:" + "b" * 64,
+                "State": {"Running": running, "Paused": paused, "Pid": 100 if running else 0},
+                "Config": {"Labels": ownership_labels(self.record())}}
+
+    def record(self):
+        return {"session_id": "session", "image_id": "sha256:" + "b" * 64,
+                "registry_id": "registry:fixture", "ownership_token": "owned-token", "plan_sha256": "c" * 64}
+
+    def inspect_result(self, payload):
+        return subprocess.CompletedProcess([], 0, json.dumps([payload]).encode(), b"")
+
+    def controller(self, results):
+        class ScriptedDocker(DockerController):
+            def __init__(self):
+                super().__init__()
+                self.calls = []
+                self.results = iter(results)
+            def command(self, args, **kwargs):
+                self.calls.append(args)
+                result = next(self.results)
+                if isinstance(result, Exception):
+                    raise result
+                return result
+        controller = ScriptedDocker()
+        controller.bind_ownership(self.record())
+        controller.bind_container_id("session", "a" * 64)
+        return controller
+
+    def test_exit_between_inspect_and_failed_or_empty_top_requires_positive_owned_stopped_reread(self):
+        for top in (subprocess.CompletedProcess([], 1, b"", b"private command stderr"),
+                    subprocess.CompletedProcess([], 0, b"PID PPID\n", b""),
+                    subprocess.CompletedProcess([], 0, b"", b"")):
+            with self.subTest(top_returncode=top.returncode, top_stdout=top.stdout):
+                controller = self.controller([self.inspect_result(self.payload()), top,
+                    self.inspect_result(self.payload(running=False))])
+                observed = controller.inspect_session("session")
+                self.assertEqual(controller.calls, [["inspect", "a" * 64], ["top", "a" * 64], ["inspect", "a" * 64]])
+                self.assertTrue(observed["exists"])
+                self.assertFalse(observed["running"])
+                self.assertEqual(observed["descendant_count"], 0)
+                evidence = controller.process_evidence["session"]
+                self.assertTrue(evidence["available"])
+                self.assertEqual(evidence["processes"], [])
+                failure = evidence["observation_attempts"][0]
+                self.assertEqual(failure["returncode"], top.returncode)
+                self.assertEqual(failure["failure_code"], "PROCESS_OBSERVATION_UNAVAILABLE" if top.returncode else "PROCESS_OBSERVATION_EMPTY")
+                self.assertEqual(failure["resolved_by"], "fresh_owned_stopped_inspect")
+                self.assertNotIn("stderr", json.dumps(evidence))
+
+    def test_still_running_paused_or_invalid_fresh_state_cannot_resolve_failed_top(self):
+        nonzero_pid = self.payload(running=False)
+        nonzero_pid["State"]["Pid"] = 100
+        boolean_pid = self.payload(running=False)
+        boolean_pid["State"]["Pid"] = False
+        for payload in (self.payload(), self.payload(paused=True), self.payload(running="false"),
+                        self.payload(running=False, paused=None), self.payload(running=False, paused=True),
+                        nonzero_pid, boolean_pid):
+            with self.subTest(state=payload["State"]):
+                controller = self.controller([self.inspect_result(self.payload()),
+                    subprocess.CompletedProcess([], 1, b"", b"stopped?"), self.inspect_result(payload)])
+                with self.assertRaisesRegex(RuntimeBoundaryError, "PROCESS_OBSERVATION_UNAVAILABLE"):
+                    controller.inspect_session("session")
+                self.assertEqual(len(controller.calls), 3)
+                self.assertFalse(controller.process_evidence["session"]["available"])
+                self.assertNotIn("resolved_by", controller.process_evidence["session"]["observation_attempts"][0])
+
+    def test_missing_daemon_failed_or_replaced_owned_object_cannot_resolve_failed_top(self):
+        replaced = self.payload(running=False)
+        replaced["Id"] = "d" * 64
+        labels_changed = self.payload(running=False)
+        labels_changed["Config"]["Labels"]["liminal.control.owner"] = "different-owner"
+        image_changed = self.payload(running=False)
+        image_changed["Image"] = "sha256:" + "e" * 64
+        fresh_results = [subprocess.CompletedProcess([], 1, b"", b"No such object: pinned-id"),
+                         subprocess.CompletedProcess([], 1, b"", b"Cannot connect to Docker daemon"),
+                         subprocess.TimeoutExpired(["docker", "inspect"], 10),
+                         self.inspect_result(replaced), self.inspect_result(labels_changed),
+                         self.inspect_result(image_changed)]
+        for fresh in fresh_results:
+            with self.subTest(fresh=type(fresh).__name__, stderr=getattr(fresh, "stderr", None)):
+                controller = self.controller([self.inspect_result(self.payload()),
+                    subprocess.CompletedProcess([], 1, b"", b"private top failure"), fresh])
+                with self.assertRaisesRegex(RuntimeBoundaryError, "PROCESS_OBSERVATION_UNAVAILABLE"):
+                    controller.inspect_session("session")
+                attempt = controller.process_evidence["session"]["observation_attempts"][0]
+                self.assertIn("fresh_inspect_failure", attempt)
+                self.assertNotIn("resolved_by", attempt)
+                self.assertEqual(len(controller.calls), 3)
+
+    def test_malformed_lineage_and_missing_original_root_remain_failure_without_reread(self):
+        for stdout, reason in ((b"not a process header\n", "PROCESS_LINEAGE_UNAVAILABLE"),
+                               (b"PID PPID\ninvalid 1\n", "PROCESS_LINEAGE_INVALID"),
+                               (b"PID PPID\n101 1\n", "PROCESS_ROOT_NOT_OBSERVED"),
+                               (b"PID PPID\n100 1\n100 1\n", "PROCESS_ROOT_NOT_OBSERVED")):
+            with self.subTest(reason=reason):
+                controller = self.controller([self.inspect_result(self.payload()),
+                    subprocess.CompletedProcess([], 0, stdout, b"")])
+                with self.assertRaisesRegex(RuntimeBoundaryError, reason):
+                    controller.inspect_session("session")
+                self.assertEqual(len(controller.calls), 2)
+                self.assertEqual(controller.process_evidence["session"]["observation_attempts"][0]["failure_code"], reason)
+
+    def test_unpinned_or_unowned_metadata_cannot_use_stopped_reread(self):
+        for missing in ("owned_container_ids", "owned_sessions"):
+            with self.subTest(missing=missing):
+                controller = self.controller([self.inspect_result(self.payload()),
+                    subprocess.CompletedProcess([], 1, b"", b"top failure")])
+                getattr(controller, missing).clear()
+                with self.assertRaisesRegex(RuntimeBoundaryError, "PROCESS_OBSERVATION_UNAVAILABLE"):
+                    controller.inspect_session("session")
+                self.assertEqual(len(controller.calls), 2)
+
+    def test_top_timeout_records_unavailability_without_stopped_reread(self):
+        controller = self.controller([self.inspect_result(self.payload()),
+            subprocess.TimeoutExpired(["docker", "top"], 10)])
+        with self.assertRaisesRegex(RuntimeBoundaryError, "PROCESS_OBSERVATION_UNAVAILABLE"):
+            controller.inspect_session("session")
+        attempt = controller.process_evidence["session"]["observation_attempts"][0]
+        self.assertEqual(attempt["exception_type"], "TimeoutExpired")
+        self.assertEqual(len(controller.calls), 2)
+
+
 class MatchedQueueProtocolTests(unittest.TestCase):
     """Real receiver and worker pipes; these are not Docker isolation evidence."""
 
@@ -474,6 +600,41 @@ class MatchedQueueProtocolTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("LIMINAL_AGENT_CONTROL_DOCKER_IMAGE"), "set explicit immutable Docker image to run real containment")
 class DockerRuntimeIntegrationTests(unittest.TestCase):
+    def test_independent_output_flood_exits_keep_error_and_verified_owned_cleanup(self):
+        """Five separate owned actions exercise the observed exit interleaving.
+
+        These are independent runs, not retries of a failed action or an
+        estimate of security efficacy. Raw protocol ERROR must remain visible.
+        """
+        image = os.environ["LIMINAL_AGENT_CONTROL_DOCKER_IMAGE"]
+        roots = set()
+        for attempt in range(5):
+            with self.subTest(attempt=attempt), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory)
+                receiver = Receiver(path / "receiver.db", b"b" * 32, b"r" * 32)
+                broker = Broker(path / "broker.db", receiver)
+                before = len(receiver.records())
+                result = run_fixture("output_flood", broker=broker, image=image, timeout_seconds=10)
+                self.assertEqual(result["status"], "ERROR", result)
+                self.assertTrue(result["registered_before_start"], result)
+                self.assertTrue(result["containment"]["verified"], result)
+                self.assertTrue(result["containment"]["zero_survivors"], result)
+                self.assertEqual(len(receiver.records()), before, result)
+                self.assertEqual(result["actions"], [], result)
+                self.assertEqual(result["supervisor_registry"]["status"], "CLOSED", result)
+                roots.add(result["root_id"])
+                evidence = result["containment"].get("pre_stop_process_evidence") or {}
+                attempts = evidence.get("observation_attempts", [])
+                self.assertLessEqual(len(attempts), 32, result)
+                for observation in attempts:
+                    self.assertIn(observation["stage"], {"docker inspect", "docker top"}, result)
+                    self.assertIsInstance(observation["failure_code"], str, result)
+                    self.assertIsInstance(observation["observed_at"], (int, float), result)
+                    self.assertNotIn("stdout", observation, result)
+                    self.assertNotIn("stderr", observation, result)
+                    self.assertNotIn("environment", observation, result)
+        self.assertEqual(len(roots), 5)
+
     def test_crashed_supervisor_requires_explicit_owned_resource_recovery(self):
         image = os.environ["LIMINAL_AGENT_CONTROL_DOCKER_IMAGE"]
         project = Path(__file__).parents[1]

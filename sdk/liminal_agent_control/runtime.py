@@ -260,6 +260,7 @@ class DockerController:
     def __init__(self, docker_binary: str = "docker") -> None:
         self.docker_binary = docker_binary
         self.process_evidence: dict[str, dict] = {}
+        self.observation_attempts: dict[str, list[dict]] = {}
         self.owned_sessions: dict[str, dict] = {}
         self.owned_container_ids: dict[str, str] = {}
         self.on_created: Any = None
@@ -333,47 +334,107 @@ class DockerController:
             raise RuntimeBoundaryError("DOCKER_OBSERVATION_INVALID") from exc
 
     def inspect_session(self, session_id: str) -> dict:
-        value = self._inspect(session_id)
+        try:
+            value = self._inspect(session_id)
+        except Exception as exc:
+            failure = str(exc) if isinstance(exc, RuntimeBoundaryError) and re.fullmatch(r"[A-Z0-9_]{1,100}", str(exc)) else "DOCKER_OBSERVATION_UNAVAILABLE"
+            self._record_process_failure(session_id, {"Id": self.owned_container_ids.get(session_id)},
+                                         None, failure, stage="docker inspect")
+            raise
         if value is None:
             return {"exists": False, "running": False, "descendant_count": 0, "tree_sha256": ZERO_SHA256}
         state = value["State"]
         running, paused = state.get("Running"), state.get("Paused")
         if type(running) is not bool or type(paused) is not bool:
+            self._record_process_failure(session_id, value, None, "DOCKER_STATE_INVALID", stage="docker inspect")
             raise RuntimeBoundaryError("DOCKER_STATE_INVALID")
         process_evidence: list = []
         descendants = 0
         if running:
-            result = self.command(["top", self.owned_container_ids.get(session_id, session_id)])
-            if result.returncode:
-                raise RuntimeBoundaryError("PROCESS_OBSERVATION_UNAVAILABLE")
-            rows = result.stdout.decode(errors="strict").strip().splitlines()
-            if len(rows) < 2:
-                raise RuntimeBoundaryError("PROCESS_OBSERVATION_EMPTY")
-            header = rows[0].split()
-            if "PID" not in header or "PPID" not in header:
+            try:
+                result = self.command(["top", self.owned_container_ids.get(session_id, session_id)])
+            except Exception as exc:
+                attempt = self._record_process_failure(session_id, value, None, "PROCESS_OBSERVATION_UNAVAILABLE")
+                attempt["exception_type"] = type(exc).__name__
+                raise RuntimeBoundaryError("PROCESS_OBSERVATION_UNAVAILABLE") from exc
+            try:
+                rows = result.stdout.decode(errors="strict").strip().splitlines() if not result.returncode else []
+            except UnicodeError:
+                self._record_process_failure(session_id, value, result.returncode, "PROCESS_LINEAGE_INVALID")
+                raise RuntimeBoundaryError("PROCESS_LINEAGE_INVALID")
+            if rows and ("PID" not in rows[0].split() or "PPID" not in rows[0].split()):
+                self._record_process_failure(session_id, value, result.returncode, "PROCESS_LINEAGE_UNAVAILABLE")
                 raise RuntimeBoundaryError("PROCESS_LINEAGE_UNAVAILABLE")
-            pid_index, parent_index = header.index("PID"), header.index("PPID")
-            for row in rows[1:]:
-                fields = row.split()
-                if len(fields) <= max(pid_index, parent_index) or not fields[pid_index].isdigit() or not fields[parent_index].isdigit():
-                    raise RuntimeBoundaryError("PROCESS_LINEAGE_INVALID")
-                process_evidence.append({"pid": int(fields[pid_index]), "ppid": int(fields[parent_index])})
-            pids = {node["pid"] for node in process_evidence}
-            if len(pids) != len(process_evidence) or state.get("Pid") not in pids:
-                raise RuntimeBoundaryError("PROCESS_ROOT_NOT_OBSERVED")
-            descendants = len(process_evidence) - 1
+            failure = "PROCESS_OBSERVATION_UNAVAILABLE" if result.returncode else "PROCESS_OBSERVATION_EMPTY" if len(rows) < 2 else None
+            if failure is not None:
+                attempt = self._record_process_failure(session_id, value, result.returncode, failure)
+                # The process can exit between inspect's Running=True and top.
+                # One fresh, positively owned stopped object can establish its
+                # current state. Missing/unavailable/replaced objects cannot.
+                pinned_id = self.owned_container_ids.get(session_id)
+                if pinned_id is None or session_id not in self.owned_sessions or value.get("Id") != pinned_id:
+                    raise RuntimeBoundaryError(failure)
+                try:
+                    fresh = self._inspect(session_id)
+                except Exception as exc:
+                    attempt["fresh_inspect_failure"] = str(exc) if isinstance(exc, RuntimeBoundaryError) and re.fullmatch(r"[A-Z0-9_]{1,100}", str(exc)) else type(exc).__name__
+                    raise RuntimeBoundaryError(failure) from exc
+                if fresh is None:
+                    attempt["fresh_inspect_failure"] = "OWNED_OBJECT_NOT_POSITIVELY_OBSERVED"
+                    raise RuntimeBoundaryError(failure)
+                fresh_state = fresh.get("State", {})
+                if type(fresh_state.get("Running")) is not bool or type(fresh_state.get("Paused")) is not bool:
+                    attempt["fresh_inspect_failure"] = "DOCKER_STATE_INVALID"
+                    raise RuntimeBoundaryError(failure)
+                if (fresh_state["Running"] is not False or fresh_state["Paused"] is not False
+                        or type(fresh_state.get("Pid")) is not int or fresh_state["Pid"] != 0):
+                    attempt["fresh_inspect_failure"] = "OWNED_OBJECT_NOT_POSITIVELY_STOPPED"
+                    raise RuntimeBoundaryError(failure)
+                value, state, running, paused = fresh, fresh_state, False, fresh_state["Paused"]
+                attempt.update(resolved_by="fresh_owned_stopped_inspect", fresh_inspected_at=time.time())
+            else:
+                header = rows[0].split()
+                if "PID" not in header or "PPID" not in header:
+                    self._record_process_failure(session_id, value, result.returncode, "PROCESS_LINEAGE_UNAVAILABLE")
+                    raise RuntimeBoundaryError("PROCESS_LINEAGE_UNAVAILABLE")
+                pid_index, parent_index = header.index("PID"), header.index("PPID")
+                for row in rows[1:]:
+                    fields = row.split()
+                    if len(fields) <= max(pid_index, parent_index) or not fields[pid_index].isdigit() or not fields[parent_index].isdigit():
+                        self._record_process_failure(session_id, value, result.returncode, "PROCESS_LINEAGE_INVALID")
+                        raise RuntimeBoundaryError("PROCESS_LINEAGE_INVALID")
+                    process_evidence.append({"pid": int(fields[pid_index]), "ppid": int(fields[parent_index])})
+                pids = {node["pid"] for node in process_evidence}
+                if len(pids) != len(process_evidence) or state.get("Pid") not in pids:
+                    self._record_process_failure(session_id, value, result.returncode, "PROCESS_ROOT_NOT_OBSERVED")
+                    raise RuntimeBoundaryError("PROCESS_ROOT_NOT_OBSERVED")
+                descendants = len(process_evidence) - 1
         # Host evidence only: never sent across worker STDIO. Retain bounded
         # PID/PPID values, not arbitrary process command lines or environment.
         self.process_evidence[session_id] = {
             "source": "docker inspect + docker top", "observed_at": time.time(),
             "container_id": value.get("Id"), "running": running, "paused": paused,
             "root_pid": state.get("Pid"), "processes": process_evidence,
+            "available": True, "observation_attempts": self.observation_attempts.get(session_id, []),
         }
         return {
             "exists": True, "running": running and not paused,
             "descendant_count": descendants,
             "tree_sha256": canonical_sha256({"session": session_id, "state": state, "processes": process_evidence}),
         }
+
+    def _record_process_failure(self, session_id: str, value: dict, returncode: int | None, failure: str,
+                                *, stage: str = "docker top") -> dict:
+        attempts = self.observation_attempts.setdefault(session_id, [])
+        attempt = {"stage": stage, "container_id": value.get("Id"),
+                   "returncode": returncode, "failure_code": failure, "observed_at": time.time()}
+        attempts.append(attempt)
+        del attempts[:-32]
+        # Preserve bounded error codes and owned IDs, never CLI stderr,
+        # environment or arbitrary process command lines.
+        self.process_evidence[session_id] = {"source": "docker inspect + docker top", "available": False,
+            "container_id": value.get("Id"), "observation_attempts": attempts}
+        return attempt
 
     def freeze_session(self, session_id: str) -> None:
         observed = self._inspect(session_id)
@@ -448,6 +509,7 @@ def _contain_workload(supervisor: ProcessTreeSupervisor, controller: Any, *, ses
         process_evidence = json.loads(json.dumps(getattr(controller, "process_evidence", {}).get(session_id)))
     except Exception:
         failures.append("PRE_STOP_OBSERVATION_UNAVAILABLE")
+        process_evidence = json.loads(json.dumps(getattr(controller, "process_evidence", {}).get(session_id)))
     freeze = supervisor.freeze_all()
     if freeze["failure_codes"]:
         failures.append("FREEZE_INCOMPLETE")
