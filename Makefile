@@ -78,6 +78,9 @@ PYTHON_TESTS := \
 	tests/test_agent_control_observer_sources.py \
 	tests/test_agent_control_observer_container.py \
 	tests/test_agent_control_observer_container_gate.py \
+	tests/test_agent_control_observer_registry.py \
+	tests/test_agent_control_observer_lifecycle.py \
+	tests/test_agent_control_observer_lifecycle_runtime.py \
 	tests/test_agent_control_brakes_store.py \
 	tests/test_agent_control_brakes_receiver.py \
 	tests/test_agent_control_brakes_egress.py \

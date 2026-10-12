@@ -58,7 +58,34 @@ jobs:
           python3 -m unittest
           tests/test_agent_control_observer_sources.py
           tests/test_agent_control_observer_container.py
-          tests/test_agent_control_observer_container_gate.py -v
+          tests/test_agent_control_observer_container_gate.py
+          tests/test_agent_control_observer_registry.py
+          tests/test_agent_control_observer_lifecycle.py -v
+      - name: Required real observer controller-crash and lost-create-ACK regressions
+        env:
+          LIMINAL_OBSERVER_LIFECYCLE_EVIDENCE: ${{ runner.temp }}/agent-control-isolated-observers/lifecycle.json
+        run: |
+          python3 - <<'PY'
+          import unittest
+          suite = unittest.defaultTestLoader.loadTestsFromName('tests.test_agent_control_observer_lifecycle_runtime')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.testsRun == 2 and not result.skipped and result.wasSuccessful(), 'Real Docker lifecycle regressions must execute'
+          PY
+          python3 - "$LIMINAL_OBSERVER_LIFECYCLE_EVIDENCE" <<'PY'
+          import hashlib, json, os, sys
+          from pathlib import Path
+          from liminal_agent_control.multi_agent import _source_digests
+          report = json.load(open(sys.argv[1]))
+          assert len(report['cases']) == 2
+          hashes = _source_digests()
+          test_path = 'tests/test_agent_control_observer_lifecycle_runtime.py'
+          hashes[test_path] = hashlib.sha256(Path(test_path).read_bytes()).hexdigest()
+          for case in report['cases']:
+              assert case['source']['commit'] == os.environ['EXPECTED_SOURCE_SHA']
+              assert case['source']['dirty'] is False
+              assert case['source_files_sha256'] == hashes
+              assert case['image_id'] == os.environ['LIMINAL_OBSERVER_DOCKER_IMAGE']
+          PY
       - name: Execute isolated observer sources and bind evidence
         run: |
           python3 -m liminal_agent_control.observer_container_demo \

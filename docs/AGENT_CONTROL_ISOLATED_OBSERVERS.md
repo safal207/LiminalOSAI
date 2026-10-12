@@ -1,5 +1,9 @@
 # Isolated observers and pinned evidence sources
 
+For durable ownership and cleanup after controller hard crashes, use the
+[managed observer lifecycle](AGENT_CONTROL_OBSERVER_LIFECYCLE.md). The low-level
+multi-root experiment on this page remains an unmanaged fixture interface.
+
 The signed ring authenticates observer statements. This experiment adds a
 runtime boundary around each signer and a separate, persisted source-binding
 boundary around its evidence. A trusted host starts three restricted Docker

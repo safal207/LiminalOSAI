@@ -97,8 +97,9 @@ def verify_receipt(document: Any, key: bytes) -> bool:
         return False
 
 
-def connect(path: str | Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(str(path), timeout=30, isolation_level=None)
+def connect(path: str | Path, *, create: bool = True) -> sqlite3.Connection:
+    target = str(path) if create else Path(path).resolve().as_uri() + "?mode=rw"
+    connection = sqlite3.connect(target, timeout=30, isolation_level=None, uri=not create)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("PRAGMA synchronous=FULL")
