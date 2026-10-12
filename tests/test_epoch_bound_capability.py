@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from sdk.liminal_capability_broker import CapabilityBroker
+from sdk.liminal_capability_broker import BrokerError, CapabilityBroker
 from sdk.liminal_epoch_bound_capability import (
     AUTHORITY,
     EpochBindingError,
@@ -149,6 +149,42 @@ class EpochBoundCapabilityTests(unittest.TestCase):
         self.assertEqual(result["decision"], "BLOCK")
         self.assertIn("runtime_state_tainted", result["reason_codes"])
         self.assertEqual(delegate.state_document()["capabilities"][0]["status"], "revoked")
+
+    def test_live_use_taint_revokes_with_validated_time_before_invalid_later_read(self):
+        provider = FakeRuntimeProvider()
+        broker = EpochBoundCapabilityBroker(runtime_provider=provider)
+        broker.admit(bound(provider, max_uses=1).as_document(), at_unix=NOW)
+        use = authorize_process(broker)
+        provider.tainted = True
+        readings = iter((NOW + 1, -1))
+        observed = []
+
+        def clock():
+            value = next(readings)
+            observed.append(value)
+            return value
+
+        with self.assertRaises(BrokerError):
+            with broker.live_use(use, at_unix=clock):
+                self.fail("tainted runtime entered the callback")
+        state = broker.delegate.state_document()["capabilities"][0]
+        self.assertEqual(state["status"], "revoked")
+        self.assertEqual(state["use_count"], 1)
+        self.assertEqual(observed, [NOW + 1])
+        revocation = broker.delegate.events()[-1]
+        self.assertEqual(revocation["event_type"], "revoke")
+        self.assertEqual(revocation["observed_at_unix"], NOW + 1)
+
+    def test_live_use_matching_runtime_rejects_invalid_later_clock(self):
+        provider = FakeRuntimeProvider()
+        broker = EpochBoundCapabilityBroker(runtime_provider=provider)
+        broker.admit(bound(provider, max_uses=1).as_document(), at_unix=NOW)
+        use = authorize_process(broker)
+        readings = iter((NOW + 1, -1))
+        with self.assertRaisesRegex(BrokerError, "at_unix"):
+            with broker.live_use(use, at_unix=lambda: next(readings)):
+                self.fail("invalid stage time entered the callback")
+        self.assertEqual(broker.delegate.state_document()["capabilities"][0]["use_count"], 1)
 
     def test_unbound_active_capability_is_revoked_fail_closed(self):
         provider = FakeRuntimeProvider()

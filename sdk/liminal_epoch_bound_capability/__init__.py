@@ -356,16 +356,24 @@ class EpochBoundCapabilityBroker:
                              if item["receipt_sha256"] == known.delegate_receipt_sha256), None)
         if base_receipt is None:
             raise BrokerError("missing committed base use receipt")
-        with self.delegate.live_use(base_receipt, at_unix=at_unix):
-            now = at_unix() if callable(at_unix) else at_unix
-            # The clock may cross expiry after the outer guard's reading.
-            # Revalidate this exact use at the newer value without consuming it.
-            with self.delegate.live_use(base_receipt, at_unix=now):
-                snapshot = TrustedRuntimeSnapshot.from_provider(self.runtime_provider)
-                bound = self._bindings.get(known.capability_id)
-                if bound is None or snapshot.tainted or self._binding_mismatch(bound, snapshot):
-                    self.delegate.revoke(known.capability_id, at_unix=now)
-                    raise BrokerError("committed use runtime binding is no longer live")
+        validated_time: int | None = None
+
+        def read_time() -> int:
+            nonlocal validated_time
+            validated_time = at_unix() if callable(at_unix) else at_unix
+            return validated_time
+
+        with self.delegate.live_use(base_receipt, at_unix=read_time):
+            if validated_time is None:
+                raise BrokerError("missing validated stage timestamp")
+            snapshot = TrustedRuntimeSnapshot.from_provider(self.runtime_provider)
+            bound = self._bindings.get(known.capability_id)
+            if bound is None or snapshot.tainted or self._binding_mismatch(bound, snapshot):
+                self.delegate.revoke(known.capability_id, at_unix=validated_time)
+                raise BrokerError("committed use runtime binding is no longer live")
+            # The clock may cross expiry while reading the runtime snapshot.
+            # The delegate validates a fresh reading without consuming another use.
+            with self.delegate.live_use(base_receipt, at_unix=at_unix):
                 yield
 
     def revoke(self, capability_id: str, *, at_unix: int) -> dict[str, Any]:
