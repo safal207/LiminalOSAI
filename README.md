@@ -24,6 +24,10 @@ See the [run guide](docs/AGENT_CONTROL.md),
 Deterministic fixtures, Docker checks and live-model results have separate scopes;
 this work does not establish general sandbox-escape prevention.
 
+The [scripted multi-worker extension](docs/AGENT_CONTROL_MULTI_AGENT.md) composes
+peer authorization attempts, forged reports, queued descendant revocation and
+an offline service-relay comparison. It has its own runner and evidence scope.
+
 ## Build
 
 - Dependencies: gcc, make, python3

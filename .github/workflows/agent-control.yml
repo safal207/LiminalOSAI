@@ -22,6 +22,57 @@ permissions:
   contents: read
 
 jobs:
+  multi-agent:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Scripted multi-worker experiment and evidence mutation checks
+        run: >-
+          python3 -m unittest
+          tests/test_agent_control_multi_agent_scenarios.py
+          tests/test_agent_control_multi_agent_relay.py
+          tests/test_agent_control_multi_agent_checks.py
+          tests/test_agent_control_multi_agent_evaluation.py -v
+      - name: Run and verify current-head multi-worker evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/agent-control-multi-agent" "$RUNNER_TEMP/agent-control-keys"
+          python3 -m liminal_agent_control.multi_agent run \
+            --output-root "$RUNNER_TEMP/agent-control-multi-agent/runs" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/multi-agent.key" \
+            > "$RUNNER_TEMP/agent-control-multi-agent/run-result.json"
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          from liminal_agent_control.multi_agent import verify_bundle
+          root = Path(sys.argv[1])
+          public = root / 'agent-control-multi-agent'
+          result = json.loads((public / 'run-result.json').read_text())
+          verification = verify_bundle(Path(result['bundle']),
+              (root / 'agent-control-keys/multi-agent.key').read_bytes(),
+              expected_report_sha256=result['report_sha256'])
+          (public / 'verification.json').write_text(json.dumps(verification, indent=2) + '\n')
+          print(json.dumps(result['checks'], indent=2))
+          assert result['source']['dirty'] is False, result['source']
+          assert result['source']['commit'] == os.environ['EXPECTED_SOURCE_SHA'], result['source']
+          assert verification['valid'], verification
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-multi-agent-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-multi-agent/
+          if-no-files-found: warn
+
   local:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
