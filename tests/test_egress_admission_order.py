@@ -275,6 +275,22 @@ class AdmissionOrderTests(unittest.TestCase):
         self.assertEqual(result["decision"], "ALLOW")
         self.assertEqual(broker.state_document()["capabilities"][0]["use_count"], 1)
 
+    def test_epoch_bound_broker_rechecks_expiry_at_second_clock_read(self):
+        from sdk.liminal_epoch_bound_capability import EpochBoundCapabilityBroker, EpochBoundCapabilityContract
+        from tests.test_epoch_bound_capability import FakeRuntimeProvider
+        provider = FakeRuntimeProvider()
+        broker = EpochBoundCapabilityBroker(runtime_provider=provider)
+        broker.admit(EpochBoundCapabilityContract.build(
+            base_capability=capability(max_uses=1, expires_at_unix=200).as_document(),
+            runtime_epoch=provider.epoch, runtime_state_sha256=provider.state).as_document(), at_unix=105)
+        readings = iter((198, 199, 200))
+        gateway = self.gateway(broker=broker, clock=lambda: next(readings, 200))
+        with self.assertRaisesRegex(EgressBlocked, "expired"):
+            gateway.execute(request(secret_refs={"authorization": "secret:test"}))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(gateway.receipts(), ())
+        self.assertEqual(broker.state_document()["capabilities"][0]["use_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

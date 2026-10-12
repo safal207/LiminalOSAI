@@ -358,12 +358,15 @@ class EpochBoundCapabilityBroker:
             raise BrokerError("missing committed base use receipt")
         with self.delegate.live_use(base_receipt, at_unix=at_unix):
             now = at_unix() if callable(at_unix) else at_unix
-            snapshot = TrustedRuntimeSnapshot.from_provider(self.runtime_provider)
-            bound = self._bindings.get(known.capability_id)
-            if bound is None or snapshot.tainted or self._binding_mismatch(bound, snapshot):
-                self.delegate.revoke(known.capability_id, at_unix=now)
-                raise BrokerError("committed use runtime binding is no longer live")
-            yield
+            # The clock may cross expiry after the outer guard's reading.
+            # Revalidate this exact use at the newer value without consuming it.
+            with self.delegate.live_use(base_receipt, at_unix=now):
+                snapshot = TrustedRuntimeSnapshot.from_provider(self.runtime_provider)
+                bound = self._bindings.get(known.capability_id)
+                if bound is None or snapshot.tainted or self._binding_mismatch(bound, snapshot):
+                    self.delegate.revoke(known.capability_id, at_unix=now)
+                    raise BrokerError("committed use runtime binding is no longer live")
+                yield
 
     def revoke(self, capability_id: str, *, at_unix: int) -> dict[str, Any]:
         return self.delegate.revoke(capability_id, at_unix=at_unix)
