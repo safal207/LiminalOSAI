@@ -23,7 +23,7 @@ network.connect_domain capability
 - Only HTTP(S) URLs with explicit DNS hostnames are accepted.
 - IP-literal destinations are denied.
 - DNS results are checked before transport and on every redirect hop.
-- Loopback, private, link-local, multicast, unspecified and reserved addresses are denied.
+- DNS answers must be globally reachable; shared address space (`100.64.0.0/10`, including IPv4-mapped IPv6), loopback, private, link-local, multicast, unspecified and reserved addresses are denied. A mixed answer containing any denied address is rejected in full.
 - HTTPS cannot redirect to HTTP.
 - Each admitted redirect hop consumes exactly one use **before** resolution. Stage revalidation does not consume a second use, even for a one-use capability. A failed DNS/transport attempt is not refunded because admitted external work may already have occurred.
 - Capability scope binds normalized IDNA hostname, protocol and port. Pre-I/O admission binds call ID, method, URL/body digests and redirect hop. The final receipt binds that admission receipt to the DNS and redirect-chain digests; the pre-DNS decision cannot claim to contain DNS evidence that did not yet exist.

@@ -141,6 +141,34 @@ class AdmissionOrderTests(unittest.TestCase):
         self.assertEqual(gateway.broker.state_document()["capabilities"][0]["use_count"], 1)
         self.assertEqual(gateway.receipts(), ())
 
+    def test_non_global_shared_addresses_block_secrets_and_transport(self):
+        for addresses in (
+            ("100.64.0.1",),
+            ("100.100.100.200",),
+            ("::ffff:100.100.100.200",),
+            ("93.184.216.34", "100.100.100.200"),
+            ("2606:4700:4700::1111", "::ffff:100.100.100.200"),
+        ):
+            with self.subTest(addresses=addresses):
+                def resolver(host):
+                    self.calls.append(("dns", host))
+                    return addresses
+                gateway = self.gateway(cap=capability(max_uses=1), resolver=resolver)
+                with self.assertRaisesRegex(EgressBlocked, "non-public address"):
+                    gateway.execute(request(secret_refs={"authorization": "secret:test"}))
+                self.assertEqual(self.calls, [("dns", "api.example.com")])
+                self.assertEqual(gateway.broker.state_document()["capabilities"][0]["use_count"], 1)
+                self.assertEqual(gateway.receipts(), ())
+
+    def test_global_ipv4_and_ipv6_remain_admissible(self):
+        for addresses in (("93.184.216.34",), ("2606:4700:4700::1111",)):
+            with self.subTest(addresses=addresses):
+                gateway = self.gateway(resolver=lambda host: addresses)
+                result = gateway.execute(request())
+                self.assertEqual(result["decision"], "ALLOW")
+                self.assertEqual(self.calls[0][0], "transport")
+                self.assertEqual(self.calls[0][1].resolved_ips, addresses)
+
     def test_initial_and_redirect_ip_literals_and_malformed_names_never_resolve(self):
         for url in ("https://93.184.216.34/", "https://api.example.com:0/", "https://bad%20name.example.com/", "https://bad_name.example.com/", "https://api.example.com/\n"):
             with self.subTest(url=url):

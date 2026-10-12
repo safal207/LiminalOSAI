@@ -421,7 +421,10 @@ def _resolve_public(resolver: Resolver, host: str) -> tuple[str, ...]:
         except ValueError as exc:
             raise EgressBlocked("DNS resolver returned an invalid IP address") from exc
         if (
-            address.is_private
+            # Shared address space (100.64.0.0/10), including mapped IPv6,
+            # is neither private nor reserved but is not globally reachable.
+            not address.is_global
+            or address.is_private
             or address.is_loopback
             or address.is_link_local
             or address.is_multicast

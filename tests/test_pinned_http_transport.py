@@ -85,6 +85,19 @@ class PinnedTransportTests(unittest.TestCase):
                 PinnedHTTPTransport()(transport_request(headers=headers))
         self.socket_factory.assert_not_called()
 
+    def test_non_global_shared_addresses_never_open_a_socket(self):
+        for addresses in (
+            ("100.64.0.1",),
+            ("100.100.100.200",),
+            ("::ffff:100.100.100.200",),
+            ("93.184.216.34", "100.100.100.200"),
+            ("2606:4700:4700::1111", "::ffff:100.100.100.200"),
+        ):
+            with self.subTest(addresses=addresses), self.assertRaisesRegex(EgressBlocked, "non-public address"):
+                PinnedHTTPTransport()(transport_request(resolved_ips=addresses))
+        self.socket_factory.assert_not_called()
+        self.http_factory.assert_not_called()
+
     def test_body_digest_is_verified_before_socket(self):
         with self.assertRaises(EgressBlocked):
             PinnedHTTPTransport(body_provider=lambda digest: b"wrong")(transport_request())
