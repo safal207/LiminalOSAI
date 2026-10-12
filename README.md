@@ -33,6 +33,12 @@ action budget, expiring authority and STOP gate for governed records and egress.
 The [portfolio review](docs/AGENT_CONTROL_PORTFOLIO_REVIEW.md) explains which
 mechanisms are reusable and which repositories provide diagnostics only.
 
+The [external STOP profile](docs/AGENT_CONTROL_EXTERNAL_STOP.md) keeps authority
+and permanent action consumption outside the receiver's local rollback domain.
+Its separate-process experiment restores old receiver state after STOP and
+checks actual effect counts. Unresolved permits keep STOP pending; they never
+become fresh permission through a timeout or retry.
+
 The [orientation graph](docs/AGENT_CONTROL_ORIENTATION.md) adds distinct
 per-agent observed trajectories, evidence freshness and bounded excursions
 from host-defined checkpoints. Its local timeline viewer separates pending

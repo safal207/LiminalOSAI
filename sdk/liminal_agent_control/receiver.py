@@ -7,6 +7,7 @@ an untrusted worker. The unfenced constructor option is a labeled test baseline.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import secrets
 import time
@@ -47,6 +48,7 @@ class Receiver:
         result.db_path = path
         result.broker_key, result.receipt_key = request_key, observation_key
         result.admission_controller = SessionAuthority(path, create=False)
+        result.external_controller = None
         result.authority = AuthorityStore.__new__(AuthorityStore)
         result.authority.db_path = path
         result.receiver_id = meta["receiver_id"]
@@ -54,7 +56,8 @@ class Receiver:
         return result
 
     def __init__(self, db_path: str | Path, broker_key: bytes, receipt_key: bytes, *,
-                 enforce_epoch: bool = True, admission_controller: SessionAuthority | None = None) -> None:
+                 enforce_epoch: bool = True, admission_controller: SessionAuthority | None = None,
+                 external_controller: Any = None) -> None:
         self.broker_key = require_key(broker_key)
         self.receipt_key = require_key(receipt_key)
         if self.broker_key == self.receipt_key:
@@ -64,10 +67,20 @@ class Receiver:
                     or Path(db_path).resolve() != admission_controller.db_path.resolve()):
                 raise ControlError("governed receiver requires the same authority database and epoch enforcement")
         self.admission_controller = admission_controller
+        self.external_controller = external_controller
+        if external_controller is not None:
+            from .external_authority_service import HTTPExternalAuthorityClient
+            if (not isinstance(external_controller, HTTPExternalAuthorityClient)
+                    or external_controller.role != "receiver" or admission_controller is None
+                    or not enforce_epoch):
+                raise ControlError("external receiver requires a pinned receiver client and local governed admission")
+            if external_controller.request_key in {self.broker_key, self.receipt_key}:
+                raise ControlError("external authority request key must be separate")
         self.authority = AuthorityStore(db_path)
         self.db_path = self.authority.db_path
         self.enforce_epoch = enforce_epoch
-        self.enforcement_profile = ("governed_v1" if admission_controller is not None
+        self.enforcement_profile = ("external_governed_v1" if external_controller is not None
+                                    else "governed_v1" if admission_controller is not None
                                     else "guarded" if enforce_epoch else "baseline_unfenced")
         with connect(self.db_path) as db:
             db.executescript("""
@@ -88,6 +101,40 @@ class Receiver:
             db.execute("INSERT OR IGNORE INTO receiver_meta VALUES ('enforcement_profile',?)", (self.enforcement_profile,))
             if db.execute("SELECT value FROM receiver_meta WHERE key='enforcement_profile'").fetchone()[0] != self.enforcement_profile:
                 raise ControlError("receiver enforcement profile is immutable; use a separate baseline database")
+            if external_controller is not None:
+                configuration = self._external_configuration()
+                db.execute("INSERT OR IGNORE INTO receiver_meta VALUES ('external_configuration',?)", (configuration,))
+                if db.execute("SELECT value FROM receiver_meta WHERE key='external_configuration'").fetchone()[0] != configuration:
+                    raise ControlError("external receiver configuration is immutable")
+                db.execute("""CREATE TABLE IF NOT EXISTS external_admissions (
+                    action_id TEXT PRIMARY KEY, reservation_id TEXT UNIQUE NOT NULL,
+                    action_digest TEXT NOT NULL, action_json TEXT NOT NULL, receipt_json TEXT NOT NULL
+                )""")
+
+    def _external_configuration(self) -> str:
+        client = self.external_controller
+        return canonical_bytes({"pin": client.pin(), "url": client.url,
+            "request_key_digest": hashlib.sha256(client.request_key).hexdigest(),
+            "broker_key_digest": hashlib.sha256(self.broker_key).hexdigest(),
+            "receipt_key_digest": hashlib.sha256(self.receipt_key).hexdigest()}).decode()
+
+    def _check_external_configuration(self, db: Any) -> None:
+        if self.external_controller is None or self.external_controller.role != "receiver":
+            raise ControlError("external receiver configuration is immutable")
+        row = db.execute("SELECT value FROM receiver_meta WHERE key='external_configuration'").fetchone()
+        profile = db.execute("SELECT value FROM receiver_meta WHERE key='enforcement_profile'").fetchone()
+        if (row is None or row[0] != self._external_configuration()
+                or profile is None or profile[0] != "external_governed_v1"):
+            raise ControlError("external receiver configuration is immutable")
+
+    def _external_required(self) -> bool:
+        """Choose the boundary from persisted profile, never mutable client state."""
+        with connect(self.db_path, create=False) as db:
+            row = db.execute("SELECT value FROM receiver_meta WHERE key='enforcement_profile'").fetchone()
+            required = row is not None and row[0] == "external_governed_v1"
+            if required or self.external_controller is not None:
+                self._check_external_configuration(db)
+            return required
 
     def _signed(self, body: dict[str, Any]) -> dict[str, Any]:
         return sign_document({**body, "receiver_id": self.receiver_id, "observed_at": time.time(),
@@ -121,6 +168,8 @@ class Receiver:
         return self._signed(controller.bind_execution(root_id, execution_id, parent_execution_id))
 
     def revoke(self, root_id: str) -> dict[str, Any]:
+        if self._external_required():
+            raise ControlError("external STOP requires the separate operator controller")
         if self.admission_controller is not None:
             state = self.admission_controller.stop(root_id)
             with connect(self.db_path) as db:
@@ -170,6 +219,8 @@ class Receiver:
         return receipt
 
     def accept(self, action: dict[str, Any], *, authorization: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self._external_required():
+            raise ControlError("external profile supports atomic commit only")
         action = validate_action(action)
         with connect(self.db_path) as db:
             db.execute("BEGIN IMMEDIATE")
@@ -200,6 +251,8 @@ class Receiver:
 
     def finalize(self, action_id: str) -> dict[str, Any]:
         """Complete an already accepted effect; revocation is not rollback."""
+        if self._external_required():
+            raise ControlError("external profile supports atomic commit only")
         validate_id(action_id, "action_id")
         with connect(self.db_path) as db:
             db.execute("BEGIN IMMEDIATE")
@@ -208,6 +261,8 @@ class Receiver:
 
     def commit(self, action: dict[str, Any], *, authorization: dict[str, Any] | None = None) -> dict[str, Any]:
         action = validate_action(action)
+        if self._external_required():
+            return self._external_commit(action, authorization)
         with connect(self.db_path) as db:
             db.execute("BEGIN IMMEDIATE")
             receipt = self._accept(db, action, authorization)
@@ -215,8 +270,81 @@ class Receiver:
                 receipt = self._finalize(db, action["action_id"])
         return receipt
 
+    def _external_unknown(self, action: dict[str, Any], reason: str) -> dict[str, Any]:
+        # Unknown is never an assertion that the physical effect count is zero.
+        body = self._receipt(action, "UNKNOWN", reason)
+        body["effect_count"] = None
+        return self._signed(body)
+
+    def _external_finish(self, action: dict[str, Any], reservation_id: str,
+                         receipt: dict[str, Any]) -> dict[str, Any]:
+        try:
+            result = self.external_controller.finish(reservation_id, receipt)
+            if (result.get("status") != "SETTLED" or result.get("action_digest") != digest(action)
+                    or result.get("reservation_id") != reservation_id
+                    or result.get("outcome") != receipt["status"]):
+                return self._external_unknown(action, "EXTERNAL_FINISH_UNCONFIRMED")
+        except Exception:
+            return self._external_unknown(action, "EXTERNAL_FINISH_UNAVAILABLE")
+        return receipt
+
+    def _external_commit(self, action: dict[str, Any], authorization: dict[str, Any] | None) -> dict[str, Any]:
+        """A one-shot external permit spans local acceptance and durable commit.
+
+        STOPPED cannot be acknowledged while this permit is unresolved. A lost
+        BEGIN response is query-only forever; a lost FINISH response is repaired
+        from the stored actual receipt, never by executing the action again.
+        """
+        reservation_id = None
+        try:
+            with connect(self.db_path, create=False) as db:
+                db.execute("BEGIN IMMEDIATE")
+                self._check_external_configuration(db)
+                old = db.execute("SELECT * FROM external_admissions WHERE action_id=?", (action["action_id"],)).fetchone()
+                if old is not None:
+                    if old["action_digest"] != digest(action):
+                        return self._receipt(action, "DENIED", "IDEMPOTENCY_BINDING_MISMATCH")
+                    reservation_id = old["reservation_id"]
+                    receipt = json.loads(old["receipt_json"])
+                else:
+                    permit = self.external_controller.begin(action, authorization)
+                    if permit.get("status") != "PERMITTED":
+                        if permit.get("status") in {"UNKNOWN", "CONSUMED"}:
+                            return self._external_unknown(action, permit.get("reason", "EXTERNAL_ACTION_ALREADY_CLAIMED"))
+                        return self._receipt(action, "DENIED", permit.get("reason", "EXTERNAL_ADMISSION_DENIED"))
+                    if (permit.get("action_digest") != digest(action)
+                            or permit.get("receiver_id") != self.receiver_id
+                            or any(type(permit.get(key)) is not type(action[key]) or permit.get(key) != action[key]
+                                   for key in ("action_id", "attempt_id", "root_id", "execution_id", "epoch"))):
+                        return self._external_unknown(action, "EXTERNAL_PERMIT_BINDING_MISMATCH")
+                    reservation_id = validate_id(permit.get("reservation_id"), "reservation_id")
+                    receipt = self._accept(db, action, authorization)
+                    if receipt["status"] == "ACCEPTED":
+                        receipt = self._finalize(db, action["action_id"])
+                    if receipt["status"] not in {"COMMITTED", "DENIED"}:
+                        raise ControlError("external local outcome unresolved")
+                    db.execute("INSERT INTO external_admissions VALUES (?,?,?,?,?)", (
+                        action["action_id"], reservation_id, digest(action), canonical_bytes(action).decode(),
+                        canonical_bytes(receipt).decode()))
+            # This is deliberately outside the local write transaction. A
+            # terminal external reservation must never precede the actual COMMIT.
+            return self._external_finish(action, reservation_id, receipt)
+        except Exception:
+            # The external store may already contain a permit. Never cancel it
+            # on a timeout/exception or allow another execution attempt.
+            return self._external_unknown(action, "EXTERNAL_ADMISSION_OR_COMMIT_UNAVAILABLE")
+
     def query(self, action_id: str) -> dict[str, Any]:
         validate_id(action_id, "action_id")
+        if self._external_required():
+            with connect(self.db_path, create=False) as db:
+                self._check_external_configuration(db)
+                old = db.execute("SELECT * FROM external_admissions WHERE action_id=?", (action_id,)).fetchone()
+            if old is not None:
+                return self._external_finish(json.loads(old["action_json"]), old["reservation_id"], json.loads(old["receipt_json"]))
+            # Missing local data cannot prove that an issued permit was unused.
+            return self._signed({**self._receipt(None, "UNKNOWN", "EXTERNAL_RECONCILIATION_REQUIRED", action_id=action_id),
+                                 "effect_count": None})
         with connect(self.db_path) as db:
             row = db.execute("SELECT receipt_json FROM accepted WHERE action_id=?", (action_id,)).fetchone()
         return json.loads(row[0]) if row else self._receipt(None, "UNKNOWN", "NOT_OBSERVED", action_id=action_id)
@@ -358,10 +486,22 @@ def main() -> None:
     parser.add_argument("--receipt-key-file", required=True)
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--governed", action="store_true", help="require durable session admission; sessions are created by the host")
+    parser.add_argument("--external-authority-url")
+    parser.add_argument("--external-authority-key-file")
+    parser.add_argument("--external-authority-pin-file")
     args = parser.parse_args()
+    external = None
+    options = (args.external_authority_url, args.external_authority_key_file, args.external_authority_pin_file)
+    if any(options):
+        if not args.governed or not all(options):
+            parser.error("external authority requires --governed and all three external options")
+        from .external_authority_service import HTTPExternalAuthorityClient
+        external = HTTPExternalAuthorityClient(args.external_authority_url,
+            Path(args.external_authority_key_file).read_bytes(),
+            json.loads(Path(args.external_authority_pin_file).read_text()), role="receiver")
     admission = SessionAuthority(args.db) if args.governed else None
     receiver = Receiver(args.db, Path(args.broker_key_file).read_bytes(), Path(args.receipt_key_file).read_bytes(),
-                        admission_controller=admission)
+                        admission_controller=admission, external_controller=external)
     server = make_server(receiver, port=args.port)
     host, port = server.server_address
     print(json.dumps({"host": host, "port": port, "url": f"http://{host}:{port}", "receiver_id": receiver.receiver_id}), flush=True)
