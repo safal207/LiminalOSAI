@@ -50,6 +50,13 @@ processes; process separation does not establish independent evidence sources.
 This optional profile requires the pinned dependencies in
 `experiments/agent_control/observer-requirements.txt`.
 
+The [isolated observer experiment](docs/AGENT_CONTROL_ISOLATED_OBSERVERS.md)
+generates observer keys inside separate restricted Docker containers and mounts
+only each role's read-only evidence directory. A persisted source profile binds
+each reply to a host-pinned packet and checks source freshness at later stages.
+The receiver, history and policy exports use separate collector paths; they
+remain within one trusted host's control in this experiment.
+
 ## Build
 
 - Dependencies: gcc, make, python3

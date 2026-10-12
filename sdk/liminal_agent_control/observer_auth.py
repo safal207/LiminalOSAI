@@ -49,6 +49,8 @@ def initialize_schema(db: Any) -> None:
             reason TEXT NOT NULL, revoked_at REAL NOT NULL, PRIMARY KEY(root_id,key_id))""",
     ):
         db.execute(statement)
+    from .observer_sources import initialize_schema as initialize_sources
+    initialize_sources(db)
 
 
 def _crypto() -> tuple[Any, Any]:
@@ -201,7 +203,7 @@ def _binding_reason(db: Any, request: Any, challenge: Any, auth_row: Any,
     return None
 
 
-def attestation_reason_in_transaction(db: Any, stored: Any, attestation: Any) -> str | None:
+def attestation_reason_in_transaction(db: Any, stored: Any, attestation: Any, *, now: float | None = None) -> str | None:
     if not auth_required_in_transaction(db, stored["root_id"]):
         return None
     try:
@@ -248,6 +250,10 @@ def attestation_reason_in_transaction(db: Any, stored: Any, attestation: Any) ->
             return "OBSERVER_AUTH_BINDING_MISMATCH"
         key = next(item for item in profile["keys"] if item["key_id"] == request["key_id"])
         _verify(envelope, key["public_key"])
+        from .observer_sources import evidence_reason_in_transaction
+        source_reason = evidence_reason_in_transaction(db, request, envelope, now=now, consumed_at=challenge["consumed_at"])
+        if source_reason:
+            return source_reason
     except ControlError as exc:
         return str(exc) if str(exc) in {"OBSERVER_AUTH_BINDING_MISMATCH",
             "OBSERVER_AUTH_SIGNATURE_INVALID", "OBSERVER_AUTH_CRYPTO_UNAVAILABLE"} else "OBSERVER_AUTH_BINDING_MISMATCH"
@@ -279,6 +285,10 @@ class ObserverAuthStore:
         reason = profile_reason_in_transaction(db, root_id, ring_row=ring_row, ring_profile=ring_profile)
         if reason:
             raise ControlError(reason)
+        from .observer_sources import profile_reason_in_transaction as source_profile_reason
+        source_reason = source_profile_reason(db, root_id)
+        if source_reason:
+            raise ControlError(source_reason)
         held = db.execute("SELECT reason FROM observer_ring_holds WHERE root_id=?", (root_id,)).fetchone()
         if held:
             raise ControlError(held[0])
@@ -385,6 +395,10 @@ class ObserverAuthStore:
                     or envelope["observed_at"] < request["issued_at"]
                     or envelope["observed_at"] > now or envelope["valid_until"] > request["valid_until"]):
                 raise ControlError("OBSERVER_AUTH_CHALLENGE_STALE")
+            from .observer_sources import evidence_reason_in_transaction
+            source_reason = evidence_reason_in_transaction(db, request, envelope, now=now)
+            if source_reason:
+                raise ControlError(source_reason)
             result = _attest_in_transaction(db, request["action_id"], observer_id=request["observer_id"],
                 verdict=envelope["verdict"], evidence_digest=envelope["evidence_digest"],
                 observed_at=envelope["observed_at"], valid_until=envelope["valid_until"], session=session)

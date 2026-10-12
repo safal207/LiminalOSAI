@@ -171,6 +171,11 @@ def _assessment(db: Any, action_id: str, *, now: float, root_id: str | None = No
     if auth_reason:
         result["reason"] = auth_reason
         return result
+    from .observer_sources import profile_reason_in_transaction as source_profile_reason
+    source_reason = source_profile_reason(db, root_id)
+    if source_reason:
+        result["reason"] = source_reason
+        return result
     lineage_reason = _lineage_reason(db, projection["execution_id"], row, session)
     if lineage_reason:
         result["reason"] = lineage_reason
@@ -186,7 +191,7 @@ def _assessment(db: Any, action_id: str, *, now: float, root_id: str | None = No
         except (TypeError, ValueError, KeyError):
             reasons.add("OBSERVER_RING_BINDING_MISMATCH")
             continue
-        auth_reason = attestation_reason_in_transaction(db, stored, attestation)
+        auth_reason = attestation_reason_in_transaction(db, stored, attestation, now=now)
         if auth_reason:
             result["reason"] = auth_reason
             return result
