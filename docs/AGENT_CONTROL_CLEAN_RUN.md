@@ -56,7 +56,7 @@ actual installed package list is retained as `public/dependencies.txt`.
 
 | Source | Frozen commit |
 |---|---|
-| Receiver, broker, runtime and experiments | `1b67a4d7b9cb9e3798c8a3bfc1bb2672a743f8d6` |
+| Receiver, broker, runtime and experiments | `6ae4fa26cad23346eec7b89b106a041634e68d7a` |
 | Included egress fix, verified ancestor | `91947604e71722f724878269091cabad47d56c50` |
 | Claim/evidence benchmark | `987511b23d9edad01f083c9eb218a51ef72d2ce3` |
 | CML scorer | `4046bfae936abde5d9566fded6eaaa8a302561f3` |
@@ -67,7 +67,7 @@ actual installed package list is retained as `public/dependencies.txt`.
 | Claim/evidence benchmark | 142 tests pass |
 | Deterministic local A/B/C | 33 cases; forbidden effects A=4, B=3, C=0 |
 | CML scoring of those 33 local cases | 9 PASS, 14 UNKNOWN, 10 FAIL |
-| Original and fault runtime suites, `all` only | 37 tests pass, no skips |
+| Original and fault runtime suites, `all` only | 44 tests pass, no skips |
 | Docker C integration, `all` only | Six registered cases |
 | Matched Docker queued-request A/B/C, `all` only | Three cases; late effects A=1, B=1, C=0 |
 | Registered Docker faults, `all` only | Six C-only cases; receiver/observer outage outcomes stay UNKNOWN |

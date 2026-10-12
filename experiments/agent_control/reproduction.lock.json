@@ -4,8 +4,8 @@
   "sources": {
     "control": {
       "url": "https://github.com/safal207/LiminalOSAI.git",
-      "commit": "1b67a4d7b9cb9e3798c8a3bfc1bb2672a743f8d6",
-      "tree": "d66fbdfc8325d84d7bc883738d0686e0deebe0e3"
+      "commit": "6ae4fa26cad23346eec7b89b106a041634e68d7a",
+      "tree": "93142afd7d54008247b3f21f81281d5d85506e60"
     },
     "cml": {
       "url": "https://github.com/safal207/Causal-Memory-Layer.git",
@@ -70,7 +70,7 @@
     ],
     "egress_tests": 49,
     "claims_tests": 142,
-    "runtime_tests": 37,
+    "runtime_tests": 44,
     "docker_c_cases": 6,
     "docker_c_scenarios": [
       "honest",

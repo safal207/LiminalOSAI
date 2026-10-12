@@ -134,6 +134,15 @@ operation time remain host measurements, separate from worker claims.
 
 ## Supervisor restart and explicit recovery
 
+An owned process may exit between Docker `inspect` and `top`. After a failed or
+empty process query, the controller permits one fresh inspection of the same
+pinned object. Its ID, image and ownership labels must match, and its state must
+positively show `Running=False`, `Paused=False` and integer `Pid=0`. Missing,
+unavailable, replaced or still-running objects remain observer failures.
+Bounded attempt codes/times are retained; a failed earlier query is not erased
+by a later observation. This resolves a reproduced exit interleaving, without
+inferring absence from elapsed time.
+
 The host-only SQLite supervisor registry records one active workload before
 Docker creation, including its root, plan, image, ownership labels and trusted
 key-context fingerprints. It is
