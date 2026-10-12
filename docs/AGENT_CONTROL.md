@@ -133,7 +133,8 @@ operation time remain host measurements, separate from worker claims.
 ## Supervisor restart and explicit recovery
 
 The host-only SQLite supervisor registry records one active workload before
-Docker creation, including its root, plan, image and ownership labels. It is
+Docker creation, including its root, plan, image, ownership labels and trusted
+key-context fingerprints. It is
 stored next to the broker database by default and is never mounted into the
 worker. An exclusive host lease prevents a second live controller or recovery
 call from taking the same slot.
@@ -154,11 +155,28 @@ reports include `runtime_wall_seconds` and observer/dispatch durations under
 estimate.
 
 Recovery verifies the recorded container identity, ownership labels and image
-before freeze/revoke/termination. `RECOVERED` or `EMPTY` permits a new launch;
+before freeze/revoke/termination. Starting and removing a confirmed container
+use its recorded immutable ID. `RECOVERED` or `EMPTY` permits a new launch;
 `BUSY` or `INCOMPLETE` does not. A missing container still requires authenticated
 root revocation before the slot is closed. Recovery does not infer ownership
 from a name alone or clean up unrelated containers. Broker UNKNOWN outcomes
 remain available for separate receiver reconciliation.
+
+Launch phases are durable: `REGISTERED`, `CREATE_PENDING`, then `CREATED` after
+positive ownership and immutable-ID observation. If the supervisor crashes or
+Docker times out before creation is confirmed, instantaneous absence does not
+prove an orphan CLI/daemon request cannot finish later. Recovery still revokes
+the root, but keeps that slot `INCOMPLETE`, with `CREATE_OUTCOME_UNCONFIRMED` and
+no zero-survivor conclusion. Repeat explicit recovery once the owned object is
+observable. An unconfirmed object that never appears requires separate trusted
+operator reconciliation; this API does not clear it by a timeout heuristic.
+Historical registry rows without creation evidence also remain unconfirmed.
+
+Reopening the same database with changed request/receipt keys is a context
+mismatch and cannot close the slot. Registry fingerprints contain no raw keys;
+changing keys is not an implicit recovery authorization.
+Older records without this key binding require trusted operator reconciliation;
+the migration does not invent their original verification context.
 
 Receiver-backed recovery requires the authenticated `guarded` receiver profile.
 The intentionally unenforced A/B baseline profile returns `INCOMPLETE` with

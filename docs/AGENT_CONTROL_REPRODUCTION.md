@@ -58,6 +58,9 @@ NOT_RUN, UNAVAILABLE or INCOMPLETE, plus an evidence reference.
 - After killing the owned supervisor, does its workload remain registered and
   block fresh admission until authenticated revocation and termination? Does
   recovery reject a live controller, replacement receiver or mismatched owner?
+- If the supervisor dies while `docker create` is pending, can a delayed
+  object appear after recovery? Does unconfirmed creation keep the slot blocked
+  until positive owned-object reconciliation? Can changed keys reopen it?
 - Does each worker proposal require a fresh bounded host observation, with
   observer failure closing admission before broker dispatch?
 - Does a broken receiver make every "blocked" test appear successful?

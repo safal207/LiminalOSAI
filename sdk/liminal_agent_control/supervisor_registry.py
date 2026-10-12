@@ -48,11 +48,19 @@ class SupervisorRegistry:
                 CREATE TABLE IF NOT EXISTS workloads (
                     session_id TEXT PRIMARY KEY, slot INTEGER NOT NULL DEFAULT 1 CHECK(slot=1),
                     status TEXT NOT NULL CHECK(status IN ('REGISTERED','CLOSED')),
-                    record_json TEXT NOT NULL, completion_json TEXT
+                    record_json TEXT NOT NULL, completion_json TEXT,
+                    launch_phase TEXT NOT NULL DEFAULT 'REGISTERED', container_id TEXT
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS one_unfinished_workload ON workloads(slot)
                     WHERE status != 'CLOSED';
             """)
+            # Old rows have no positive create-completion evidence. Migration
+            # must retain them as unresolved rather than infer absence is safe.
+            columns = {row[1] for row in db.execute("PRAGMA table_info(workloads)")}
+            if "launch_phase" not in columns:
+                db.execute("ALTER TABLE workloads ADD COLUMN launch_phase TEXT NOT NULL DEFAULT 'REGISTERED'")
+            if "container_id" not in columns:
+                db.execute("ALTER TABLE workloads ADD COLUMN container_id TEXT")
             db.execute("INSERT OR IGNORE INTO supervisor_meta VALUES ('registry_id',?)", (uuid.uuid4().hex,))
             self.registry_id = db.execute("SELECT value FROM supervisor_meta WHERE key='registry_id'").fetchone()[0]
         self.path.chmod(0o600)
@@ -121,15 +129,55 @@ class SupervisorRegistry:
                        (session_id, json.dumps(record, sort_keys=True)))
         return record
 
+    def launch_state(self, record: dict) -> dict:
+        with self._connect() as db:
+            row = db.execute("SELECT record_json,launch_phase,container_id FROM workloads WHERE session_id=? AND status='REGISTERED'",
+                             (record["session_id"],)).fetchone()
+        if row is None or json.loads(row["record_json"]) != record:
+            raise RegistryError("REGISTRY_BINDING_MISMATCH")
+        return {"phase": row["launch_phase"], "container_id": row["container_id"]}
+
+    def mark_create_pending(self, record: dict) -> None:
+        """Persist uncertainty before the first possible Docker create request."""
+        self._require_lease()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT record_json,launch_phase FROM workloads WHERE session_id=? AND status='REGISTERED'",
+                             (record["session_id"],)).fetchone()
+            if row is None or json.loads(row["record_json"]) != record or row["launch_phase"] != "REGISTERED":
+                raise RegistryError("REGISTRY_BINDING_MISMATCH")
+            db.execute("UPDATE workloads SET launch_phase='CREATE_PENDING' WHERE session_id=?", (record["session_id"],))
+
+    def confirm_created(self, record: dict, container_id: str) -> None:
+        """Trusted host hook after positive ownership/immutable-ID observation.
+
+        CLI exit or timeout cannot call this: a lost response does not prove
+        that a daemon-side create is absent or cancelled.
+        """
+        self._require_lease()
+        if type(container_id) is not str or not _SHA256.fullmatch(container_id):
+            raise RegistryError("IMMUTABLE_CONTAINER_ID_UNAVAILABLE")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT record_json,container_id FROM workloads WHERE session_id=? AND status='REGISTERED'",
+                             (record["session_id"],)).fetchone()
+            if (row is None or json.loads(row["record_json"]) != record
+                    or row["container_id"] not in (None, container_id)):
+                raise RegistryError("REGISTRY_BINDING_MISMATCH")
+            db.execute("UPDATE workloads SET launch_phase='CREATED',container_id=? WHERE session_id=?",
+                       (container_id, record["session_id"]))
+
     def complete(self, record: dict, evidence: dict) -> None:
         self._require_lease()
         if evidence.get("verified") is not True or evidence.get("zero_survivors") is not True:
             raise RegistryError("RECOVERY_INCOMPLETE")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT record_json FROM workloads WHERE session_id=? AND status='REGISTERED'",
+            row = db.execute("SELECT record_json,launch_phase FROM workloads WHERE session_id=? AND status='REGISTERED'",
                              (record["session_id"],)).fetchone()
             if row is None or json.loads(row[0]) != record:
                 raise RegistryError("REGISTRY_BINDING_MISMATCH")
+            if row["launch_phase"] != "CREATED":
+                raise RegistryError("CREATE_OUTCOME_UNCONFIRMED")
             db.execute("UPDATE workloads SET status='CLOSED',completion_json=? WHERE session_id=?",
                        (json.dumps({"completed_at": time.time(), "evidence": evidence}, sort_keys=True), record["session_id"]))

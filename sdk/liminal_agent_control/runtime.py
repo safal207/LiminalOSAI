@@ -261,9 +261,24 @@ class DockerController:
         self.docker_binary = docker_binary
         self.process_evidence: dict[str, dict] = {}
         self.owned_sessions: dict[str, dict] = {}
+        self.owned_container_ids: dict[str, str] = {}
+        self.on_created: Any = None
 
     def bind_ownership(self, record: dict) -> None:
         self.owned_sessions[record["session_id"]] = json.loads(json.dumps(record))
+
+    def bind_container_id(self, session_id: str, container_id: str) -> None:
+        if type(container_id) is not str or not re.fullmatch(r"[0-9a-f]{64}", container_id):
+            raise RuntimeBoundaryError("IMMUTABLE_CONTAINER_ID_UNAVAILABLE")
+        self.owned_container_ids[session_id] = container_id
+
+    def owned_container_id(self, session_id: str) -> str:
+        observed = self._inspect(session_id)
+        if observed is None:
+            raise RuntimeBoundaryError("CREATED_CONTAINER_MISSING")
+        container_id = observed.get("Id")
+        self.bind_container_id(session_id, container_id)
+        return container_id
 
     def command(self, args: list[str], *, timeout: float = 10) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -281,7 +296,10 @@ class DockerController:
         return image
 
     def _inspect(self, session_id: str) -> dict | None:
-        result = self.command(["inspect", session_id])
+        # Names are only a discovery handle before create confirmation. A
+        # rename or reused name cannot establish absence of the pinned object.
+        lookup_id = self.owned_container_ids.get(session_id, session_id)
+        result = self.command(["inspect", lookup_id])
         if result.returncode:
             # Daemon outage, permission and timeout are not proof of absence.
             message = result.stderr.decode(errors="replace").lower()
@@ -294,11 +312,20 @@ class DockerController:
                 raise ValueError
             value = objects[0]
             expected = self.owned_sessions.get(session_id)
+            pinned_id = self.owned_container_ids.get(session_id)
+            if pinned_id is not None and value.get("Id") != pinned_id:
+                raise RuntimeBoundaryError("CONTAINER_OWNERSHIP_MISMATCH")
             if expected is not None:
                 labels = value.get("Config", {}).get("Labels", {}) or {}
                 if (value.get("Image") != expected["image_id"]
                         or any(labels.get(key) != val for key, val in ownership_labels(expected).items())):
                     raise RuntimeBoundaryError("CONTAINER_OWNERSHIP_MISMATCH")
+                if pinned_id is None and self.on_created is not None:
+                    container_id = value.get("Id")
+                    if type(container_id) is not str or not re.fullmatch(r"[0-9a-f]{64}", container_id):
+                        raise RuntimeBoundaryError("IMMUTABLE_CONTAINER_ID_UNAVAILABLE")
+                    self.on_created(container_id)
+                    self.bind_container_id(session_id, container_id)
             return value
         except (ValueError, TypeError) as exc:
             if isinstance(exc, RuntimeBoundaryError):
@@ -316,7 +343,7 @@ class DockerController:
         process_evidence: list = []
         descendants = 0
         if running:
-            result = self.command(["top", session_id])
+            result = self.command(["top", self.owned_container_ids.get(session_id, session_id)])
             if result.returncode:
                 raise RuntimeBoundaryError("PROCESS_OBSERVATION_UNAVAILABLE")
             rows = result.stdout.decode(errors="strict").strip().splitlines()
@@ -477,7 +504,13 @@ def contain_process_workload(supervisor: ProcessTreeSupervisor, controller: Any,
 
 
 def _broker_context(broker: Any) -> str:
-    return canonical_sha256({"broker_db_path": str(Path(broker.db_path).resolve())})
+    fingerprints = {}
+    for name in ("broker_key", "receipt_key"):
+        key = getattr(broker.receiver, name, None)
+        if type(key) is not bytes or len(key) < 32:
+            raise RuntimeBoundaryError("RECOVERY_KEY_CONTEXT_UNAVAILABLE")
+        fingerprints[name + "_sha256"] = hashlib.sha256(key).hexdigest()
+    return canonical_sha256({"broker_db_path": str(Path(broker.db_path).resolve()), **fingerprints})
 
 
 def _register_durable(registry: SupervisorRegistry, controller: DockerController, plan: IsolatedExecutionPlan,
@@ -490,7 +523,28 @@ def _register_durable(registry: SupervisorRegistry, controller: DockerController
                                backend_identity_sha256=canonical_sha256({"backend": "docker", "image_id": plan.image_id}),
                                receiver_id=identity["receiver_id"], broker_context_sha256=_broker_context(broker))
     controller.bind_ownership(record)
+    controller.on_created = lambda container_id: registry.confirm_created(record, container_id)
     return record
+
+
+def _confirm_create_if_observed(registry: SupervisorRegistry, record: dict,
+                                controller: DockerController) -> None:
+    """Positive owned-object evidence can settle an uncertain create result."""
+    if registry.launch_state(record)["phase"] == "CREATED":
+        return
+    container_id = controller.owned_container_id(record["session_id"])
+    registry.confirm_created(record, container_id)
+
+
+def _retain_unconfirmed_create(containment: dict) -> None:
+    # Instantaneous absence does not prove an orphan CLI/daemon request cannot
+    # finish later. Keep the raw observation but never release the durable slot.
+    containment["observed_absent_at_cleanup"] = containment.get("zero_survivors") is True
+    containment["zero_survivors"] = False
+    containment["verified"] = False
+    containment["t_quiescent"] = None
+    if "CREATE_OUTCOME_UNCONFIRMED" not in containment["partial_failures"]:
+        containment["partial_failures"].append("CREATE_OUTCOME_UNCONFIRMED")
 
 
 def recover_workloads(registry_path: str | Path, *, broker: Any, docker_binary: str = "docker") -> dict:
@@ -521,8 +575,15 @@ def recover_workloads(registry_path: str | Path, *, broker: Any, docker_binary: 
                         or record["registry_id"] != registry.registry_id):
                     raise RuntimeBoundaryError("RECOVERY_CONTEXT_MISMATCH")
                 controller.bind_ownership(record)
+                launch = registry.launch_state(record)
+                if launch["container_id"] is not None:
+                    controller.bind_container_id(record["session_id"], launch["container_id"])
+                controller.on_created = lambda container_id: registry.confirm_created(record, container_id)
                 # Ownership is verified before any freeze/terminate operation.
                 before = controller.inspect_session(record["session_id"])
+                if before["exists"] and launch["phase"] != "CREATED":
+                    _confirm_create_if_observed(registry, record, controller)
+                    launch = registry.launch_state(record)
                 supervisor = ProcessTreeSupervisor(inspect_session=controller.inspect_session,
                                                    freeze_session=controller.freeze_session,
                                                    terminate_session=controller.terminate_session)
@@ -531,6 +592,9 @@ def recover_workloads(registry_path: str | Path, *, broker: Any, docker_binary: 
                                             backend_identity_sha256=record["backend_identity_sha256"])
                 contained = contain_workload(supervisor, controller, session_id=record["session_id"],
                                              broker=broker, root_id=record["root_id"])
+                launch = registry.launch_state(record)
+                if launch["phase"] != "CREATED":
+                    _retain_unconfirmed_create(contained)
                 report["recovered"].append({"session_id": record["session_id"], "root_id": record["root_id"],
                                             "before": before, "containment": contained})
                 if not contained["verified"]:
@@ -561,13 +625,17 @@ def _managed_runtime(broker: Any, registry_path: str | Path | None, metadata: di
 
 
 def _finish_registry(registry: SupervisorRegistry, record: dict, containment: dict, bridge: WorkerBridge) -> dict:
+    launch = registry.launch_state(record)
+    if launch["phase"] != "CREATED":
+        _retain_unconfirmed_create(containment)
     fenced = containment.get("revocation_ack") is not None
     callbacks_finished = all(not call.thread.is_alive() for call in bridge.dispatch_calls)
     complete = containment.get("verified") is True and (fenced or callbacks_finished)
     if complete:
         registry.complete(record, containment)
     return {"session_id": record["session_id"], "registry_id": registry.registry_id,
-            "registered_at": record["registered_at"], "status": "CLOSED" if complete else "RECOVERY_REQUIRED"}
+            "registered_at": record["registered_at"], "launch": launch,
+            "status": "CLOSED" if complete else "RECOVERY_REQUIRED"}
 
 
 def _admission_report(bridge: WorkerBridge) -> dict:
@@ -885,10 +953,12 @@ def _run_matched_arm(arm: str, *, image: str, broker_db_path: str | Path, receiv
             for key, value in ownership_labels(record).items():
                 image_index = argv.index(image)
                 argv[image_index:image_index] = ["--label", f"{key}={value}"]
+            registry.mark_create_pending(record)
             if controller.command(argv[1:]).returncode:
                 raise RuntimeBoundaryError("CONTAINER_CREATE_FAILED")
+            _confirm_create_if_observed(registry, record, controller)
             controller.verify_configuration(session_id, plan)
-            process = subprocess.Popen([docker_binary, "start", "--attach", "--interactive", session_id],
+            process = subprocess.Popen([docker_binary, "start", "--attach", "--interactive", controller.owned_container_ids[session_id]],
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        shell=False, bufsize=0)
             report["protocol"] = _exchange(process, bridge, timeout_seconds)
@@ -900,6 +970,10 @@ def _run_matched_arm(arm: str, *, image: str, broker_db_path: str | Path, receiv
             report["status"] = "UNKNOWN" if bridge.dispatch_unresolved else "ERROR"
             report["reason"] = str(exc) if isinstance(exc, RuntimeBoundaryError) else type(exc).__name__
         finally:
+            try:
+                _confirm_create_if_observed(registry, record, controller)
+            except Exception:
+                pass  # Unconfirmed creation stays durable and blocks admission.
             # Aborts an unreleased queue; it does not cancel a request already
             # handed to the receiver. A late callback stays externally scored.
             if not queue.release.is_set():
@@ -939,6 +1013,9 @@ def _run_matched_arm(arm: str, *, image: str, broker_db_path: str | Path, receiv
                 report["reason"] = "CONTAINMENT_PARTIAL_FAILURE"
             report["admission_guard"] = _admission_report(bridge)
             report["supervisor_registry"] = _finish_registry(registry, record, report["containment"], bridge)
+            if not report["containment"]["verified"]:
+                report["status"] = "UNKNOWN" if bridge.dispatch_unresolved else "ERROR"
+                report["reason"] = "CONTAINMENT_PARTIAL_FAILURE"
     return report
 
 
@@ -1024,9 +1101,11 @@ def _run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int,
             for key, value in ownership_labels(record).items():
                 image_index = argv.index(image)
                 argv[image_index:image_index] = ["--label", f"{key}={value}"]
+            registry.mark_create_pending(record)
             created = controller.command(argv[1:])
             if created.returncode:
                 raise RuntimeBoundaryError("CONTAINER_CREATE_FAILED")
+            _confirm_create_if_observed(registry, record, controller)
             controller.verify_configuration(session_id, plan)
             if fixture in POST_REVOKE:
                 prior_revoke = BoundedHostCall(lambda: _revoke(broker, action["root_id"]), name="liminal-prior-revocation")
@@ -1034,7 +1113,7 @@ def _run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int,
                     report["prior_revocation_ack"] = prior_revoke.result_before(time.monotonic() + 3)
                 finally:
                     report["prior_revocation_call"] = prior_revoke.observation()
-            process = subprocess.Popen([docker_binary, "start", "--attach", "--interactive", session_id],
+            process = subprocess.Popen([docker_binary, "start", "--attach", "--interactive", controller.owned_container_ids[session_id]],
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        shell=False, bufsize=0)
             report["protocol"] = _exchange(process, bridge, timeout_seconds)
@@ -1044,6 +1123,10 @@ def _run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int,
             report["status"] = "UNKNOWN" if bridge.dispatch_unresolved else "ERROR"
             report["reason"] = str(exc) if isinstance(exc, RuntimeBoundaryError) else type(exc).__name__
         finally:
+            try:
+                _confirm_create_if_observed(registry, record, controller)
+            except Exception:
+                pass  # Unconfirmed creation stays durable and blocks admission.
             if registered:
                 report["containment"] = contain_workload(supervisor, controller, session_id=session_id,
                                                        broker=broker, root_id=action["root_id"])
@@ -1077,4 +1160,7 @@ def _run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int,
                     report["reason"] = "DESCENDANT_NOT_OBSERVED"
             report["admission_guard"] = _admission_report(bridge)
             report["supervisor_registry"] = _finish_registry(registry, record, report["containment"], bridge)
+            if not report["containment"]["verified"]:
+                report["status"] = "UNKNOWN" if bridge.dispatch_unresolved else "ERROR"
+                report["reason"] = "CONTAINMENT_PARTIAL_FAILURE"
     return report

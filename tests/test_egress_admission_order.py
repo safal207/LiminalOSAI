@@ -141,6 +141,34 @@ class AdmissionOrderTests(unittest.TestCase):
         self.assertEqual(gateway.broker.state_document()["capabilities"][0]["use_count"], 1)
         self.assertEqual(gateway.receipts(), ())
 
+    def test_non_global_shared_addresses_block_secrets_and_transport(self):
+        for addresses in (
+            ("100.64.0.1",),
+            ("100.100.100.200",),
+            ("::ffff:100.100.100.200",),
+            ("93.184.216.34", "100.100.100.200"),
+            ("2606:4700:4700::1111", "::ffff:100.100.100.200"),
+        ):
+            with self.subTest(addresses=addresses):
+                def resolver(host):
+                    self.calls.append(("dns", host))
+                    return addresses
+                gateway = self.gateway(cap=capability(max_uses=1), resolver=resolver)
+                with self.assertRaisesRegex(EgressBlocked, "non-public address"):
+                    gateway.execute(request(secret_refs={"authorization": "secret:test"}))
+                self.assertEqual(self.calls, [("dns", "api.example.com")])
+                self.assertEqual(gateway.broker.state_document()["capabilities"][0]["use_count"], 1)
+                self.assertEqual(gateway.receipts(), ())
+
+    def test_global_ipv4_and_ipv6_remain_admissible(self):
+        for addresses in (("93.184.216.34",), ("2606:4700:4700::1111",)):
+            with self.subTest(addresses=addresses):
+                gateway = self.gateway(resolver=lambda host: addresses)
+                result = gateway.execute(request())
+                self.assertEqual(result["decision"], "ALLOW")
+                self.assertEqual(self.calls[0][0], "transport")
+                self.assertEqual(self.calls[0][1].resolved_ips, addresses)
+
     def test_initial_and_redirect_ip_literals_and_malformed_names_never_resolve(self):
         for url in ("https://93.184.216.34/", "https://api.example.com:0/", "https://bad%20name.example.com/", "https://bad_name.example.com/", "https://api.example.com/\n"):
             with self.subTest(url=url):
@@ -245,6 +273,22 @@ class AdmissionOrderTests(unittest.TestCase):
         gateway = self.gateway(broker=broker)
         result = gateway.execute(request(secret_refs={"authorization": "secret:test"}))
         self.assertEqual(result["decision"], "ALLOW")
+        self.assertEqual(broker.state_document()["capabilities"][0]["use_count"], 1)
+
+    def test_epoch_bound_broker_rechecks_expiry_at_second_clock_read(self):
+        from sdk.liminal_epoch_bound_capability import EpochBoundCapabilityBroker, EpochBoundCapabilityContract
+        from tests.test_epoch_bound_capability import FakeRuntimeProvider
+        provider = FakeRuntimeProvider()
+        broker = EpochBoundCapabilityBroker(runtime_provider=provider)
+        broker.admit(EpochBoundCapabilityContract.build(
+            base_capability=capability(max_uses=1, expires_at_unix=200).as_document(),
+            runtime_epoch=provider.epoch, runtime_state_sha256=provider.state).as_document(), at_unix=105)
+        readings = iter((198, 199, 200))
+        gateway = self.gateway(broker=broker, clock=lambda: next(readings, 200))
+        with self.assertRaisesRegex(EgressBlocked, "expired"):
+            gateway.execute(request(secret_refs={"authorization": "secret:test"}))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(gateway.receipts(), ())
         self.assertEqual(broker.state_document()["capabilities"][0]["use_count"], 1)
 
 
