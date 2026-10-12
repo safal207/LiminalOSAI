@@ -8,6 +8,11 @@ want to take, work in a fork, and link a focused draft PR. Questions, failing
 tests, fixes and honest negative reproduction reports are useful contributions.
 English and Russian are welcome. Repository write access is not required.
 
+For a complete frozen fixture run, use the
+[clean reproduction guide / запуск с нуля](AGENT_CONTROL_CLEAN_RUN.md).
+It fetches the required source revisions and keeps private verification inputs
+separate from publishable evidence.
+
 | Your interest | Starting point |
 |---|---|
 | Python / offline testing | [DNS admission regression #196](https://github.com/safal207/LiminalOSAI/issues/196) |

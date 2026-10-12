@@ -4,12 +4,18 @@ Copy this template into your review artifact. Replace placeholders with actual
 observations. Keep NOT_RUN and failures; a successful implementation verdict is
 not required to complete an independent review.
 
+The [clean reproduction guide / запуск с нуля](AGENT_CONTROL_CLEAN_RUN.md)
+provides the launcher command. Record its exact revision separately from the
+frozen experiment commits; attach only its `public/` directory.
+
 ## Identity and independence
 
 - Reviewer:
 - Date and timezone:
 - Involvement in the implementation:
 - Repository and exact commit SHA:
+- Launcher revision and lock digest, if used:
+- Selected launcher profile (`local` / `all`), if used:
 - Worktree clean / dirty (relevant changes):
 - Python, OS/kernel and architecture:
 - Docker client/server versions, if used:

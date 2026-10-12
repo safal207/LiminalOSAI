@@ -68,6 +68,7 @@ PYTHON_TESTS := \
 	tests/test_agent_control_runtime.py \
 	tests/test_agent_control_supervisor_registry.py \
 	tests/test_agent_control_evaluation.py \
+	tests/test_agent_control_reproduction.py \
 	tests/test_trace_visualizer.py \
 	tests/test_pulse_kernel_cli.py \
 	tests/test_trcp_simulator.py \

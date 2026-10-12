@@ -11,6 +11,7 @@ on:
       - 'adapters/docker/**'
       - 'tests/test_agent_control*'
       - 'scripts/run_agent_control_docker.py'
+      - 'scripts/reproduce_agent_control.py'
       - 'experiments/agent_control/**'
       - 'docs/AGENT_CONTROL*'
       - '.github/workflows/agent-control.yml'
@@ -150,4 +151,24 @@ jobs:
         with:
           name: agent-control-docker-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/agent-control-docker/
+          if-no-files-found: warn
+
+  reproduction:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Fresh frozen sources, hash-pinned dependencies and required Docker
+        run: |
+          python3 scripts/reproduce_agent_control.py \
+            --destination "$RUNNER_TEMP/agent-control-reproduction" \
+            --profile all --pull-image
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-reproduction-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-reproduction/public/
           if-no-files-found: warn
