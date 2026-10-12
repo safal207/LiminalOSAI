@@ -22,6 +22,46 @@ permissions:
   contents: read
 
 jobs:
+  brakes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Durable shared authority, adapters and process-death tests
+        run: >-
+          python3 -m unittest
+          tests/test_agent_control_brakes_store.py
+          tests/test_agent_control_brakes_receiver.py
+          tests/test_agent_control_brakes_egress.py
+          tests/test_agent_control_brakes_watchdog.py -v
+      - name: Execute shared records and egress example at this revision
+        run: |
+          python3 -m liminal_agent_control.brakes_demo --output "$RUNNER_TEMP/agent-control-brakes/report.json"
+          python3 - "$RUNNER_TEMP/agent-control-brakes/report.json" <<'PY'
+          import json, os, sys
+          from liminal_agent_control.multi_agent import _source_digests
+          report = json.load(open(sys.argv[1]))
+          assert report['passed'] is True
+          assert report['source']['commit'] == os.environ['EXPECTED_SOURCE_SHA']
+          assert report['source']['dirty'] is False
+          assert report['source_digests'] == _source_digests()
+          assert [case['case_id'] for case in report['cases']] == ['shared_budget', 'shared_stop']
+          assert all(all(case['checks'].values()) for case in report['cases'])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-brakes-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-brakes/
+          if-no-files-found: warn
+
   multi-agent:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -164,7 +204,8 @@ jobs:
       - name: Real container lifecycle, descendants and negative cases
         env:
           LIMINAL_AGENT_CONTROL_RECOVERY_EVIDENCE: ${{ runner.temp }}/agent-control-docker/supervisor-recovery.json
-        run: python3 -m unittest tests/test_agent_control_runtime.py tests/test_agent_control_fault_runtime.py -v
+          LIMINAL_AGENT_CONTROL_WATCHDOG_EVIDENCE: ${{ runner.temp }}/agent-control-docker/independent-watchdog.json
+        run: python3 -m unittest tests/test_agent_control_runtime.py tests/test_agent_control_fault_runtime.py tests/test_agent_control_brakes_watchdog.py -v
       - name: Separate receiver process and worker container
         run: |
           python3 scripts/run_agent_control_docker.py \

@@ -501,7 +501,31 @@ def _contain_workload(supervisor: ProcessTreeSupervisor, controller: Any, *, ses
                       root_id: str | None = None, revoke_timeout_seconds: float = 3.0) -> dict:
     """Best-effort termination persists even if freeze/revocation/observation fails."""
     started = time.monotonic()
+    decision_at = time.time()
     failures: list[str] = []
+    local_fence = None
+    fenced_at = None
+    revoked = None
+    revoked_at = None
+    revocation_call = None
+    if broker is not None:
+        # Local admission closes before any potentially unavailable observer,
+        # Docker daemon, or receiver callback. This cannot cancel requests that
+        # have already left the broker; their receiver still needs revocation.
+        try:
+            local_fence = broker.fence(root_id)
+            if (type(local_fence) is not dict or local_fence.get("status") != "FENCED"
+                    or local_fence.get("root_id") != root_id or local_fence.get("broker_fenced") is not True):
+                raise RuntimeBoundaryError("LOCAL_FENCE_UNVERIFIED")
+            fenced_at = time.time()
+        except Exception:
+            failures.append("LOCAL_FENCE_UNVERIFIED")
+        revocation_call = BoundedHostCall(lambda: _revoke(broker, root_id), name="liminal-broker-revocation")
+        try:
+            revoked = revocation_call.result_before(time.monotonic() + revoke_timeout_seconds)
+            revoked_at = time.time()
+        except Exception:
+            failures.append("REVOCATION_UNVERIFIED")
     pre_stop = None
     process_evidence = None
     try:
@@ -513,16 +537,6 @@ def _contain_workload(supervisor: ProcessTreeSupervisor, controller: Any, *, ses
     freeze = supervisor.freeze_all()
     if freeze["failure_codes"]:
         failures.append("FREEZE_INCOMPLETE")
-    revoked = None
-    revoked_at = None
-    revocation_call = None
-    if broker is not None:
-        revocation_call = BoundedHostCall(lambda: _revoke(broker, root_id), name="liminal-broker-revocation")
-        try:
-            revoked = revocation_call.result_before(time.monotonic() + revoke_timeout_seconds)
-            revoked_at = time.time()
-        except Exception:
-            failures.append("REVOCATION_UNVERIFIED")
     quiescence = supervisor.quiesce_all(incident_id="stop:" + session_id)
     if not quiescence["zero_survivors"]:
         failures.append("QUIESCENCE_INCOMPLETE")
@@ -544,6 +558,7 @@ def _contain_workload(supervisor: ProcessTreeSupervisor, controller: Any, *, ses
         "pre_stop_observation": pre_stop, "pre_stop_process_evidence": process_evidence,
         "revocation_call": revocation_call.observation() if revocation_call else None,
         "authority_revocation_requested": broker is not None,
+        "local_fence": local_fence, "t_stop_decision": decision_at, "t_local_fenced": fenced_at,
         "t_revoke_ack": revoked_at, "t_quiescent": time.time() if absent else None,
         "revocation_wait_limit_seconds": revoke_timeout_seconds,
         "zero_survivors": absent, "partial_failures": failures,
@@ -609,7 +624,8 @@ def _retain_unconfirmed_create(containment: dict) -> None:
         containment["partial_failures"].append("CREATE_OUTCOME_UNCONFIRMED")
 
 
-def recover_workloads(registry_path: str | Path, *, broker: Any, docker_binary: str = "docker") -> dict:
+def recover_workloads(registry_path: str | Path, *, broker: Any, docker_binary: str = "docker",
+                      expected_root_id: str | None = None) -> dict:
     """Explicit trusted-host recovery after a known controller failure.
 
     Never called automatically on startup. The exclusive lease rejects a live
@@ -623,12 +639,14 @@ def recover_workloads(registry_path: str | Path, *, broker: Any, docker_binary: 
             pending = registry.unfinished()
             if not pending:
                 return {**report, "status": "EMPTY", "admission_allowed": True}
+            if expected_root_id is not None and any(record["root_id"] != expected_root_id for record in pending):
+                return {**report, "reason": "RECOVERY_ROOT_MISMATCH"}
             if shutil.which(docker_binary) is None:
                 return {**report, "reason": "DOCKER_RUNTIME_UNAVAILABLE"}
             identity = broker.receiver.identity()
             if not broker.receiver.verify_receipt(identity) or identity.get("status") != "IDENTITY":
                 raise RuntimeBoundaryError("RECEIVER_IDENTITY_UNVERIFIED")
-            if identity.get("enforcement_profile") != "guarded":
+            if identity.get("enforcement_profile") not in {"guarded", "governed_v1"}:
                 raise RuntimeBoundaryError("RECOVERY_REQUIRES_GUARDED_RECEIVER")
             controller = DockerController(docker_binary)
             for record in pending:
