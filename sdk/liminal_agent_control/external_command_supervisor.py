@@ -692,18 +692,33 @@ class ExternalCommandSupervisor:
 
     def inventory(self) -> dict:
         with self._lock:
-            commands = self._commands()
+            # Callback completion is intentionally written outside this host
+            # lock. One SQLite read transaction fixes a common snapshot before
+            # projecting top-level grants, command stages and callback census.
+            # Separate reads could otherwise mix INFLIGHT with FINISHED for the
+            # same action and produce internally inconsistent public evidence.
+            with self._connection() as db:
+                db.execute("BEGIN")
+                grants = [json.loads(row[0]) for row in db.execute(
+                    "SELECT state_json FROM command_supervisor_grants ORDER BY action_id")]
+                commands = [json.loads(row[0]) for row in db.execute(
+                    "SELECT state_json FROM command_supervisor_commands ORDER BY command_id")]
+                evidence = [json.loads(row[0]) for row in db.execute(
+                    "SELECT packet_json FROM command_supervisor_evidence ORDER BY sequence")]
             for command in commands:
-                command["stages"] = self._stages(command["command_id"])
+                command["stages"] = sorted([state for state in grants
+                    if state["action"]["arguments"]["spec"]["command_id"] == command["command_id"]
+                    and state["reservation_id"] is not None],
+                    key=lambda state: (state["action"]["arguments"]["stage"] != "CREATE", state["action"]["action_id"]))
                 command["callbacks_finished"] = bool(command["stages"]) and all(
                     state["callback_phase"] == "FINISHED" for state in command["stages"])
-                command["callback_journal"] = self._callbacks(command["command_id"])
+                command["callback_journal"] = [{"action_id": state["action"]["action_id"],
+                    "stage": state["action"]["arguments"]["stage"], "phase": state["callback_phase"],
+                    "result": state["callback_result"]} for state in command["stages"]]
                 command["observation_digest"] = digest({"observations": command["observations"],
                                                          "callbacks": command["callback_journal"]})
-            with self._connection() as db:
-                evidence = [json.loads(row[0]) for row in db.execute("SELECT packet_json FROM command_supervisor_evidence ORDER BY sequence")]
             return {"profile": COMMAND_PROFILE, "supervisor_pin": self.pin(), "authority_pin": self.authority_client.pin(),
-                "commands": commands, "grants": self._grants(), "authority_evidence": evidence,
+                "commands": commands, "grants": grants, "authority_evidence": evidence,
                 "unfinished_registry": self.registry.unfinished(), "execution_authorized": False}
 
     def close(self) -> None:

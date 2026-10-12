@@ -508,6 +508,70 @@ class ExternalCommandSupervisorTests(unittest.TestCase):
         self.assertEqual(cleanup["reason"], "COMMAND_REGISTRY_COMPLETION_BINDING_MISMATCH")
         self.assertEqual(self.authority.status("root")["state"], "STOPPING")
 
+    def test_inventory_callback_finish_interleaving_uses_one_snapshot(self):
+        reached, release = self.hold("CREATE")
+        action = self.action()
+        self.authorize(action)
+        self.supervisor.execute(action)
+        self.assertTrue(reached.wait(1))
+        original_connection = self.supervisor._connection
+        call = self.supervisor._calls[action["action_id"]]
+        interleaved = []
+
+        class CapturedRows:
+            def __init__(self, rows):
+                self.rows = rows
+            def fetchall(self):
+                return self.rows
+            def __iter__(self):
+                return iter(self.rows)
+
+        class ConnectionProxy:
+            def __init__(self, db):
+                self.db = db
+            def __enter__(self):
+                self.db.__enter__()
+                return self
+            def __exit__(self, *args):
+                return self.db.__exit__(*args)
+            def execute(self, sql, *args):
+                cursor = self.db.execute(sql, *args)
+                if sql == "SELECT state_json FROM command_supervisor_grants ORDER BY action_id" and not interleaved:
+                    # Freeze the first grant read, then finish the real callback
+                    # before any later projection/table query can observe it.
+                    rows = cursor.fetchall()
+                    interleaved.append(True)
+                    release.set()
+                    call.thread.join(2)
+                    if call.thread.is_alive():
+                        raise AssertionError("callback did not finish at inventory read barrier")
+                    return CapturedRows(rows)
+                return cursor
+
+        self.supervisor._connection = lambda: ConnectionProxy(original_connection())
+        try:
+            before = self.supervisor.inventory()
+        finally:
+            self.supervisor._connection = original_connection
+        self.assertEqual(interleaved, [True])
+        command = before["commands"][0]
+        self.assertEqual(before["grants"][0]["callback_phase"], "INFLIGHT")
+        self.assertEqual(command["stages"], before["grants"])
+        self.assertEqual(command["callback_journal"][0]["phase"], "INFLIGHT")
+        self.assertIsNone(command["callback_journal"][0]["result"])
+        self.assertFalse(command["callbacks_finished"])
+        self.assertEqual(command["observation_digest"], digest({"observations": command["observations"],
+            "callbacks": command["callback_journal"]}))
+        after = self.supervisor.inventory()
+        command = after["commands"][0]
+        self.assertEqual(after["grants"][0]["callback_phase"], "FINISHED")
+        self.assertEqual(command["stages"], after["grants"])
+        self.assertEqual(command["callback_journal"][0]["phase"], "FINISHED")
+        self.assertEqual(command["callback_journal"][0]["result"], after["grants"][0]["callback_result"])
+        self.assertTrue(command["callbacks_finished"])
+        self.assertEqual(command["observation_digest"], digest({"observations": command["observations"],
+            "callbacks": command["callback_journal"]}))
+
 
 if __name__ == "__main__":
     unittest.main()
