@@ -18,18 +18,26 @@ from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, build_ope
 
 from .authority import (AuthorityStore, ControlError, canonical_bytes, connect, digest,
                         require_key, sign_document, validate_action, validate_id, verify_receipt)
+from .brakes_store import SessionAuthority
 
 
 class Receiver:
-    def __init__(self, db_path: str | Path, broker_key: bytes, receipt_key: bytes, *, enforce_epoch: bool = True) -> None:
+    def __init__(self, db_path: str | Path, broker_key: bytes, receipt_key: bytes, *,
+                 enforce_epoch: bool = True, admission_controller: SessionAuthority | None = None) -> None:
         self.broker_key = require_key(broker_key)
         self.receipt_key = require_key(receipt_key)
         if self.broker_key == self.receipt_key:
             raise ControlError("request and receipt authentication keys must differ")
+        if admission_controller is not None:
+            if (not isinstance(admission_controller, SessionAuthority) or not enforce_epoch
+                    or Path(db_path).resolve() != admission_controller.db_path.resolve()):
+                raise ControlError("governed receiver requires the same authority database and epoch enforcement")
+        self.admission_controller = admission_controller
         self.authority = AuthorityStore(db_path)
         self.db_path = self.authority.db_path
         self.enforce_epoch = enforce_epoch
-        self.enforcement_profile = "guarded" if enforce_epoch else "baseline_unfenced"
+        self.enforcement_profile = ("governed_v1" if admission_controller is not None
+                                    else "guarded" if enforce_epoch else "baseline_unfenced")
         with connect(self.db_path) as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS receiver_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -70,15 +78,24 @@ class Receiver:
             "accepted_at": accepted_at})
 
     def create_root(self, root_id: str, owner_ref: str = "operator") -> dict[str, Any]:
+        if self.admission_controller is not None:
+            raise ControlError("governed roots require explicit host create_session")
         return self._signed(self.authority.create_root(root_id, owner_ref))
 
     def identity(self) -> dict[str, Any]:
         return self._signed({"schema": "liminal.agent-control.identity.v1", "status": "IDENTITY"})
 
     def bind_execution(self, root_id: str, execution_id: str, parent_execution_id: str | None = None) -> dict[str, Any]:
-        return self._signed(self.authority.bind_execution(root_id, execution_id, parent_execution_id))
+        controller = self.admission_controller or self.authority
+        return self._signed(controller.bind_execution(root_id, execution_id, parent_execution_id))
 
     def revoke(self, root_id: str) -> dict[str, Any]:
+        if self.admission_controller is not None:
+            state = self.admission_controller.stop(root_id)
+            with connect(self.db_path) as db:
+                revoked_at = db.execute("SELECT revoked_at FROM roots WHERE root_id=?", (root_id,)).fetchone()[0]
+            return self._signed({"status": "REVOKED", "root_id": root_id, "epoch": state["epoch"],
+                                 "revoked_at": revoked_at, "session_state": state["state"]})
         return self._signed(self.authority.revoke(root_id))
 
     def _accept(self, db: Any, action: dict[str, Any], authorization: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -87,6 +104,8 @@ class Receiver:
             if existing["action_digest"] != digest(action):
                 return self._receipt(action, "DENIED", "IDEMPOTENCY_BINDING_MISMATCH")
             return json.loads(existing["receipt_json"])
+        if self.admission_controller is not None and authorization is None:
+            return self._receipt(action, "DENIED", "GRANT_REQUIRED")
         if authorization is not None:
             if not isinstance(authorization, dict) or set(authorization) != {"action_digest", "policy_version", "expires_at", "receiver_id"}:
                 return self._receipt(action, "DENIED", "GRANT_INVALID")
@@ -105,6 +124,13 @@ class Receiver:
         reason = self.authority.denial(db, action, enforce_epoch=self.enforce_epoch)
         if reason:
             return self._receipt(action, "DENIED", reason)
+        if self.admission_controller is not None:
+            # Governed grants use the immutable policy digest as their version.
+            # Legacy version labels remain supported by the ungoverned profile.
+            admission = self.admission_controller.admit_in_transaction(
+                db, action, channel="records", policy_digest=authorization["policy_version"])
+            if admission["status"] != "ADMITTED":
+                return self._receipt(action, "DENIED", admission["reason"])
         accepted_at = time.time()
         receipt = self._receipt(action, "ACCEPTED", "AUTHORITY_ACCEPTED", accepted_at=accepted_at)
         db.execute("INSERT INTO accepted(action_id,attempt_id,action_digest,action_json,root_id,execution_id,accepted_at,status,receipt_json) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -130,6 +156,8 @@ class Receiver:
         db.execute("INSERT INTO effects(action_id,arguments_json,committed_at) VALUES (?,?,?)",
                    (action_id, canonical_bytes(action["arguments"]).decode(), receipt["observed_at"]))
         db.execute("UPDATE accepted SET status='COMMITTED',receipt_json=? WHERE action_id=?", (canonical_bytes(receipt).decode(), action_id))
+        if self.admission_controller is not None:
+            self.admission_controller.finish_action_in_transaction(db, action_id, outcome="COMMITTED")
         return receipt
 
     def finalize(self, action_id: str) -> dict[str, Any]:
@@ -291,8 +319,11 @@ def main() -> None:
     parser.add_argument("--broker-key-file", required=True)
     parser.add_argument("--receipt-key-file", required=True)
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--governed", action="store_true", help="require durable session admission; sessions are created by the host")
     args = parser.parse_args()
-    receiver = Receiver(args.db, Path(args.broker_key_file).read_bytes(), Path(args.receipt_key_file).read_bytes())
+    admission = SessionAuthority(args.db) if args.governed else None
+    receiver = Receiver(args.db, Path(args.broker_key_file).read_bytes(), Path(args.receipt_key_file).read_bytes(),
+                        admission_controller=admission)
     server = make_server(receiver, port=args.port)
     host, port = server.server_address
     print(json.dumps({"host": host, "port": port, "url": f"http://{host}:{port}", "receiver_id": receiver.receiver_id}), flush=True)

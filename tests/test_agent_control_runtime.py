@@ -200,6 +200,9 @@ class RuntimeProtocolTests(unittest.TestCase):
             def revoke(self, root_id):
                 return real_broker.revoke(root_id)
 
+            def fence(self, root_id):
+                return real_broker.fence(root_id)
+
         fixture = Path(__file__).parents[1] / "sdk/liminal_agent_control/worker_fixture.py"
         process = subprocess.Popen([sys.executable, "-I", "-u", str(fixture), "honest"],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
@@ -271,6 +274,10 @@ class StatefulHost:
         return {"status": "REVOKED", "root_id": root_id, "broker_fenced": True,
                 "receiver_ack": {"status": "REVOKED", "root_id": root_id}}
 
+    def fence(self, root_id):
+        self.events.append("fence")
+        return {"status": "FENCED", "root_id": root_id, "broker_fenced": True}
+
     def verify_receipt(self, receipt):
         return receipt.get("status") == "REVOKED"
 
@@ -283,10 +290,10 @@ class RuntimeCleanupTests(unittest.TestCase):
                                     plan_sha256="a" * 64, backend_identity_sha256="b" * 64)
         return contain_workload(supervisor, host, session_id="session", broker=host, root_id="root", **kwargs)
 
-    def test_freeze_revoke_terminate_and_independent_zero_survivors(self):
+    def test_fence_revoke_before_freeze_and_independent_zero_survivors(self):
         host = StatefulHost()
         result = self.contain(host)
-        self.assertEqual(host.events, ["freeze", "revoke", "terminate"])
+        self.assertEqual(host.events, ["fence", "revoke", "freeze", "terminate"])
         self.assertTrue(result["verified"])
         self.assertTrue(result["zero_survivors"])
 
@@ -330,7 +337,7 @@ class RuntimeCleanupTests(unittest.TestCase):
         self.assertTrue(result["zero_survivors"])
         self.assertFalse(result["verified"])
         self.assertIn("REVOCATION_UNVERIFIED", result["partial_failures"])
-        self.assertEqual(host.events, ["freeze", "revoke", "terminate"])
+        self.assertEqual(host.events, ["fence", "revoke", "freeze", "terminate"])
 
     def test_hung_revocation_does_not_prevent_termination(self):
         release = threading.Event()
@@ -352,7 +359,7 @@ class RuntimeCleanupTests(unittest.TestCase):
             self.assertIsNone(result["revocation_ack"])
             self.assertTrue(result["revocation_call"]["still_running"])
             self.assertFalse(result["revocation_call"]["cancellation_confirmed"])
-            self.assertEqual(host.events, ["freeze", "revoke", "terminate"])
+            self.assertEqual(host.events, ["fence", "revoke", "freeze", "terminate"])
             frozen = copy.deepcopy(result)
             release.set()
             self.assertEqual(result, frozen)

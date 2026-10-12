@@ -28,6 +28,11 @@ The [scripted multi-worker extension](docs/AGENT_CONTROL_MULTI_AGENT.md) compose
 peer authorization attempts, forged reports, queued descendant revocation and
 an offline service-relay comparison. It has its own runner and evidence scope.
 
+The [durable session brakes](docs/AGENT_CONTROL_BRAKES.md) add one shared
+action budget, expiring authority and STOP gate for governed records and egress.
+The [portfolio review](docs/AGENT_CONTROL_PORTFOLIO_REVIEW.md) explains which
+mechanisms are reusable and which repositories provide diagnostics only.
+
 ## Build
 
 - Dependencies: gcc, make, python3

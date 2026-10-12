@@ -65,6 +65,10 @@ PYTHON_TESTS := \
 	tests/test_egress_admission_order.py \
 	tests/test_pinned_http_transport.py \
 	tests/test_agent_control_authority.py \
+	tests/test_agent_control_brakes_store.py \
+	tests/test_agent_control_brakes_receiver.py \
+	tests/test_agent_control_brakes_egress.py \
+	tests/test_agent_control_brakes_watchdog.py \
 	tests/test_agent_control_runtime.py \
 	tests/test_agent_control_supervisor_registry.py \
 	tests/test_agent_control_evaluation.py \

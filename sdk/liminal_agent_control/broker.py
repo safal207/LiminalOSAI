@@ -127,15 +127,28 @@ class Broker:
 
     handle = dispatch
 
-    def revoke(self, root_id: str) -> dict[str, Any]:
-        """Acknowledge only after durable local fence AND authenticated receiver ack."""
+    def fence(self, root_id: str) -> dict[str, Any]:
+        """Durably close local admission without any receiver or Docker call.
+
+        This host-only operation cannot cancel a previously dispatched request.
+        Receiver revocation is a separate mandatory part of aggregate stopping.
+        """
         validate_id(root_id, "root_id")
         with connect(self.db_path) as db:
             db.execute("BEGIN IMMEDIATE")
-            db.execute("INSERT OR IGNORE INTO root_fences VALUES (?,?,NULL)", (root_id, self._now()))
+            # Fencing grants no authority and must not depend on an injected
+            # admission clock callback being healthy. Time is metadata only.
+            db.execute("INSERT OR IGNORE INTO root_fences VALUES (?,?,NULL)", (root_id, time.time()))
             for row in db.execute("SELECT action_id,action_json FROM grants WHERE status='AUTHORIZED'").fetchall():
                 if json.loads(row["action_json"])["root_id"] == root_id:
                     db.execute("UPDATE grants SET status='CANCELLED' WHERE action_id=?", (row["action_id"],))
+            fenced_at = db.execute("SELECT fenced_at FROM root_fences WHERE root_id=?", (root_id,)).fetchone()[0]
+        return {"status": "FENCED", "root_id": root_id, "broker_fenced": True, "fenced_at": fenced_at}
+
+    def revoke(self, root_id: str) -> dict[str, Any]:
+        """Acknowledge only after durable local fence AND authenticated receiver ack."""
+        self.fence(root_id)
+        with connect(self.db_path) as db:
             stored = db.execute("SELECT receiver_ack_json FROM root_fences WHERE root_id=?", (root_id,)).fetchone()[0]
         ack = json.loads(stored) if stored else None
         try:
