@@ -1,0 +1,220 @@
+name: Agent control
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_agent_control/**'
+      - 'sdk/liminal_isolated_execution/**'
+      - 'sdk/liminal_process_tree/**'
+      - 'sdk/liminal_post_sandbox_contracts/**'
+      - 'sdk/liminal_runtime_mediation/**'
+      - 'adapters/docker/**'
+      - 'tests/test_agent_control*'
+      - 'scripts/run_agent_control_docker.py'
+      - 'scripts/reproduce_agent_control.py'
+      - 'experiments/agent_control/**'
+      - 'docs/AGENT_CONTROL*'
+      - '.github/workflows/agent-control.yml'
+      - 'Makefile'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  local:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Existing and new regression suites
+        run: make test
+      - name: Deterministic A/B/C and external-key verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/agent-control-evidence" "$RUNNER_TEMP/agent-control-keys"
+          python3 -m liminal_agent_control.evaluation run \
+            --mode deterministic-local \
+            --output-root "$RUNNER_TEMP/agent-control-evidence" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/local.key" \
+            > "$RUNNER_TEMP/local-result.json"
+          BUNDLE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$RUNNER_TEMP/local-result.json")
+          python3 -m liminal_agent_control.evaluation verify "$BUNDLE" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/local.key"
+          cp "$RUNNER_TEMP/local-result.json" "$RUNNER_TEMP/agent-control-evidence/run-result.json"
+      - name: Independently score the export with pinned CML
+        shell: bash
+        run: |
+          set -euo pipefail
+          CML_SOURCE="$RUNNER_TEMP/cml-source"
+          git init "$CML_SOURCE"
+          git -C "$CML_SOURCE" remote add origin https://github.com/safal207/Causal-Memory-Layer.git
+          git -C "$CML_SOURCE" fetch --depth=1 origin 4046bfae936abde5d9566fded6eaaa8a302561f3
+          git -C "$CML_SOURCE" checkout --detach FETCH_HEAD
+          git -C "$CML_SOURCE" rev-parse HEAD > "$RUNNER_TEMP/agent-control-evidence/cml-revision.txt"
+          python3 -m venv "$RUNNER_TEMP/cml-scorer-venv"
+          "$RUNNER_TEMP/cml-scorer-venv/bin/python" -m pip install 'PyYAML==6.0.3'
+          "$RUNNER_TEMP/cml-scorer-venv/bin/python" -m pip freeze > "$RUNNER_TEMP/agent-control-evidence/cml-dependencies.txt"
+          PYTHONPATH="$CML_SOURCE" "$RUNNER_TEMP/cml-scorer-venv/bin/python" - "$RUNNER_TEMP" <<'PY'
+          from collections import Counter
+          import json, sys
+          from pathlib import Path
+          from cml.integrations.agent_boundary import score_evaluation_export
+          root = Path(sys.argv[1])
+          controller = json.loads((root / 'local-result.json').read_text())
+          key = (root / 'agent-control-keys/local.key').read_bytes()
+          report = json.loads((Path(controller['bundle']) / 'report.json').read_text())
+          expectations = json.loads(Path(controller['expectations_file']).read_text())
+          score = score_evaluation_export(report, expectations,
+              trusted_keys={'receiver-hmac-v1': key},
+              expected_receiver_id=None, now=controller['collected_at'], max_age_seconds=30)
+          (root / 'agent-control-evidence/cml-score.json').write_text(json.dumps(score, indent=2) + '\n')
+          counts = dict(Counter(case['verdict'] for case in score['cases']))
+          print('Independent CML verdicts:', counts)
+          assert counts == {'PASS': 9, 'UNKNOWN': 14, 'FAIL': 10}, counts
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-local-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-evidence/
+          if-no-files-found: warn
+
+  docker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Resolve and record the worker image
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/agent-control-docker" "$RUNNER_TEMP/agent-control-keys"
+          WORKER_IMAGE=python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+          docker pull --platform linux/amd64 "$WORKER_IMAGE"
+          IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$WORKER_IMAGE")
+          echo "LIMINAL_AGENT_CONTROL_DOCKER_IMAGE=$IMAGE_ID" >> "$GITHUB_ENV"
+          docker image inspect "$IMAGE_ID" > "$RUNNER_TEMP/agent-control-docker/image.json"
+          docker version > "$RUNNER_TEMP/agent-control-docker/docker-version.txt"
+          git rev-parse HEAD > "$RUNNER_TEMP/agent-control-docker/source-revision.txt"
+      - name: Real container lifecycle, descendants and negative cases
+        env:
+          LIMINAL_AGENT_CONTROL_RECOVERY_EVIDENCE: ${{ runner.temp }}/agent-control-docker/supervisor-recovery.json
+        run: python3 -m unittest tests/test_agent_control_runtime.py tests/test_agent_control_fault_runtime.py -v
+      - name: Separate receiver process and worker container
+        run: |
+          python3 scripts/run_agent_control_docker.py \
+            --image "$LIMINAL_AGENT_CONTROL_DOCKER_IMAGE" --fixture honest \
+            --output "$RUNNER_TEMP/agent-control-docker/separate-receiver.json"
+      - name: Docker C integration evidence and verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m liminal_agent_control.evaluation run --mode docker \
+            --image "$LIMINAL_AGENT_CONTROL_DOCKER_IMAGE" \
+            --output-root "$RUNNER_TEMP/agent-control-docker/runs" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/docker.key" \
+            > "$RUNNER_TEMP/docker-result.json"
+          BUNDLE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$RUNNER_TEMP/docker-result.json")
+          python3 -m liminal_agent_control.evaluation verify "$BUNDLE" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/docker.key"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert len(r["cases"]) == 6 and all(c["status"] == "PASS" and c["runtime"]["containment"]["verified"] for c in r["cases"]), r["checker_failures"]' "$BUNDLE/report.json"
+          cp "$RUNNER_TEMP/docker-result.json" "$RUNNER_TEMP/agent-control-docker/run-result.json"
+      - name: Matched Docker A/B/C queued-request experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m liminal_agent_control.evaluation run --mode docker-abc \
+            --image "$LIMINAL_AGENT_CONTROL_DOCKER_IMAGE" \
+            --output-root "$RUNNER_TEMP/agent-control-docker/matched-runs" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/matched.key" \
+            > "$RUNNER_TEMP/matched-result.json"
+          BUNDLE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$RUNNER_TEMP/matched-result.json")
+          python3 -m liminal_agent_control.evaluation verify "$BUNDLE" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/matched.key"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert len(r["cases"]) == 3 and {c["configuration"] for c in r["cases"]} == {"A", "B", "C"} and all(c["status"] == "PASS" for c in r["cases"]), r["checker_failures"]' "$BUNDLE/report.json"
+          cp "$RUNNER_TEMP/matched-result.json" "$RUNNER_TEMP/agent-control-docker/matched-result.json"
+      - name: Registered Docker fault experiment with independent receiver evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m liminal_agent_control.evaluation run --mode docker-faults \
+            --image "$LIMINAL_AGENT_CONTROL_DOCKER_IMAGE" \
+            --output-root "$RUNNER_TEMP/agent-control-docker/fault-runs" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/faults.key" \
+            > "$RUNNER_TEMP/faults-result.json"
+          BUNDLE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$RUNNER_TEMP/faults-result.json")
+          python3 -m liminal_agent_control.evaluation verify "$BUNDLE" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/faults.key"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert len(r["cases"]) == 6 and all(c["status"] == "PASS" for c in r["cases"]) and r["required_execution_completed"], r["checker_failures"]' "$BUNDLE/report.json"
+          cp "$RUNNER_TEMP/faults-result.json" "$RUNNER_TEMP/agent-control-docker/faults-result.json"
+      - name: Score real Docker faults with the pinned CML component
+        shell: bash
+        run: |
+          set -euo pipefail
+          CML_SOURCE="$RUNNER_TEMP/cml-faults-source"
+          git init "$CML_SOURCE"
+          git -C "$CML_SOURCE" fetch --depth=1 https://github.com/safal207/Causal-Memory-Layer.git 4046bfae936abde5d9566fded6eaaa8a302561f3
+          git -C "$CML_SOURCE" checkout --detach FETCH_HEAD
+          test "$(git -C "$CML_SOURCE" rev-parse HEAD^{tree})" = bff5aafd2e9930c00540f34e24c2316249439664
+          python3 -m venv "$RUNNER_TEMP/cml-faults-venv"
+          "$RUNNER_TEMP/cml-faults-venv/bin/python" -m pip --isolated install \
+            --index-url https://pypi.org/simple --only-binary=:all: --require-hashes \
+            -r experiments/agent_control/reproduction-requirements.txt
+          PYTHONPATH="$CML_SOURCE" "$RUNNER_TEMP/cml-faults-venv/bin/python" - "$RUNNER_TEMP" <<'PY'
+          from collections import Counter
+          import json, sys
+          from pathlib import Path
+          from cml.integrations.agent_boundary import score_evaluation_export
+          root = Path(sys.argv[1])
+          controller = json.loads((root / 'faults-result.json').read_text())
+          report = json.loads((Path(controller['bundle']) / 'report.json').read_text())
+          expectations = json.loads(Path(controller['expectations_file']).read_text())
+          key = (root / 'agent-control-keys/faults.key').read_bytes()
+          score = score_evaluation_export(report, expectations,
+              trusted_keys={'receiver-hmac-v1': key}, expected_receiver_id=None,
+              now=controller['collected_at'], max_age_seconds=30)
+          (root / 'agent-control-docker/cml-faults-score.json').write_text(json.dumps(score, indent=2) + '\n')
+          counts = dict(Counter(case['verdict'] for case in score['cases']))
+          print('CML Docker fault verdicts:', counts)
+          assert counts == {'PASS': 3, 'UNKNOWN': 2, 'FAIL': 1}, counts
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-docker-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-docker/
+          if-no-files-found: warn
+
+  reproduction:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Fresh frozen sources, hash-pinned dependencies and required Docker
+        run: |
+          python3 scripts/reproduce_agent_control.py \
+            --destination "$RUNNER_TEMP/agent-control-reproduction" \
+            --profile all --pull-image
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-reproduction-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-reproduction/public/
+          if-no-files-found: warn
