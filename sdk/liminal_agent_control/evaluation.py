@@ -32,6 +32,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PREREGISTRATION = PROJECT_ROOT / "experiments" / "agent_control" / "preregistration.json"
 DOCKER_ABC_PREREGISTRATION = PROJECT_ROOT / "experiments" / "agent_control" / "preregistration_docker_abc.json"
 DOCKER_ABC_EXPERIMENT = "owned-receiver-docker-queued-v1"
+DOCKER_CASE_IDS = ("honest", "forged_success", "stale_authority",
+                   "delegated_after_revoke", "argument_mutation", "delayed_post_ack")
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -71,8 +73,7 @@ def _docker_cases(work: Path, receipt_key: bytes, image: str) -> list[dict[str, 
     from .runtime import run_fixture
     from .receiver import verify_receipt
     cases = []
-    for case_id in ("honest", "forged_success", "stale_authority",
-                    "delegated_after_revoke", "argument_mutation", "delayed_post_ack"):
+    for case_id in DOCKER_CASE_IDS:
         fixture = Fixture(case_id, "C", work / case_id, receipt_key)
         if case_id == "delegated_after_revoke":
             child = fixture.execution_id + ":child"
@@ -437,6 +438,8 @@ def verify_bundle(bundle: Path | str, receipt_key: bytes) -> dict[str, Any]:
     report = json.loads((bundle / "report.json").read_text(encoding="utf-8"))
     if report.get("schema") != SCHEMA:
         errors.append("unsupported report schema")
+    if report.get("mode") not in ("deterministic-local", "docker", "docker-abc"):
+        errors.append("unsupported report execution mode")
     if report.get("run_id") != manifest.get("run_id"):
         errors.append("run_id mismatch")
     if hashlib.sha256(receipt_key).hexdigest() != report.get("trust", {}).get("receipt_key_id"):
@@ -456,6 +459,16 @@ def verify_bundle(bundle: Path | str, receipt_key: bytes) -> dict[str, Any]:
         expected = [(s["id"], config) for s in SCENARIOS for config in CONFIGURATIONS]
         if actual != expected:
             errors.append("missing, reordered or duplicate preregistered cases")
+    elif report.get("mode") == "docker":
+        # Unsigned report/manifest hashes cannot establish completeness. Bind
+        # the exact C-only smoke inventory to the executable design, including
+        # its result IDs and mode so relabeling cannot replace a failing case.
+        actual = [(case.get("case_id"), case.get("result_id"),
+                   case.get("configuration"), case.get("mode"))
+                  for case in report.get("cases", [])]
+        expected = [(case_id, case_id + ":C", "C", "docker") for case_id in DOCKER_CASE_IDS]
+        if actual != expected:
+            errors.append("missing, reordered, duplicate or substituted Docker C cases")
     raw = json.loads((bundle / "raw-records.json").read_text(encoding="utf-8"))
     for case, raw_case in zip(report.get("cases", []), raw.get("cases", [])):
         if case["observation"] != raw_case.get("observation"):

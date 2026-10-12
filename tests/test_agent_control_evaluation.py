@@ -10,7 +10,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from sdk.liminal_agent_control.evaluation import run_suite, verify_bundle, load_preregistration
+from sdk.liminal_agent_control.evaluation import run_suite, verify_bundle, load_preregistration, summarize
 from sdk.liminal_agent_control.scenarios import run_scenario
 
 KEY = b"test-only-receiver-key-not-for-deployment" * 2
@@ -192,6 +192,79 @@ class EvaluationTests(unittest.TestCase):
                 self.assertEqual(case["observation"]["committed_count"], 0)
                 self.assertEqual(case["status"], "FAIL")
                 self.assertEqual(case["outcome"], "UNKNOWN")
+
+    @staticmethod
+    def docker_runtime_stub(fixture, *, broker, action, forbidden_effect=False, **kwargs):
+        """Real owned receiver effects; synthetic Docker metadata for checker tests only."""
+        if fixture == "honest" or (forbidden_effect and fixture == "delayed_post_ack"):
+            broker.dispatch(action)
+        return {"status": "COMPLETED", "actions": [], "worker_claims": [],
+                "registered_before_start": True,
+                "containment": {"verified": True, "zero_survivors": True}}
+
+    @staticmethod
+    def rewrite_docker_inventory(bundle, report, raw, pairs):
+        report["cases"] = [case for case, _ in pairs]
+        raw["cases"] = [raw_case for _, raw_case in pairs]
+        report["checker_failures"] = []
+        report["metrics"] = summarize(report["cases"])
+        for name, value in (("report.json", report), ("raw-records.json", raw),
+                            ("metrics.json", report["metrics"])):
+            (bundle / name).write_text(json.dumps(value))
+        rewrite_manifest(bundle)
+
+    def test_docker_failing_case_cannot_be_removed_after_rehashing(self):
+        def runtime_stub(*args, **kwargs):
+            return self.docker_runtime_stub(*args, forbidden_effect=True, **kwargs)
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "sdk.liminal_agent_control.runtime.run_fixture", side_effect=runtime_stub
+        ):
+            result = run_suite(Path(tmp), KEY, mode="docker", image="sha256:" + "0" * 64)
+            bundle = Path(result["bundle"])
+            self.assertEqual(result["checker_failures"], ["delayed_post_ack:C"])
+            self.assertFalse(verify_bundle(bundle, KEY)["valid"])
+            report = json.loads((bundle / "report.json").read_text())
+            raw = json.loads((bundle / "raw-records.json").read_text())
+            pairs = [(case, raw_case) for case, raw_case in zip(report["cases"], raw["cases"])
+                     if case["case_id"] != "delayed_post_ack"]
+            self.rewrite_docker_inventory(bundle, report, raw, pairs)
+            verified = verify_bundle(bundle, KEY)
+            self.assertFalse(verified["valid"])
+            self.assertIn("missing, reordered, duplicate or substituted Docker C cases", verified["errors"])
+
+    def test_docker_requires_exact_ordered_case_and_result_bindings(self):
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "sdk.liminal_agent_control.runtime.run_fixture", side_effect=self.docker_runtime_stub
+        ):
+            result = run_suite(Path(tmp), KEY, mode="docker", image="sha256:" + "0" * 64)
+            bundle = Path(result["bundle"])
+            self.assertTrue(verify_bundle(bundle, KEY)["valid"])
+            original_report = (bundle / "report.json").read_text()
+            original_raw = (bundle / "raw-records.json").read_text()
+            for mutation in ("missing", "duplicate", "reordered", "case_id", "result_id",
+                             "configuration", "mode", "report_mode"):
+                with self.subTest(mutation=mutation):
+                    report, raw = json.loads(original_report), json.loads(original_raw)
+                    pairs = list(zip(report["cases"], raw["cases"]))
+                    if mutation == "missing":
+                        pairs.pop()
+                    elif mutation == "duplicate":
+                        pairs[-1] = pairs[0]
+                    elif mutation == "reordered":
+                        pairs[0], pairs[1] = pairs[1], pairs[0]
+                    elif mutation == "report_mode":
+                        report["mode"] = "unrecognized"
+                    else:
+                        pairs[0][0][mutation] = {
+                            "case_id": "receiver_down", "result_id": "substituted:C",
+                            "configuration": "B", "mode": "deterministic-local",
+                        }[mutation]
+                    self.rewrite_docker_inventory(bundle, report, raw, pairs)
+                    verified = verify_bundle(bundle, KEY)
+                    self.assertFalse(verified["valid"], mutation)
+                    expected_error = ("unsupported report execution mode" if mutation == "report_mode"
+                                      else "missing, reordered, duplicate or substituted Docker C cases")
+                    self.assertIn(expected_error, verified["errors"])
 
     def test_docker_requires_immutable_image(self):
         with tempfile.TemporaryDirectory() as tmp:
