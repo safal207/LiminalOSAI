@@ -6,6 +6,27 @@
 
 LiminalOSAI explores how an AI agent can receive real operational authority without receiving unlimited or unverifiable power.
 
+[Project overview](README.md) · [Documentation](docs/README.md) ·
+[Verified draft experiments](docs/AGENT_CONTROL_REVIEW_INDEX.md)
+
+This roadmap describes reference profiles and future directions. Some later
+milestones already have prototype modules or fixture contracts in the checkout;
+that does not mean the full production goal is delivered. Per-profile guides and
+revision-bound evidence determine what has actually been checked.
+
+## Current owned-agent experiment
+
+This track is separate from the longer-term governance versions below.
+
+| Step | Status | Review route |
+| --- | --- | --- |
+| G01 — explicit channels and watcher readiness | Verified draft snapshot | [PR #217](https://github.com/safal207/LiminalOSAI/pull/217) |
+| G02 — recheck readiness after BEGIN, before endpoint dispatch | Verified draft snapshot | [PR #218 and evidence](docs/AGENT_CONTROL_REVIEW_INDEX.md) |
+| G03 — receiver-owned commit fence and signed no-effect outcome | Planned protocol work | [Next transition](docs/AGENT_CONTROL_REVIEW_INDEX.md#next-transition) |
+
+The verified snapshot uses fixed-policy fixtures and synthetic effects. Live
+model evaluation and receiver-side final commit fencing are not included.
+
 The target is a system that can transform human intent into bounded, reviewable, cryptographically attributable machine action:
 
 ```text
@@ -38,7 +59,7 @@ The long-term product direction is not “an agent with root access.” It is a 
 
 | Status | Meaning |
 |---|---|
-| ✅ Complete | Merged and validated by CI; not necessarily production-ready |
+| Reference available | Implementation and fixture contracts are present; see the profile's revision-bound checks |
 | 🚧 Active | Current implementation target |
 | 🧭 Planned | Scoped direction with expected contracts |
 | 🔭 Research | Open design or research area |
@@ -59,56 +80,56 @@ Signed Governance Capsule v1.0
 → ALLOW | VERIFY | REVISE | NO_SIGNAL
 ```
 
-## Completed foundation
+## Reference foundation
 
-### ✅ v0.1 — Liminal Adapter
+### v0.1 — Liminal Adapter
 
 - Converts structured conversation input into a deterministic safety decision.
 - Produces `ALLOW`, `VERIFY`, `REVISE`, or `NO_SIGNAL`.
 - Keeps evidence and authority boundaries explicit.
 
-### ✅ v0.2 — Conversation Normalizer
+### v0.2 — Conversation Normalizer
 
 - Normalizes host conversation records into a stable schema.
 - Rejects malformed and ambiguous input.
 - Preserves exact evidence references.
 
-### ✅ v0.3 — Live Session Exporter
+### v0.3 — Live Session Exporter
 
 - Exports a recorded session into the normalizer and adapter pipeline.
 - Preserves deterministic links between request, draft, claims, and evidence.
 
-### ✅ v0.4 — Session Recorder SDK
+### v0.4 — Session Recorder SDK
 
 - Append-only session event recording.
 - Explicit user messages, assistant drafts, claims, and evidence bindings.
 - Tamper-evident journal semantics.
 
-### ✅ v0.5 — Host Integration Adapter
+### v0.5 — Host Integration Adapter
 
 - Separates host-owned execution from agent-owned reasoning.
 - Defines bounded integration contracts without claiming access to host credentials.
 
-### ✅ v0.6 — GitHub Agent Bridge
+### v0.6 — GitHub Agent Bridge
 
 - Introduces a narrow GitHub action catalog.
 - Binds allowed repositories and host traces.
 - Keeps GitHub credentials and connector ownership outside the SDK.
 
-### ✅ v0.7 — Connected GitHub Runtime
+### v0.7 — Connected GitHub Runtime
 
 - Normalizes connected GitHub calls and responses.
 - Enforces response-size and schema boundaries.
 - Produces stable receipts for downstream evidence.
 
-### ✅ v0.8 — GitHub Transaction Orchestrator
+### v0.8 — GitHub Transaction Orchestrator
 
 - Executes immutable multi-step GitHub transaction plans.
 - Uses exact per-step write authorization.
 - Adds checkpoints, expectations, CI gates, and an append-only transaction journal.
 - Prevents implicit replay or automatic authorization.
 
-### ✅ v0.9 — Transaction Policy & Approval Engine
+### v0.9 — Transaction Policy & Approval Engine
 
 - Evaluates the whole transaction before execution.
 - Adds risk-based approval requirements.
@@ -116,7 +137,7 @@ Signed Governance Capsule v1.0
 - Requires distinct principals for critical merge authority.
 - Does not replace v0.8 exact write authorization.
 
-### ✅ v1.0 — Signed Governance Capsule
+### v1.0 — Signed Governance Capsule
 
 - Adds portable Ed25519-signed governance capsules.
 - Binds policy, snapshot, plan, approval ledger, journal anchor, issuer, key, audience, and expiry.
