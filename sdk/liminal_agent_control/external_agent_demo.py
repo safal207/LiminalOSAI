@@ -810,8 +810,7 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                     case_checks["missing_owned_observation_has_unknown_quiescence"] = results["unavailable_stop"]["process_quiescent"] is False
                     case_checks["worker_stopped_claim_does_not_settle"] = results["unavailable_stop"]["lifecycle_receipts_verified"] is False
                 finish(case, results, case_checks, **extra)
-            exports = {branch: capture(branch, "admin", "checkpoints") for branch in ("command", "effect")}
-            entries = {branch: value["entries"] for branch, value in exports.items()}
+            entries = {branch: capture(branch, "admin", "checkpoints") for branch in ("command", "effect")}
             verifications = {branch: verify_checkpoint_chain(entries[branch], authority_id=pin["authority_id"],
                 signer_id=pin["authority_id"], key_id=pin["key_id"], public_key=pin["public_key"])
                 for branch, pin in (("command", command_pin), ("effect", effect_pin))}
