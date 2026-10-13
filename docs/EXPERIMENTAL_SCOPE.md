@@ -1,74 +1,48 @@
-# Experimental Scope
+# Experimental scope
 
-Status: reviewer-facing experimental scope note.
+LiminalOSAI combines a pulse-driven C11 research runtime with Python reference
+SDKs for governed host actions and verifiable evidence. This note describes
+the two tracks present in the main checkout and how to review their boundaries.
+Use the [documentation index](README.md) to find a specific contract or example.
 
-Scope: this document clarifies what LiminalOSAI is, what it is not, how reviewers can run it, and how it relates to the broader Liminal Evidence Stack without overstating maturity or claims.
+## Two tracks in this checkout
 
-## One-sentence claim
+| Track | Purpose | Concrete surface |
+|---|---|---|
+| C11 runtime | Explore interacting subsystems, sequencing and trace-producing diagnostics | `core/`, module directories, `build/pulse_kernel`, `build/liminal_core` |
+| Python governance and evidence | Record host actions, bind plans and approvals, verify signed evidence, and test selected execution boundaries | `sdk/`, `tools/`, `adapters/`, `examples/` and focused tests |
 
-LiminalOSAI is an experimental C11 cognitive-runtime sandbox for exploring small interacting subsystems such as awareness, coherence, memory, consent gates, anticipation, reflection, metabolic flow, collective memory, and trace-oriented diagnostics.
+These tracks have different contracts. The C11 runtime's concepts and
+diagnostics do not supply execution authority to a Python host. A Python
+governance result applies to the action and integration covered by its profile.
 
-## What this project is
+Owned-agent experiments developed in the draft PR stack have their own
+[review index](AGENT_CONTROL_REVIEW_INDEX.md). Their source and reproduction
+instructions are separately pinned; they are not main-checkout features.
 
-LiminalOSAI is best understood as a research sandbox and organism metaphor runtime.
-
-It explores how many small subsystems can interact inside a pulse-driven runtime:
-
-```text
-pulse -> signal metabolism -> awareness/coherence -> reflection -> memory/trace -> diagnostics
-```
-
-It is valuable as a place to test concepts, runtime metaphors, trace-producing subsystems, and minimal C-level implementations of liminal/cognitive ideas.
-
-## What this project is not
-
-LiminalOSAI is not currently:
-
-- a production operating system,
-- an AGI system,
-- a cognitive science proof,
-- a safety enforcement layer,
-- a production agent runtime,
-- a clinical/emotional assessment tool,
-- a replacement for observability platforms,
-- a stable SDK/API surface,
-- a security boundary.
-
-The project should be reviewed as an experimental runtime sandbox, not as a mature production system.
-
-## Reviewer path
+## Review the C11 runtime
 
 The repository builds two binaries:
 
-- `build/pulse_kernel` — main pulse/orchestration binary.
-- `build/liminal_core` — substrate runner for diagnostics.
+- `build/pulse_kernel`: pulse and orchestration runtime.
+- `build/liminal_core`: substrate runner for diagnostics.
 
-Build:
+Run from the repository root with GCC, Make and Python available:
 
 ```bash
+git rev-parse HEAD
 make
-```
-
-Smoke checks:
-
-```bash
 make check
-```
-
-Unit tests:
-
-```bash
 make test
-```
-
-Representative runs:
-
-```bash
 ./build/pulse_kernel --dry-run --limit=2
 ./build/liminal_core --substrate --limit=2 --trace
 ```
 
-Diagnostics:
+`make check` runs short smoke checks. `make test` runs the selected C and Python
+tests declared in the Makefile; it is not a claim that every optional profile
+or runtime integration was exercised.
+
+For diagnostic output, the available targets include:
 
 ```bash
 make rebirth
@@ -77,118 +51,73 @@ make report-metabolic
 make long-run-diagnostics
 ```
 
-## Current evidence matrix
+See the [C11 runtime guide](C11_RUNTIME_GUIDE.md) for options and output paths,
+the [kernel runtime contract](KERNEL_RUNTIME_CONTRACT.md) for sequencing, and
+the [historical technical audit](deep_audit_2026-04-24.md) for documented debt.
+Report scripts and longer runs produce diagnostic artifacts; inspect their
+actual outputs and exit states when drawing a conclusion.
 
-| Evidence asset | Reviewer question | Path / command | Current status |
-| --- | --- | --- | --- |
-| Build path | Can the C runtime compile? | `make` | Implemented |
-| Smoke checks | Can both binaries run short diagnostics? | `make check` | Implemented |
-| Unit tests | Are selected small modules testable? | `make test` | Implemented |
-| Deep audit | Is technical debt documented? | `docs/DEEP_AUDIT_2026-04-24.md` | Documented |
-| Phoenix diagnostics | Can the system produce self-report style output? | `make rebirth`, `make report` | Implemented path |
-| Metabolic diagnostics | Can metabolic flow be reported? | `make report-metabolic` | Implemented path |
-| Long-run diagnostics | Can longer traces be generated? | `make long-run-diagnostics` | Implemented path |
-| Layer map | Are conceptual layers documented? | `README.md` L0-L30 map | Documented |
+## Review the Python governance track
 
-## What is currently implemented
+Start with the layer that matches the review question:
 
-- C11 pulse kernel and substrate runner.
-- Many small experimental modules: awareness, coherence, dream, metabolic, affinity, mirror, collective memory, symbiosis, empathic, reflection, anticipation, consent gate, and others.
-- CLI flags for tracing, diagnostics, health scans, synchronization, dream, metabolic, collective graph, affinity/consent, mirror, introspection, council/ensemble, and memory modes.
-- Smoke-check target in `Makefile`.
-- Unit-test target for selected modules.
-- Deep technical audit report.
-- Diagnostic report scripts and long-run trace paths.
+| Review question | Contract |
+|---|---|
+| Are visible host actions and explicit authorizations recorded? | [Session recorder](CHATGPT_SESSION_RECORDER_SDK.md), [host integration adapter](CHATGPT_HOST_INTEGRATION_ADAPTER.md) |
+| Does a plan remain bound to exact calls, policy and approvals? | [Transaction orchestrator](CHATGPT_GITHUB_TRANSACTION_ORCHESTRATOR.md), [transaction policy](CHATGPT_GITHUB_TRANSACTION_POLICY.md) |
+| What does a signature or identity claim establish? | [Governance capsule](CHATGPT_SIGNED_GOVERNANCE_CAPSULE.md), [identity attestation bridge](CHATGPT_IDENTITY_ATTESTATION_BRIDGE.md) |
+| Can terminal action evidence be verified offline? | [Portable action receipt](CHATGPT_PORTABLE_ACTION_RECEIPT.md), [TRCP adapter SDK](TRCP_ADAPTER_SDK.md) |
+| Which execution paths have concrete mediation or containment? | [Runtime mediation](RUNTIME_MEDIATION.md), [isolated execution](ISOLATED_EXECUTION_BROKER.md), [process containment](PROCESS_TREE_ACTIVE_CONTAINMENT.md) |
 
-## Why the experimental boundary matters
+Runnable examples live in `examples/`; each linked guide describes its
+dependencies and the expected evidence. Some signed profiles use the local
+OpenSSL executable. Docker profiles require an appropriate host backend and an
+immutable image. Running an offline SDK example does not establish that the
+corresponding external integration or Docker profile ran.
 
-LiminalOSAI contains powerful metaphors and many subsystems, but reviewers should not confuse metaphor density with production maturity.
+## Interpret evidence within its scope
 
-The safest framing is:
+| Evidence | Supported conclusion |
+|---|---|
+| A unit or contract test | The stated fixture satisfied the tested contract at the recorded revision |
+| A real backend observation | The inspected workload or effect had the reported state within that backend's scope |
+| A hash or verified signature | Bytes remain bound to a digest or a key accepted by the verifier's trust inputs |
+| An independent reproduction | Another execution reproduced the stated result under its recorded inputs and environment |
+| An outreach or review status | The documented contact or review transition occurred; technical validation requires its own evidence |
 
-```text
-experimental runtime sandbox -> trace-producing subsystem experiments -> possible ideas for stricter future artifacts
-```
+Record the source commit, environment, commands, execution states and retained
+trust inputs. An unavailable or skipped runtime check supplies no positive
+runtime evidence. A partial run remains a partial run. A result from a frozen
+revision does not automatically describe a later source tree.
 
-This keeps the project useful without making claims it cannot yet support.
+## Trust and deployment boundaries
 
-## Relationship to the Liminal Evidence Stack
+The host supplies actual tool invocation, connector permissions, explicit
+authorization and the concrete enforcement backends. SDK wrappers govern the
+paths routed through them. Unmediated actions, privileged host access and
+compromised backends require their own controls.
 
-LiminalOSAI is adjacent to the formal evidence stack.
+Offline verification depends on the verifier's retained trust stores and
+anchors. A producer-supplied key or matching hash alone does not establish an
+independent source. Signatures identify possession of an accepted key; real
+organizational identity and key custody need the corresponding external
+evidence. The IdP/KMS reference fixtures do not establish a live provider call.
 
-- **PythiaLabs:** formal pre-execution gate for high-risk agent actions.
-- **DRP:** formal decision-record protocol.
-- **LTP:** formal trace replay/admissibility layer.
-- **CML:** formal causal-lineage audit layer.
-- **TTM DB:** append-only ground-truth trace substrate.
-- **LiminalDB:** reactive/adaptive storage and evidence substrate.
-- **LiminalOSAI:** experimental runtime sandbox for cognitive/liminal subsystem ideas.
+The repository is experimental. It makes no repository-wide production,
+security-certification, universal sandbox-containment, AGI or clinical-validity
+claim. Each runtime profile states narrower assumptions and limits. Receipt
+verification and historical evidence do not renew execution authority or
+authorize replay.
 
-Short version:
+## Concepts and research direction
 
-```text
-The evidence stack is the formal reviewer path.
-LiminalOSAI is the experimental lab bench.
-```
+Awareness, coherence, metabolic flow, reflection and the organism metaphor are
+research vocabulary for small runtime subsystems. Their names and diagnostic
+outputs do not establish cognition or consciousness. The complete conceptual
+map is preserved in the [Liminal layer map](LIMINAL_LAYER_MAP.md) with a
+[compact overview](layers-overview.md).
 
-## What LiminalOSAI can contribute
-
-Even though it is not a formal safety layer, LiminalOSAI can contribute:
-
-- experimental subsystem designs,
-- C-level runtime patterns,
-- trace-producing diagnostics,
-- small module tests,
-- metaphors that may later be hardened into stricter specs,
-- runtime stress patterns for memory/coherence/reflection experiments.
-
-## Non-claims
-
-LiminalOSAI currently does not claim:
-
-- production readiness,
-- safety enforcement,
-- verified cognition,
-- clinical validity,
-- AGI capability,
-- cognitive science validation,
-- stable API compatibility,
-- complete observability or tracing coverage,
-- security certification.
-
-## Suggested reviewer checklist
-
-A reviewer can ask:
-
-- Can it build locally?
-- Can smoke checks run?
-- Are small modules testable?
-- Is technical debt documented?
-- Are experimental claims separated from formal safety claims?
-- Is the relationship to the formal evidence stack clear?
-
-## Research / hardening roadmap
-
-Near-term work can focus on:
-
-1. **Runtime decomposition** — continue splitting large orchestration files into parse/init/loop/reporting units.
-2. **Quality gates** — expand `make check`, `make test`, and optional sanitizer profiles.
-3. **Trace export** — standardize diagnostic output into machine-readable trace records.
-4. **Module contracts** — define input/output contracts for small subsystems.
-5. **Evidence stack bridge** — export selected runtime traces into TTM DB / LTP-compatible forms.
-6. **Scope discipline** — keep README metaphors, but pair them with explicit non-claims and reproducible commands.
-
-## Current strongest positioning
-
-Use this formulation in reviewer-facing contexts:
-
-```text
-LiminalOSAI is an experimental C11 cognitive-runtime sandbox for exploring pulse-driven subsystems, trace-producing diagnostics, and organism-inspired runtime metaphors. It is not a production OS or safety enforcement layer; it is a lab bench for ideas that may later be formalized into stricter evidence-stack artifacts.
-```
-
-## Short version
-
-```text
-LiminalOSAI is the lab bench.
-The Liminal Evidence Stack is the formal reviewer path.
-```
+The [roadmap](../ROADMAP.md) describes development direction. Related evidence
+projects and integration ideas should be assessed against their own source,
+contracts and reproduction evidence; a shared name or concept does not create
+a deployment dependency or transfer a validation result.
