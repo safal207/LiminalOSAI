@@ -409,6 +409,18 @@ class ExternalCommandSupervisor:
         # This durable uncertainty marker precedes the first daemon request.
         self.registry.mark_create_pending(record)
 
+    def _create_argv(self, command: dict) -> list[str]:
+        plan = self._plan(command["spec"])
+        argv = build_docker_argv(plan, docker_binary=self.controller.docker_binary,
+                                container_name=command["registry_record"]["session_id"])
+        argv[1:3] = ["create", "--interactive"]
+        index = argv.index(plan.image_id)
+        extra = ["--entrypoint", "python3", "--log-driver", "none"]
+        for key, value in ownership_labels(command["registry_record"]).items():
+            extra += ["--label", f"{key}={value}"]
+        argv[index:index] = extra
+        return argv[1:]
+
     def _dispatch(self, action: dict) -> None:
         stage = action["arguments"]["stage"]
         result = None
@@ -421,16 +433,7 @@ class ExternalCommandSupervisor:
             if command is None:
                 raise ControlError("COMMAND_SUPERVISOR_COMMAND_MISSING")
             if stage == "CREATE":
-                plan = self._plan(command["spec"])
-                argv = build_docker_argv(plan, docker_binary=self.controller.docker_binary,
-                                         container_name=command["registry_record"]["session_id"])
-                argv[1:3] = ["create", "--interactive"]
-                index = argv.index(plan.image_id)
-                extra = ["--entrypoint", "python3", "--log-driver", "none"]
-                for key, value in ownership_labels(command["registry_record"]).items():
-                    extra += ["--label", f"{key}={value}"]
-                argv[index:index] = extra
-                result = self.controller.command(argv[1:], timeout=30)
+                result = self.controller.command(self._create_argv(command), timeout=30)
             else:
                 result = self._start_dispatch(action, command)
             if self.after_dispatch_hook is not None:

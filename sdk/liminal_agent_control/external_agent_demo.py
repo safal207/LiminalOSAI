@@ -43,7 +43,7 @@ def _sources() -> dict[str, str]:
     paths += sorted((ROOT / "tests").glob("test_agent_control_external_agent*.py"))
     paths += [ROOT / path for path in ("scripts/verify_external_agent_evidence.py",
         "scripts/verify_external_stop_evidence.py", ".github/workflows/agent-control.yml",
-        "docs/AGENT_CONTROL_ISOLATED_AGENT.md", "README.md",
+        "docs/AGENT_CONTROL_ISOLATED_AGENT.md", "docs/AGENT_CONTROL_CLOSED_CHANNEL_LAUNCH.md", "README.md",
         "experiments/agent_control/observer-requirements.txt")]
     paths += [DESIGN, FIXTURE]
     if any(not path.is_file() for path in paths):
@@ -123,7 +123,9 @@ def _service(config_file: Path) -> int:
     from .external_authority_service import HTTPExternalAuthorityClient
     from .external_agent_bridge import BridgeBudget, ExternalAgentBridge
     from .external_agent_coordinator import ExternalAgentCoordinator
-    from .external_agent_supervisor import ExternalAgentSupervisor
+    from .external_agent_launch import (
+        ClosedChannelAgentSupervisor, ClosedChannelLaunchGate, build_channel_inventory,
+    )
     from .external_network_endpoint import HTTPNetworkEndpointClient
     from .external_network_gateway import NetworkGateway
     from .runtime import DockerController, RuntimeBoundaryError
@@ -176,13 +178,20 @@ def _service(config_file: Path) -> int:
         external_controller=effect_receiver, endpoint_client=endpoint,
         operator_key=Path(configuration["gateway_operator_key_file"]).read_bytes(),
         worker_key=Path(configuration["gateway_worker_key_file"]).read_bytes(), create=True)
-    holder: dict[str, Any] = {"coordinator": None, "supervisor": None}
+    holder: dict[str, Any] = {"coordinator": None, "supervisor": None, "launch_gate": None}
 
     def fence_check():
         coordinator = holder["coordinator"]
-        return {"closed": True, "reason": "UNBOUND"} if coordinator is None else coordinator.fence_state()
+        if coordinator is None or holder["launch_gate"] is None:
+            return {"closed": True, "reason": "UNBOUND"}
+        try:
+            holder["launch_gate"].assert_ready()
+        except ControlError:
+            return {"closed": True, "reason": "CHANNEL_GATE_UNAVAILABLE"}
+        return coordinator.fence_state()
 
     def before_proposal(index: int, _action: dict, _bridge: Any):
+        holder["launch_gate"].assert_ready()
         # The worker actually queued the second frame before this host barrier.
         # Fencing is durable and independent of the worker's claims.
         if configuration["case_id"] == "queued_after_stop" and index == 2:
@@ -216,17 +225,26 @@ def _service(config_file: Path) -> int:
         trusted_configuration=bridge_configuration,
         budget=BridgeBudget(duration_seconds=20, effect_seconds=15, reap_seconds=1))
     controller = FixtureController(configuration["docker_binary"])
-    supervisor = ExternalAgentSupervisor(directory / "supervisor.sqlite", directory / "registry.sqlite",
+    channel_inputs = {"spec": configuration["spec"], "run_binding": binding,
+        "bridge_configuration": bridge.configuration(),
+        "command_authority_url": command_admin.url, "effect_authority_url": effect_admin.url}
+    launch_gate = ClosedChannelLaunchGate(**channel_inputs, channels=build_channel_inventory(**channel_inputs))
+    holder["launch_gate"] = launch_gate
+    supervisor = ClosedChannelAgentSupervisor(directory / "supervisor.sqlite", directory / "registry.sqlite",
         supervisor_id=configuration["supervisor_pin"]["supervisor_id"],
         key_id=configuration["supervisor_pin"]["key_id"],
         private_key=Path(configuration["supervisor_private_key_file"]).read_bytes(),
         authority_client=command_receiver, controller=controller, bridge=bridge, run_binding=binding,
-        bridge_configuration=bridge.configuration(), create=True)
+        bridge_configuration=bridge.configuration(), create=True, launch_gate=launch_gate)
     holder["supervisor"] = supervisor
     coordinator = ExternalAgentCoordinator(directory / "coordinator.sqlite", run_binding=binding,
         supervisor=supervisor, command_admin_client=command_admin, effect_admin_client=effect_admin,
         effect_gateway=gateway, bridge=bridge, create=True, watcher_interval=0.4, start_watcher=True)
     holder["coordinator"] = coordinator
+    launch_gate.bind(coordinator)
+    if not coordinator.wait_watcher_ready(timeout=5):
+        coordinator.stop("CHANNEL_WATCHER_NOT_READY")
+        raise ControlError("AGENT_RUNTIME_CHANNEL_WATCHER_NOT_READY")
 
     def inventory(include_gateway: bool = True):
         result = supervisor.inventory()
@@ -576,7 +594,7 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                 if result.get("status") == "ERROR" or bound.get("status") == "ERROR":
                     raise ControlError("AGENT_RUNTIME_ROOT_SETUP_FAILED")
             operator_file = _key(directory / "operator.key")
-            config = {"case_id": name, "run_binding": binding, "supervisor_pin": supervisor_pin,
+            config = {"case_id": name, "spec": spec, "run_binding": binding, "supervisor_pin": supervisor_pin,
                 "supervisor_private_key_file": str(signing_files["supervisor-key"]),
                 "operator_key_file": str(operator_file), "docker_binary": docker_binary,
                 "gateway_id": "agent-gateway:" + name,
