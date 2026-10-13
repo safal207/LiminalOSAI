@@ -26,8 +26,6 @@ jobs:
         run: python3 -m unittest tests/test_containment_phase4.py -v
       - name: Re-run multi-agent governance tests
         run: python3 -m unittest tests/test_multi_agent_governance_v1_2.py -v
-      - name: Run full repository regression
-        run: make test
       - name: Verify benchmark acceptance invariants
         run: |
           python3 - <<'PY'

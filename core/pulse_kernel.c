@@ -3235,6 +3235,10 @@ static void finalize_kernel_runtime(const kernel_options *opts)
         collective_memory_match_trace = NULL;
     }
 
+    rgraph_destroy(&collective_graph);
+    collective_node_capacity = 0;
+    collective_edge_capacity = 0;
+
     astro_trace_close();
 
     if (g_qel_state) {

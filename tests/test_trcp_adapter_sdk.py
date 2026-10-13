@@ -237,6 +237,36 @@ class ExecutionReplaySeparationTests(unittest.TestCase):
 
 
 class StrictContractTests(unittest.TestCase):
+    def test_adapter_snapshot_detaches_all_mutable_fields(self):
+        source = normalize_workload(
+            consumer_type="example-order-system", requested_operation=["reserve"],
+            actor=["order-service"], input_data={"nested": [1]}, result={"nested": [2]},
+        )
+
+        class StaticAdapter:
+            consumer_type = "example-order-system"
+
+            def normalize(self, external_input):
+                return source
+
+        outcome = run_external_workload(StaticAdapter(), {})
+        expected = copy.deepcopy(outcome.normalized_workload)
+        source["requested_operation"].append("mutated")
+        source["actor"].append("mutated")
+        source["input"]["nested"].append(3)
+        source["result"]["nested"].append(4)
+        self.assertEqual(outcome.normalized_workload, expected)
+        self.assertEqual(verify_binding(outcome.evidence_bundle), outcome.binding_receipt)
+        outcome.normalized_workload["input"]["nested"].append(5)
+        self.assertEqual(verify_binding(outcome.evidence_bundle), outcome.binding_receipt)
+
+    def test_adapter_snapshot_still_validates_field_shapes(self):
+        for field, value in (("input", []), ("actor", []), ("requested_operation", " leading")):
+            source = OrderAdapter().normalize(REQUEST)
+            source[field] = value
+            with self.subTest(field=field), self.assertRaises(WorkloadNormalizationError):
+                build_workload_evidence(source)
+
     def test_normalized_contract_has_exact_six_fields_and_detaches_input(self):
         source = {"nested": {"value": 1}}
         workload = normalize_workload(

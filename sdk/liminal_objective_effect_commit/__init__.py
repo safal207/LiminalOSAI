@@ -151,7 +151,7 @@ class ObjectiveEffectAuthorizationReceipt:
             "inner_authorization_receipt_sha256": self.inner_authorization_receipt_sha256,
             "issued_at_unix": self.issued_at_unix,
             "expires_at_unix": self.expires_at_unix,
-            "authority": AUTHORITY,
+            "authority": dict(AUTHORITY),
         }
 
     def as_document(self) -> dict[str, Any]:
@@ -191,7 +191,7 @@ class ObjectiveEffectCommitReceipt:
             "effect_outcome": self.effect_outcome,
             "result_sha256": self.result_sha256,
             "reason_codes": list(self.reason_codes),
-            "authority": AUTHORITY,
+            "authority": dict(AUTHORITY),
         }
 
     def as_document(self) -> dict[str, Any]:
@@ -339,7 +339,7 @@ class ObjectiveBoundEffectCommitBroker:
             # Burn the outer objective lease before entering the inner effect
             # callback. Even callback failure cannot restore this authority.
             lease.consumed = True
-            before_commits = len(self.delegate.commit_receipts())
+            before_commits, _ = self.delegate.commit_cursor()
             try:
                 observation = self.delegate.consume_for_trusted_adapter(
                     lease.inner_lease_id,
@@ -406,6 +406,11 @@ class ObjectiveBoundEffectCommitBroker:
     def commit_receipts(self) -> tuple[dict[str, Any], ...]:
         return tuple(item.as_document() for item in self._commits)
 
+    def commit_cursor(self) -> tuple[int, str]:
+        """Read count and latest digest under the shared commit fence."""
+        with self.commit_fence.hold():
+            return len(self._commits), self._commits[-1].receipt_sha256 if self._commits else ZERO_SHA256
+
     def state_document(self) -> dict[str, Any]:
         with self.commit_fence.hold():
             objective_state = self.guard.state_document()
@@ -419,7 +424,7 @@ class ObjectiveBoundEffectCommitBroker:
                 "consumed_count": sum(1 for item in self._leases.values() if item.consumed),
                 "authorization_count": len(self._authorizations),
                 "commit_count": len(self._commits),
-                "authority": AUTHORITY,
+                "authority": dict(AUTHORITY),
             }
             return {**body, "state_sha256": canonical_sha256(body)}
 
@@ -500,10 +505,10 @@ class ObjectiveBoundEffectCommitBroker:
         raise ObjectiveEffectCommitError(reason)
 
     def _latest_inner_commit(self, before_count: int) -> str:
-        commits = self.delegate.commit_receipts()
-        if len(commits) <= before_count:
+        count, digest = self.delegate.commit_cursor()
+        if count <= before_count:
             return ZERO_SHA256
-        return _sha(commits[-1]["receipt_sha256"], "inner_commit_receipt_sha256")
+        return _sha(digest, "inner_commit_receipt_sha256")
 
     def _append_commit(
         self,

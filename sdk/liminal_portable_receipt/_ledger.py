@@ -99,6 +99,7 @@ class ProjectionLedger:
     def verify(self) -> dict[str, Any]:
         previous: str | None = None
         receipt_refs: list[str] = []
+        seen_receipts: set[str] = set()
         projection_hashes: list[str] = []
         for index, raw in enumerate(_read_lines(self.journal_path), start=1):
             expected_keys = {
@@ -119,8 +120,9 @@ class ProjectionLedger:
             body = {key: raw[key] for key in raw if key != "entry_sha256"}
             if canonical_sha256(body) != raw["entry_sha256"]:
                 raise ReceiptError("projection ledger entry hash mismatch")
-            if receipt_hash in receipt_refs:
+            if receipt_hash in seen_receipts:
                 raise ReceiptError("projection ledger contains duplicate receipt reference")
+            seen_receipts.add(receipt_hash)
             receipt_refs.append(receipt_hash)
             projection_hashes.append(projection_hash)
             previous = raw["entry_sha256"]

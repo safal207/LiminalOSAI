@@ -12,6 +12,7 @@ on:
       - sdk/liminal_governance_capsule/**
       - sdk/liminal_portable_receipt/**
       - examples/chatgpt_portable_action_receipt/self_check.py
+      - 'scripts/check_forbidden.py'
   workflow_dispatch:
 
 permissions:
@@ -119,8 +120,8 @@ jobs:
         run: |
           set -euo pipefail
           test -f docs/PILOT_001.md
-          ! grep -R --binary-files=without-match -n 'BEGIN PRIVATE KEY' docs/PILOT_001.md reports/pilot-001
-          ! grep -R --binary-files=without-match -nE '(Bearer [A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,})' docs/PILOT_001.md reports/pilot-001
+          python3 scripts/check_forbidden.py -- -R --binary-files=without-match -n 'BEGIN PRIVATE KEY' docs/PILOT_001.md reports/pilot-001
+          python3 scripts/check_forbidden.py -- -R --binary-files=without-match -nE '(Bearer [A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,})' docs/PILOT_001.md reports/pilot-001
 
       - name: Hash evidence bundle
         if: always()

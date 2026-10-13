@@ -66,10 +66,15 @@ consumer-owned replay hook. [Integration guide](docs/TRCP_ADAPTER_SDK.md).
 
 ### Run the baseline checks
 
+The complete suite also requires the OpenSSL executable.
+
 ```bash
-make test
-make test-repo
+make validate
 ```
+
+This builds both runtimes and runs smoke checks, C tests and all discovered
+Python tests. [Architecture review and refactoring](docs/ARCHITECTURE_REVIEW.md)
+describes the module boundaries, reproduced defects and efficiency probes.
 
 Additional governance and broker profiles have their own checks in the
 [documentation index](docs/README.md). Test results apply to the checks executed.
@@ -110,6 +115,7 @@ integration contract.
 | Area | Guide |
 | --- | --- |
 | Project scope and trust boundaries | [Experimental scope](docs/EXPERIMENTAL_SCOPE.md) |
+| Architecture, validation and efficiency | [Architecture review](docs/ARCHITECTURE_REVIEW.md) |
 | Plans, approvals and governance contracts | [Documentation index](docs/README.md) |
 | Deterministic evidence benchmark | [TRCP benchmark](docs/benchmark-v0.1.md) |
 | Longer-term direction | [Roadmap](ROADMAP.md) |

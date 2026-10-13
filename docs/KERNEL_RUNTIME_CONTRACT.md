@@ -21,6 +21,12 @@ The replacement proceeds in reviewable stages:
 
 `core/pulse_kernel.c` is compiled with its entrypoint renamed to `pulse_kernel_core_main`. The actual process `main` lives in `core/runtime/pulse_kernel_entry.c`.
 
+Both this entrypoint and `liminal_substrate.c` now use the profile-aware guard
+in `core/runtime/kernel_cli_guard.c`. Shared scalar options use the same strict
+numeric primitives; substrate-specific scalar options receive equivalent
+validation before initialization. Composite ranges and CSV configuration retain
+their legacy parsers and require a separate migration.
+
 The entry guard:
 
 1. validates critical numeric syntax and finiteness with the shared contract helpers;

@@ -122,6 +122,14 @@ class EvidenceAdapterHappyPathTests(unittest.TestCase):
 
 
 class DeepCopyIndependenceTests(unittest.TestCase):
+    def test_consumer_evidence_is_detached_in_both_directions(self):
+        consumer = {"input": {"rows": [1]}, "result": {"rows": [2]}}
+        bundle = build_evidence_bundle(run_default_scenario(), consumer_evidence=consumer)
+        consumer["input"]["rows"].append(3)
+        self.assertEqual(bundle["consumer_evidence"]["input"]["rows"], [1])
+        bundle["consumer_evidence"]["result"]["rows"].append(4)
+        self.assertEqual(consumer["result"]["rows"], [2])
+
     def test_bundle_mutate_does_not_affect_source_report(self):
         report = run_default_scenario()
         bundle = build_evidence_bundle(report)

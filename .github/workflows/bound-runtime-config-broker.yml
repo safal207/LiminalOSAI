@@ -48,9 +48,6 @@ jobs:
       - name: Re-run offline wheel materializer
         run: python3 -m unittest tests/test_offline_wheel_materializer.py -v
 
-      - name: Run full repository regression
-        run: make test
-
       - name: Verify authority boundary
         run: |
           python3 - <<'PY'

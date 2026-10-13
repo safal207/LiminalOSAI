@@ -5,6 +5,9 @@ Python SDKs for governed host actions and verifiable evidence. Start with the
 [repository overview](../README.md) and [experimental scope](EXPERIMENTAL_SCOPE.md),
 then choose a route below.
 
+For current boundaries, reproduced defects and performance probes, read the
+[architecture review and refactoring](ARCHITECTURE_REVIEW.md).
+
 ## C11 runtime and diagnostics
 
 | Goal | Start here |

@@ -151,9 +151,6 @@ jobs:
           python3 -m unittest tests/test_offline_wheel_materializer.py -v
           python3 -m unittest tests/test_escape_trajectory_benchmark_v1.py -v
 
-      - name: Run full repository regression
-        run: make test
-
       - name: Verify authority boundary
         run: |
           python3 - <<'PY'

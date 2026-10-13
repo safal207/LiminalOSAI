@@ -27,13 +27,25 @@ This runbook defines the repository-level control plane that must surround the r
 
 ## Minimum always-required checks
 
-The current Core CI workflow produces three always-on jobs that should be required for `main`:
+`Governance Required Gate` is the always-on baseline context for every pull
+request targeting `main`. It also runs on pushes to `main` and manual dispatch.
+The job calls `make validate`: both binaries, smoke checks, all C test executables
+and automatic discovery of every `tests/test_*.py` module. Empty discovery,
+import errors, failures, skipped tests and expected failures cannot satisfy it.
+
+The Core CI workflow retains complete compiler and sanitizer runs when its path
+filters apply:
 
 - `gcc strict build`
 - `clang strict build`
 - `ASan and UBSan`
 
-Repository security workflows that are intentionally path- or feature-scoped must also be required whenever they are applicable to a PR. Prefer a GitHub Ruleset / required-workflow configuration for this when available, because static branch-protection check contexts are a poor fit for jobs that do not run on every change.
+These Core jobs are path-scoped on pull requests; they are not emitted for every
+documentation-only change. Repository security workflows that are intentionally
+path- or feature-scoped must also be required whenever they are applicable to a
+PR. Prefer a GitHub Ruleset / required-workflow configuration for this when
+available, because static branch-protection check contexts are a poor fit for
+jobs that do not run on every change.
 
 Examples of security-critical workflow families currently present in the repository include governance/identity, portable receipts, capability broker, egress, causal escalation, containment, runtime mediation, session recorder, and isolated execution checks. Do not mark a path-scoped check as globally required unless the workflow is guaranteed to emit that check for every pull request; otherwise merges can become permanently blocked on an expected-but-never-created check.
 
@@ -53,8 +65,21 @@ Use a repository Ruleset targeting the default branch if available. Otherwise us
 
 - Require status checks before merging.
 - Require the branch to be up to date before merging, unless a merge queue/ruleset provides an equivalent exact-head guarantee.
-- Require the three Core CI jobs listed above.
+- Require `Governance Required Gate` on every pull request targeting `main`.
+- Enforce the three Core CI jobs listed above when their path filters apply.
 - Add security-critical path-specific workflows through required-workflow rules where GitHub supports them.
+
+The baseline centralizes generic repository regression coverage. Specialized
+workflows retain their focused assertions, real Docker probes, signed fixtures,
+offline verifier checks and evidence exports. A baseline pass does not establish
+that an applicable backend or evidence workflow ran. Redundant generic full-suite
+steps have been removed from those workflows; compiler and sanitizer jobs still
+run the complete suite under their respective build profiles.
+
+Forbidden-content checks use `scripts/check_forbidden.py` to preserve the grep
+exit-status contract: a match fails, a clean scan passes, and scanner errors fail.
+The helper suppresses matching content, and scanner workflows include its path
+in their triggers. A later successful command cannot repair a failed scan.
 
 ### History / destructive operations
 
@@ -135,7 +160,8 @@ The issue may be closed only when all are true:
 - [ ] GitHub branch/ruleset metadata reports protection/enforcement for `main`.
 - [ ] Direct ordinary pushes are rejected.
 - [ ] PRs are required.
-- [ ] Core CI required checks are configured.
+- [ ] The always-on baseline required check is configured.
+- [ ] Applicable Core CI checks are enforced.
 - [ ] Applicable security-critical workflows are enforced without creating permanently pending checks.
 - [ ] Exact-head/up-to-date behavior is enforced.
 - [ ] Force pushes are blocked.

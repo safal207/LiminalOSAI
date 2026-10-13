@@ -8,8 +8,10 @@ are runtime vocabulary; they do not establish cognition or a security guarantee.
 
 ## Build and first run
 
-Requirements: GCC (or a compatible C compiler), Make and Python 3. The build
-produces `build/pulse_kernel` and `build/liminal_core`.
+Requirements: GCC (or a compatible C compiler), Make and Python 3. Complete
+repository validation also uses Git and the OpenSSL executable with Ed25519
+support. CI uses Python 3.12. The build produces the research binaries
+`build/pulse_kernel` and `build/liminal_core`.
 
 ```bash
 make
@@ -18,8 +20,21 @@ make check
 ./build/liminal_core --substrate --limit=2 --trace
 ```
 
-Run C and Python regressions with `make test`, repository hygiene with
-`make test-repo`, and remove compiled outputs with `make clean`.
+Run the complete baseline with `make validate`. It builds both binaries, runs
+short smoke checks, all C test executables and every automatically discovered
+`tests/test_*.py` module. The runner rejects empty discovery, import failures,
+failed assertions and skipped tests, and prints its execution counts.
+
+`make test` runs C and Python regressions without the smoke checks. For focused
+work, use `make test-c` or
+`make test-python PYTHON_TESTS=tests/test_pulse_kernel_cli.py`;
+`make validate` always discovers the
+full Python suite even if `PYTHON_TESTS` is set. Repository hygiene is available
+separately through `make test-repo` and is also included in full discovery.
+
+Object and test dependencies track header changes automatically. Run
+`make clean` before changing the compiler or build flags so existing objects
+cannot retain a previous build profile.
 
 ## Runtime options
 
@@ -48,6 +63,9 @@ See [`core/pulse_kernel.c`](../core/pulse_kernel.c) and the runtime sources for 
 - Phoenix rebirth self-run: make rebirth
 - Phoenix trace report: make report
 - Metabolic report: make report-metabolic
+
+Plots use the optional Matplotlib dependency. Diagnostic report targets are
+separate from validation; a missing trace or plot is not a passed test.
 - Long substrate diagnostic (60 cycles, writes logs & summary): make long-run-diagnostics
 
 

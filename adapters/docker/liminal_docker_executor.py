@@ -9,11 +9,15 @@ that timeout cleanup verifies the named container no longer exists.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
 import secrets
+import selectors
 import subprocess
 import sys
+import time
 from typing import Any, Sequence
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -35,6 +39,21 @@ ZERO_SHA256 = "0" * 64
 
 class DockerExecutionError(RuntimeError):
     pass
+
+
+class DockerExecutionTimeout(DockerExecutionError):
+    pass
+
+
+class DockerOutputLimitError(DockerExecutionError):
+    pass
+
+
+@dataclass(frozen=True)
+class DockerRunResult:
+    session_id: str
+    returncode: int
+    stdout: bytes
 
 
 def _validate_container_name(value: str) -> str:
@@ -280,21 +299,7 @@ class DockerProcessTreeBackend:
         return {**body, "evidence_sha256": canonical_sha256(body)}
 
     def _container_exists(self) -> bool:
-        proc = subprocess.run(
-            [self.docker_binary, "inspect", self.session_id],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=10,
-            check=False,
-            shell=False,
-        )
-        if proc.returncode == 0:
-            return True
-        if _is_not_found(proc.stderr):
-            return False
-        raise DockerExecutionError("docker inspect failed during survivor verification")
+        return _container_exists(self.session_id, docker_binary=self.docker_binary)
 
     def _require_session(self, session_id: str) -> None:
         if session_id != self.session_id:
@@ -308,38 +313,85 @@ class DockerExecutor:
         self.docker_binary = docker_binary
 
     def __call__(self, plan: IsolatedExecutionPlan) -> ExecutionObservation:
-        session_id = _new_session_id(plan)
-        argv = build_docker_argv(plan, docker_binary=self.docker_binary, container_name=session_id)
-        try:
-            proc = subprocess.run(
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=plan.timeout_seconds,
-                check=False,
-                shell=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            _remove_container_verified(session_id, docker_binary=self.docker_binary)
-            raise DockerExecutionError("isolated container timed out; process tree removed") from exc
-
-        # `docker run --rm` should have removed the container. Verify the exact
-        # trusted name rather than assuming client exit means process-tree exit.
-        if _container_exists(session_id, docker_binary=self.docker_binary):
-            _remove_container_verified(session_id, docker_binary=self.docker_binary)
-            raise DockerExecutionError("completed docker run left a surviving execution session")
-
+        proc = run_docker_plan(plan, docker_binary=self.docker_binary)
         return ExecutionObservation.success({
             "backend": "docker",
             "plan_sha256": plan.plan_sha256,
             "image_id": plan.image_id,
             "exit_code": proc.returncode,
             "workload_status": "zero" if proc.returncode == 0 else "nonzero",
-            "execution_session_sha256": canonical_sha256(session_id),
+            "execution_session_sha256": canonical_sha256(proc.session_id),
             "stdout": "discarded",
             "stderr": "discarded",
         })
+
+
+def _bounded_stdout(proc: subprocess.Popen[bytes], *, deadline: float, maximum: int) -> bytes:
+    """Drain at most the allowed bytes plus one overflow byte before aborting."""
+    if proc.stdout is None:
+        raise DockerExecutionError("missing bounded stdout pipe")
+    output = bytearray()
+    with selectors.DefaultSelector() as selector:
+        selector.register(proc.stdout, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("governed docker session", 0)
+            if not selector.select(remaining):
+                raise subprocess.TimeoutExpired("governed docker session", 0)
+            chunk = os.read(proc.stdout.fileno(), min(65536, maximum + 1 - len(output)))
+            if not chunk:
+                return bytes(output)
+            output.extend(chunk)
+            if len(output) > maximum:
+                raise DockerOutputLimitError("isolated container stdout exceeded its byte limit")
+
+
+def run_docker_plan(
+    plan: IsolatedExecutionPlan,
+    *,
+    docker_binary: str = "docker",
+    stdout_limit: int | None = None,
+) -> DockerRunResult:
+    """Run one named session, with bounded output and verified terminal cleanup.
+
+    Workload stderr is discarded and stdout is either discarded or drained into
+    a bounded buffer. A client timeout, output overflow, interruption or failed
+    survivor check always attempts forced removal of this exact session. Cleanup
+    errors propagate; they must never be represented as successful containment.
+    """
+    if stdout_limit is not None and (isinstance(stdout_limit, bool) or not isinstance(stdout_limit, int) or stdout_limit < 1):
+        raise DockerExecutionError("stdout_limit must be a positive byte count")
+    session_id = _new_session_id(plan)
+    argv = build_docker_argv(plan, docker_binary=docker_binary, container_name=session_id)
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL if stdout_limit is None else subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        shell=False,
+    )
+    deadline = time.monotonic() + plan.timeout_seconds
+    try:
+        output = b"" if stdout_limit is None else _bounded_stdout(proc, deadline=deadline, maximum=stdout_limit)
+        returncode = proc.wait(timeout=max(0, deadline - time.monotonic()))
+        # Client exit alone does not establish that the daemon removed the job.
+        if _container_exists(session_id, docker_binary=docker_binary):
+            raise DockerExecutionError("completed docker run left a surviving execution session")
+        return DockerRunResult(session_id, returncode, output)
+    except BaseException as exc:
+        try:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+        finally:
+            _remove_container_verified(session_id, docker_binary=docker_binary)
+        if isinstance(exc, subprocess.TimeoutExpired):
+            raise DockerExecutionTimeout("isolated container timed out; process tree removed") from exc
+        raise
+    finally:
+        if proc.stdout is not None:
+            proc.stdout.close()
 
 
 def build_process_tree_supervisor(*, session_id: str, docker_binary: str = "docker") -> ProcessTreeContainmentSupervisor:
@@ -402,21 +454,8 @@ def _probe(plan: IsolatedExecutionPlan, argv: Sequence[str]) -> subprocess.Compl
         timeout_seconds=min(plan.timeout_seconds, 15),
         profile=plan.profile,
     )
-    session_id = _new_session_id(probe_plan)
-    try:
-        return subprocess.run(
-            build_docker_argv(probe_plan, container_name=session_id),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=probe_plan.timeout_seconds,
-            check=False,
-            shell=False,
-        )
-    except subprocess.TimeoutExpired:
-        _remove_container_verified(session_id)
-        raise
+    result = run_docker_plan(probe_plan, stdout_limit=64 * 1024)
+    return subprocess.CompletedProcess(list(argv), result.returncode, result.stdout.decode("utf-8"), "")
 
 
 def self_test(*, image_id: str, host_workspace: str) -> dict[str, bool]:

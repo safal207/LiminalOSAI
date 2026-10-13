@@ -29,9 +29,15 @@ typedef struct {
     float pulse_adjust;
     float integral;
     float last_adjust;
+    /* Owned buffer bounds. Added fields change the C ABI: rebuild all users. */
+    int node_capacity;
+    int edge_capacity;
 } RGraph;
 
+/* Initialize fresh storage; destroy an initialized graph before reinitializing. */
 void rgraph_init(RGraph *g, int nmax_nodes, int nmax_edges);
+/* Release init-owned buffers and reset the graph; repeated calls are harmless. */
+void rgraph_destroy(RGraph *g);
 void rgraph_update_edges(RGraph *g);
 float rgraph_compute_coh(RGraph *g);
 float rgraph_ensemble_adjust(RGraph *g, float target);

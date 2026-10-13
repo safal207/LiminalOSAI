@@ -148,9 +148,6 @@ jobs:
               )
           PY
 
-      - name: Run full repository regression
-        run: make test
-
       - name: Verify authority boundaries
         run: |
           python3 - <<'PY'
