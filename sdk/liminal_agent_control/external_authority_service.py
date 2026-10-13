@@ -320,7 +320,7 @@ def main() -> int:
         parser.add_argument("--" + field, type=Path, required=True)
     parser.add_argument("--initialize", action="store_true")
     parser.add_argument("--port", type=int, default=0)
-    parser.add_argument("--profile", choices=("records", "owned-loopback-network-v1", "owned-docker-command-v1"), default="records")
+    parser.add_argument("--profile", choices=("records", "owned-loopback-network-v1", "owned-docker-command-v1", "owned-docker-agent-v1"), default="records")
     parser.add_argument("--endpoint-pin-file", type=Path)
     parser.add_argument("--supervisor-pin-file", type=Path)
     args = parser.parse_args()
@@ -363,7 +363,11 @@ def main() -> int:
                 supervisor_pin = json.loads(pin_wire)
             except (ValueError, UnicodeError) as exc:
                 raise ControlError("EXTERNAL_AUTHORITY_SUPERVISOR_PIN_INVALID") from exc
-            store = ExternalCommandAuthorityStore(args.db, supervisor_pin=supervisor_pin, **options)
+            if args.profile == "owned-docker-agent-v1":
+                from .external_agent_authority import ExternalAgentAuthorityStore
+                store = ExternalAgentAuthorityStore(args.db, supervisor_pin=supervisor_pin, **options)
+            else:
+                store = ExternalCommandAuthorityStore(args.db, supervisor_pin=supervisor_pin, **options)
         server = make_server(store, _private_key_file(args.operator_key_file), _private_key_file(args.receiver_key_file), port=args.port)
         print(json.dumps({"url": "http://127.0.0.1:" + str(server.server_address[1]), "pin": store.pin()}), flush=True)
         try:
