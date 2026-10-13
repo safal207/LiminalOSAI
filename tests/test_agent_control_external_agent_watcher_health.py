@@ -56,6 +56,19 @@ class ExternalAgentWatcherHealthTests(unittest.TestCase):
         self.assertFalse(self.coordinator.watcher_health()["ready"])
         self.assertTrue(self.coordinator.fence_state()["closed"])
 
+    def test_local_admission_closure_does_not_wait_for_remote_control(self):
+        command, effect = self.coordinator.command_admin_client, self.coordinator.effect_admin_client
+        with patch.object(command, "stop", side_effect=AssertionError("remote STOP attempted")), \
+                patch.object(effect, "stop", side_effect=AssertionError("remote STOP attempted")), \
+                patch.object(command, "status", side_effect=AssertionError("remote status attempted")), \
+                patch.object(effect, "status", side_effect=AssertionError("remote status attempted")):
+            result = self.coordinator.close_admission("UNIT_EFFECT_GUARD")
+        self.assertTrue(result["closed"])
+        self.assertEqual(result["state"], "CLOSING")
+        self.assertEqual(result["reason"], "UNIT_EFFECT_GUARD")
+        self.assertEqual(self.fixture.command_store.status("command-root")["state"], "ACTIVE")
+        self.assertEqual(self.fixture.effect_store.status("effect-root")["state"], "ACTIVE")
+
     def test_invalid_health_and_wait_windows_rejected(self):
         for value in (True, 0, -1, float("nan"), float("inf"), 6):
             with self.subTest(value=value), self.assertRaises(ControlError):

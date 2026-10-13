@@ -59,6 +59,9 @@ Its [closed channel launcher](docs/AGENT_CONTROL_CLOSED_CHANNEL_LAUNCH.md)
 requires the fixed workflow's complete 14-channel inventory and a live, fresh
 host watcher. Missing or changed routes deny launch; actual Docker channel
 inspection is repeated before START and each endpoint-effect proposal.
+The [effect dispatch gate](docs/AGENT_CONTROL_EFFECT_DISPATCH_GATE.md) repeats
+readiness after signed BEGIN and before entering the endpoint POST callback;
+failure closes local admission while retaining the unresolved reservation.
 
 The [orientation graph](docs/AGENT_CONTROL_ORIENTATION.md) adds distinct
 per-agent observed trajectories, evidence freshness and bounded excursions

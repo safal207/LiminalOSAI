@@ -74,6 +74,8 @@ SOURCE_REQUIRED = frozenset({"scripts/verify_external_stop_evidence.py", "script
     "sdk/liminal_agent_control/external_agent_launch.py", "sdk/liminal_agent_control/external_agent_channels.py",
     "tests/test_agent_control_external_agent_launch.py", "tests/test_agent_control_external_agent_channels.py",
     "tests/test_agent_control_external_agent_watcher_health.py", "docs/AGENT_CONTROL_CLOSED_CHANNEL_LAUNCH.md",
+    "sdk/liminal_agent_control/external_agent_effect_gateway.py",
+    "tests/test_agent_control_external_agent_effect_gateway.py", "docs/AGENT_CONTROL_EFFECT_DISPATCH_GATE.md",
     "README.md", ".github/workflows/agent-control.yml"})
 
 
@@ -973,15 +975,17 @@ def _bridge(value: Any, binding: dict[str, Any], configuration: Any, grants: dic
         and value["execution_authorized"] is False and value["sender_quiescence"] == "NOT_ESTABLISHED",
         "bridge immutable public configuration/authority invalid")
     route = configuration["effect_gateway_configuration"]
-    route_fields = {"schema", "profile", "gateway_id", "authority_url", "authority_pin", "authority_role", "endpoint_url", "endpoint_pin",
+    route_fields = {"schema", "profile", "gateway_id", "authority_url", "authority_pin", "authority_role", "endpoint_url", "endpoint_pin", "dispatch_gate",
         "operator_key_digest", "worker_key_digest", "authority_request_key_digest", "endpoint_request_key_digest"}
-    require(type(route) is dict and set(route) == route_fields and route["schema"] == "liminal-network-gateway-store-v1"
+    require(type(route) is dict and set(route) == route_fields and route["schema"] == "liminal-closed-channel-effect-gateway-store-v1"
         and route["profile"] == "owned-loopback-network-v1" and _id(route["gateway_id"])
         and route["authority_pin"] == binding["effect"]["authority_pin"] and route["endpoint_pin"] == binding["endpoint_pin"]
         and route["authority_role"] == "receiver" and all(hexadecimal(route[k]) for k in
             ("operator_key_digest", "worker_key_digest", "authority_request_key_digest", "endpoint_request_key_digest"))
         and len({route[k] for k in ("operator_key_digest", "worker_key_digest", "authority_request_key_digest", "endpoint_request_key_digest")}) == 4,
         "bridge host effect route profile/pins/roles invalid")
+    require(canonical(route["dispatch_gate"]) == canonical(_effect_dispatch_contract(binding)),
+        "bridge mandatory post-BEGIN dispatch contract invalid")
     for name in ("authority_url", "endpoint_url"):
         raw_url = route[name]
         try:
@@ -1226,6 +1230,85 @@ def _closed_loopback_url(value: Any) -> str:
     except ValueError as exc:
         raise EvidenceError("closed-channel service URL invalid") from exc
     return value
+
+
+def _effect_dispatch_contract(binding: dict) -> dict:
+    """Reconstruct the mandatory host guard without importing its runtime."""
+    body = {"schema": "liminal-agent-effect-dispatch-contract-v1", "stage": "BEFORE_ENDPOINT_POST",
+        "run_binding_digest": sha(binding), "effect_action_digests": binding["effect_action_digests"],
+        "gate_required": True, "failure_outcome": "UNKNOWN_PENDING", "execution_authorized": False}
+    return {**body, "contract_digest": sha(body)}
+
+
+def _effect_dispatch_boundary(value: Any, *, binding: dict, configuration: dict, gateway: dict,
+                              log: dict, before: dict, after: dict) -> int:
+    """Bind unsigned host guard diagnostics to authenticated BEGIN/effect facts.
+
+    This fixed twelve-case matrix expects only READY guards. Local BLOCKED
+    fault tests exercise the runtime separately and create no Docker verdict.
+    A missing commit response is supported through the endpoint's durable
+    request census and independently verified signed receipt recovered later.
+    This checks a post-BEGIN/pre-POST host observation, never an endpoint-side
+    final commit guard or a signature authenticating the host observation.
+    """
+    contract = _effect_dispatch_contract(binding)
+    require(type(configuration) is dict
+        and configuration.get("schema") == "liminal-closed-channel-effect-gateway-store-v1"
+        and configuration.get("profile") == "owned-loopback-network-v1"
+        and canonical(configuration.get("dispatch_gate")) == canonical(contract),
+        "mandatory dedicated effect gateway profile/dispatch contract invalid")
+    fields = {"schema", "contract_digest", "events", "execution_authorized"}
+    require(type(value) is dict and set(value) == fields
+        and value["schema"] == "liminal-agent-effect-dispatch-boundary-v1"
+        and value["contract_digest"] == contract["contract_digest"] and value["execution_authorized"] is False
+        and type(value["events"]) is list and len(value["events"]) <= 128,
+        "mandatory post-BEGIN effect dispatch boundary missing/invalid")
+    require(type(before) is dict and type(after) is dict and type(before.get("requests")) is list
+        and type(after.get("requests")) is list
+        and canonical(after["requests"][:len(before["requests"])]) == canonical(before["requests"]),
+        "post-BEGIN dispatch endpoint request history invalid")
+    allowed = {sha(action): action for action in binding["effect_actions"]}
+    requests = {}
+    for request in after["requests"][len(before["requests"]):]:
+        require(type(request) is dict and set(request) == {"action_id", "permit_request", "permit", "permit_digest"}
+            and type(request["permit"]) is dict and type(request["permit"].get("result")) is dict,
+            "post-BEGIN dispatch actual endpoint request invalid")
+        reservation = request["permit"]["result"].get("reservation_id")
+        issued = log["permits"].get(reservation)
+        pair = {"request": request["permit_request"], "response": request["permit"]}
+        require(_id(reservation) and reservation not in requests and issued is not None
+            and sha(issued["action"]) in allowed and request["action_id"] == issued["action"]["action_id"]
+            and request["permit"]["result"].get("status") == "PERMITTED"
+            and canonical(pair) == canonical(issued["pair"]) and request["permit_digest"] == sha(request["permit"])
+            and any(canonical(item) == canonical(pair) for item in gateway["authority_evidence"]),
+            "post-BEGIN dispatch actual POST lacks exact fresh gateway BEGIN")
+        requests[reservation] = issued
+    receipts = {receipt["reservation_id"]: receipt for receipt in after["receipts"]}
+    event_fields = {"schema", "stage", "action_digest", "reservation_id", "permit_request_digest",
+        "permit_response_digest", "observed_at", "result", "reason", "execution_authorized"}
+    seen, previous = set(), -1
+    for event in value["events"]:
+        require(type(event) is dict and set(event) == event_fields
+            and event["schema"] == "liminal-agent-effect-dispatch-observation-v1"
+            and event["stage"] == "BEFORE_ENDPOINT_POST" and event["result"] == "READY"
+            and event["reason"] is None and event["execution_authorized"] is False
+            and all(hexadecimal(event[name]) for name in ("action_digest", "permit_request_digest", "permit_response_digest"))
+            and _id(event["reservation_id"]) and _number(event["observed_at"])
+            and event["observed_at"] >= previous, "post-BEGIN dispatch READY event fields/order invalid")
+        reservation = event["reservation_id"]
+        require(reservation in requests and reservation not in seen and reservation in receipts,
+            "post-BEGIN dispatch READY census has extra/duplicate/uncommitted event")
+        issued, receipt = requests[reservation], receipts[reservation]
+        pair = issued["pair"]
+        require(event["action_digest"] == sha(issued["action"])
+            and event["permit_request_digest"] == sha(pair["request"])
+            and event["permit_response_digest"] == sha(pair["response"])
+            and pair["response"]["issued_at"] <= event["observed_at"] <= receipt["committed_at"],
+            "post-BEGIN dispatch event action/permit/time binding invalid")
+        seen.add(reservation)
+        previous = event["observed_at"]
+    require(seen == set(requests), "actual endpoint POST missing mandatory post-BEGIN dispatch READY event")
+    return len(seen)
 
 
 def _closed_channel_contract(spec: dict, binding: dict, bridge: dict, processes: Any) -> dict:
@@ -1586,7 +1669,7 @@ def _independent_docker(value: Any, command: dict[str, Any], *, absent: bool = F
 
 def _gateway_inventory(value: Any, binding: dict[str, Any], grants: dict[str, Any], log: dict[str, Any],
                        endpoint_pairs: set[bytes], actual_receipts: dict[str, Any]) -> None:
-    fields = {"gateway_id", "profile", "authority_pin", "authority_url", "endpoint_pin", "endpoint_url", "actions", "authority_evidence", "endpoint_evidence", "execution_authorized"}
+    fields = {"gateway_id", "profile", "authority_pin", "authority_url", "endpoint_pin", "endpoint_url", "actions", "authority_evidence", "endpoint_evidence", "execution_authorized", "dispatch_boundary"}
     require(type(value) is dict and set(value) == fields and value["profile"] == "owned-loopback-network-v1"
         and value["authority_pin"] == binding["effect"]["authority_pin"] and value["endpoint_pin"] == binding["endpoint_pin"]
         and value["execution_authorized"] is False and _id(value["gateway_id"])
@@ -1714,7 +1797,7 @@ def verify_report(report: Any, *, repo_root: Path = ROOT, expected_source_sha: s
         and type(daemon["daemon_id"]) is str and daemon["daemon_id"] and type(daemon["image_id"]) is str
         and re.fullmatch(r"sha256:[0-9a-f]{64}", daemon["image_id"]), "actual Docker daemon/image identity missing")
     command_receipts, all_containers, bridges, previous_endpoint = {}, set(), {}, None
-    channel_observation_count = 0
+    channel_observation_count = effect_dispatch_observation_count = 0
     expected_effect = {name: int(name in {"useful_completion", "duplicate_after_commit", "queued_after_stop",
         "pending_effect_stop", "lost_endpoint_response", "observation_outage"}) for name in CASE_IDS}
     for name in CASE_IDS:
@@ -1813,6 +1896,9 @@ def verify_report(report: Any, *, repo_root: Path = ROOT, expected_source_sha: s
         route = after["bridge_configuration"]["effect_gateway_configuration"]
         require(all(case["gateway_inventory"][key] == route[key] for key in ("gateway_id", "authority_url", "authority_pin", "endpoint_url", "endpoint_pin")),
             "actual gateway route differs from fixed bridge configuration")
+        effect_dispatch_observation_count += _effect_dispatch_boundary(case["gateway_inventory"]["dispatch_boundary"],
+            binding=binding, configuration=route, gateway=case["gateway_inventory"], log=logs["effect"],
+            before=case["endpoint_before"], after=case["endpoint_after"])
         snapshots = case.get("coordinator_snapshots")
         require(type(snapshots) is list and snapshots and len(snapshots) <= 64, "actual coordinator snapshots missing")
         prior_time, statuses = -1, []
@@ -1942,6 +2028,8 @@ def verify_report(report: Any, *, repo_root: Path = ROOT, expected_source_sha: s
         "signed_lifecycle_receipts": len(command_receipts), "signed_endpoint_receipts": len(actual_receipts), "source_inputs_verified": source_count,
         "closed_channel_contracts_verified": len(CASE_IDS), "closed_channel_observations_verified": channel_observation_count,
         "channel_observation_signatures": "NOT_ESTABLISHED",
+        "post_begin_dispatch_guards_verified": effect_dispatch_observation_count,
+        "effect_dispatch_observation_signatures": "NOT_ESTABLISHED", "endpoint_final_commit_guard": "NOT_ESTABLISHED",
         "checkpoint_verification_status": "EXTERNAL_ANCHORED_VERIFIED" if trusted_command_anchor is not None and trusted_effect_anchor is not None else "LOCAL_SIGNATURE_ONLY",
         "command_authority_pin_scope": "caller_supplied" if expected_command_authority_pin is not None else "report_fixture",
         "effect_authority_pin_scope": "caller_supplied" if expected_effect_authority_pin is not None else "report_fixture",

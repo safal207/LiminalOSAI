@@ -402,17 +402,23 @@ class ExternalAgentTracePacketTests(unittest.TestCase):
         self.action, self.grant, self.endpoint_pin = network.action, network.grant, network.pin
         self.binding = {"run_id": "run:unit", "command": {"root_id": "root:command", "execution_id": "execution:command", "epoch": 1},
             "effect": {"root_id": self.action["root_id"], "execution_id": self.action["execution_id"], "epoch": 1},
-            "effect_actions": [self.action], "endpoint_pin": self.endpoint_pin}
+            "effect_actions": [self.action], "effect_action_digests": [verifier.sha(self.action)], "endpoint_pin": self.endpoint_pin}
         authority_pin = {"authority_id": "authority:effect", "key_id": "authority:key", "public_key": "7" * 64}
         self.binding["effect"]["authority_pin"] = authority_pin
         self.configuration = {"run_binding": {"run_id": "run:unit", **{k: self.binding["effect"][k] for k in ("root_id", "execution_id", "epoch")}},
             "actions": [self.action], "admission_observer_required": True,
             "owned_command_binding": deepcopy(self.binding["command"]), "owned_run_binding_digest": verifier.sha(self.binding),
-            "effect_gateway_configuration": {"schema": "liminal-network-gateway-store-v1", "profile": "owned-loopback-network-v1",
+            "effect_gateway_configuration": {"schema": "liminal-closed-channel-effect-gateway-store-v1", "profile": "owned-loopback-network-v1",
                 "gateway_id": "gateway:unit", "authority_url": "http://127.0.0.1:31235", "authority_pin": authority_pin,
                 "authority_role": "receiver", "endpoint_url": "http://127.0.0.1:31234", "endpoint_pin": self.endpoint_pin,
                 "operator_key_digest": "1" * 64, "worker_key_digest": "2" * 64,
                 "authority_request_key_digest": "3" * 64, "endpoint_request_key_digest": "4" * 64}}
+        self.configuration["effect_gateway_configuration"]["dispatch_gate"] = {
+            "schema": "liminal-agent-effect-dispatch-contract-v1", "stage": "BEFORE_ENDPOINT_POST",
+            "run_binding_digest": verifier.sha(self.binding), "effect_action_digests": self.binding["effect_action_digests"],
+            "gate_required": True, "failure_outcome": "UNKNOWN_PENDING", "execution_authorized": False}
+        descriptor = self.configuration["effect_gateway_configuration"]["dispatch_gate"]
+        descriptor["contract_digest"] = verifier.sha(descriptor)
         self.log = {"permits": {}, "terminal": {}, "receiver_pin": self.endpoint_pin}
 
     def fixture(self):
@@ -486,6 +492,123 @@ class ExternalAgentTracePacketTests(unittest.TestCase):
         value["callback_finished"] = True
         with self.assertRaises(verifier.EvidenceError):
             self.parse(value)
+
+
+class ExternalAgentDispatchBoundaryPacketTests(unittest.TestCase):
+    """Independent signed seams check the guard's packet binding, not Docker."""
+
+    def setUp(self):
+        network = ExternalAgentNetworkPacketTests()
+        network.setUp()
+        self.action, self.grant, self.endpoint_pin = network.action, network.grant, network.pin
+        self.binding = {"run_id": "run:unit", "effect_actions": [self.action],
+            "effect_action_digests": [verifier.sha(self.action)]}
+        descriptor = {"schema": "liminal-agent-effect-dispatch-contract-v1", "stage": "BEFORE_ENDPOINT_POST",
+            "run_binding_digest": verifier.sha(self.binding), "effect_action_digests": self.binding["effect_action_digests"],
+            "gate_required": True, "failure_outcome": "UNKNOWN_PENDING", "execution_authorized": False}
+        descriptor["contract_digest"] = verifier.sha(descriptor)
+        self.configuration = {"schema": "liminal-closed-channel-effect-gateway-store-v1",
+            "profile": "owned-loopback-network-v1", "dispatch_gate": descriptor}
+        authority_key = Ed25519PrivateKey.generate()
+        authority_pin = {"authority_id": "authority:unit", "key_id": "authority:key", "public_key": authority_key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()}
+        request = {"schema": "liminal-external-authority-request-v1", "role": "receiver", "operation": "begin",
+            "nonce": "b" * 64, "payload": {"action": self.action, "authorization": self.grant}}
+        result = {"status": "PERMITTED", "outcome": None, "receipt": None,
+            "action_digest": verifier.sha(self.action), "receiver_id": self.endpoint_pin["endpoint_id"],
+            "reservation_id": "reservation:effect", **{key: self.action[key] for key in
+                ("action_id", "attempt_id", "root_id", "execution_id", "epoch")}}
+        body = {"schema": "liminal-external-authority-response-v1", "authority_id": authority_pin["authority_id"],
+            "key_id": authority_pin["key_id"], "operation": "begin", "request_digest": verifier.sha(request),
+            "issued_at": 90, "result": result}
+        pair = {"request": request, "response": {**body, "signature": authority_key.sign(
+            b"liminal-external-authority-response-v1\x00" + verifier.canonical(body)).hex()}}
+        # Establish both generic signed seams before checking unsigned host
+        # diagnostics. The guard checker never authenticates an observer.
+        verifier._network_permit(pair, authority_pin, self.endpoint_pin)
+        receipt = network.signed()
+        verifier._network_receipt(receipt, self.endpoint_pin, self.action, self.grant, "reservation:effect")
+        self.log = {"permits": {"reservation:effect": {"pair": pair, "action": self.action, "grant": self.grant}}}
+        self.gateway = {"authority_evidence": [pair]}
+        self.before = {"requests": [], "receipts": []}
+        self.after = {"requests": [{"action_id": self.action["action_id"], "permit_request": request,
+            "permit": pair["response"], "permit_digest": verifier.sha(pair["response"])}], "receipts": [receipt]}
+        self.boundary = {"schema": "liminal-agent-effect-dispatch-boundary-v1",
+            "contract_digest": descriptor["contract_digest"], "execution_authorized": False,
+            "events": [{"schema": "liminal-agent-effect-dispatch-observation-v1", "stage": "BEFORE_ENDPOINT_POST",
+                "action_digest": verifier.sha(self.action), "reservation_id": "reservation:effect",
+                "permit_request_digest": verifier.sha(request), "permit_response_digest": verifier.sha(pair["response"]),
+                "observed_at": 95, "result": "READY", "reason": None, "execution_authorized": False}]}
+
+    def verify(self, boundary=None, configuration=None, gateway=None, before=None, after=None):
+        return verifier._effect_dispatch_boundary(self.boundary if boundary is None else boundary,
+            binding=self.binding, configuration=self.configuration if configuration is None else configuration,
+            gateway=self.gateway if gateway is None else gateway, log=self.log,
+            before=self.before if before is None else before, after=self.after if after is None else after)
+
+    def test_unsigned_ready_diagnostic_binds_signed_begin_and_recovered_receipt_without_commit_response(self):
+        self.assertEqual(self.verify(), 1)
+        self.assertNotIn("endpoint_evidence", self.gateway)
+
+    def test_no_post_case_requires_empty_guard_census(self):
+        boundary = deepcopy(self.boundary)
+        boundary["events"] = []
+        self.assertEqual(self.verify(boundary=boundary, gateway={"authority_evidence": []},
+            after={"requests": [], "receipts": []}), 0)
+
+    def test_missing_duplicate_extra_or_blocked_post_guard_is_rejected(self):
+        changes = (lambda b: b["events"].clear(), lambda b: b["events"].append(deepcopy(b["events"][0])),
+            lambda b: b["events"][0].update(reservation_id="reservation:other"),
+            lambda b: b["events"][0].update(result="BLOCKED", reason="AGENT_LAUNCH_FENCED"),
+            lambda b: b.update(execution_authorized=True), lambda b: b["events"][0].update(execution_authorized=True),
+            lambda b: b["events"][0].update(stage="ENDPOINT_FINAL_COMMIT"))
+        for change in changes:
+            altered = deepcopy(self.boundary)
+            change(altered)
+            with self.subTest(change=change), self.assertRaises(verifier.EvidenceError):
+                self.verify(boundary=altered)
+
+    def test_retiming_guard_outside_signed_begin_to_receipt_window_is_rejected(self):
+        for time in (89, 101, float("nan"), True):
+            altered = deepcopy(self.boundary)
+            altered["events"][0]["observed_at"] = time
+            with self.subTest(time=time), self.assertRaises(verifier.EvidenceError):
+                self.verify(boundary=altered)
+
+    def test_exact_action_and_both_permit_digests_are_required(self):
+        for field in ("action_digest", "permit_request_digest", "permit_response_digest"):
+            altered = deepcopy(self.boundary)
+            altered["events"][0][field] = "0" * 64
+            with self.subTest(field=field), self.assertRaises(verifier.EvidenceError):
+                self.verify(boundary=altered)
+        with self.assertRaises(verifier.EvidenceError):
+            self.verify(gateway={"authority_evidence": []})
+
+    def test_rehashed_descriptor_cannot_disable_guard_change_lineage_or_downgrade_store(self):
+        for field, value in (("gate_required", False), ("failure_outcome", "CANCELLED"),
+                ("run_binding_digest", "0" * 64), ("effect_action_digests", []), ("stage", "BEFORE_BEGIN")):
+            configuration = deepcopy(self.configuration)
+            configuration["dispatch_gate"][field] = value
+            descriptor = configuration["dispatch_gate"]
+            descriptor["contract_digest"] = verifier.sha({key: item for key, item in descriptor.items() if key != "contract_digest"})
+            boundary = deepcopy(self.boundary)
+            boundary["contract_digest"] = descriptor["contract_digest"]
+            with self.subTest(field=field), self.assertRaises(verifier.EvidenceError):
+                self.verify(boundary=boundary, configuration=configuration)
+        for field, value in (("schema", "liminal-network-gateway-store-v1"), ("profile", "arbitrary-network")):
+            configuration = deepcopy(self.configuration)
+            configuration[field] = value
+            with self.subTest(field=field), self.assertRaises(verifier.EvidenceError):
+                self.verify(configuration=configuration)
+
+    def test_actual_post_census_and_begin_status_cannot_be_removed_or_swapped(self):
+        with self.assertRaises(verifier.EvidenceError):
+            self.verify(after={"requests": [], "receipts": self.after["receipts"]})
+        after = deepcopy(self.after)
+        after["requests"][0]["permit"]["result"]["status"] = "CONSUMED"
+        after["requests"][0]["permit_digest"] = verifier.sha(after["requests"][0]["permit"])
+        with self.assertRaises(verifier.EvidenceError):
+            self.verify(after=after)
 
 
 @unittest.skipUnless(os.environ.get("LIMINAL_EXTERNAL_AGENT_DOCKER_IMAGE") or os.environ.get("LIMINAL_EXTERNAL_AGENT_REQUIRE_DOCKER") == "1",
@@ -643,6 +766,79 @@ class ExternalAgentDockerCaptureEvidenceTests(unittest.TestCase):
     def test_scope_cannot_claim_live_llm_training_or_kernel_escape_protection(self):
         for field, value in (("model_calls", 1), ("model_training", True), ("live_llm", "EXECUTED"), ("kernel_escape_resistance", "PROVEN")):
             self.rejects(lambda r, f=field, v=value: r["scope"].update({f: v}))
+
+    @staticmethod
+    def alter_dispatch_boundary(report, mutate):
+        after = report["outcomes"]["useful_completion"]["supervisor_after"]
+        mutate(after["gateway"]["dispatch_boundary"])
+        report["outcomes"]["useful_completion"]["gateway_inventory"] = deepcopy(after["gateway"])
+        report["supervisor_final_inventory"]["case_inventories"]["useful_completion"] = deepcopy(after)
+
+    def test_actual_capture_has_one_post_begin_guard_per_actual_post_with_bounded_scope(self):
+        result = self.verify()
+        self.assertEqual(result["post_begin_dispatch_guards_verified"], 6)
+        self.assertEqual(result["effect_dispatch_observation_signatures"], "NOT_ESTABLISHED")
+        self.assertEqual(result["endpoint_final_commit_guard"], "NOT_ESTABLISHED")
+        for name in verifier.CASE_IDS:
+            case = self.report["outcomes"][name]
+            gateway = case["gateway_inventory"]
+            descriptor = case["bridge_configuration"]["effect_gateway_configuration"]["dispatch_gate"]
+            self.assertEqual(gateway["dispatch_boundary"]["contract_digest"], descriptor["contract_digest"])
+            self.assertEqual(len(gateway["dispatch_boundary"]["events"]), case["request_count_delta"])
+            self.assertTrue(all(event["result"] == "READY" for event in gateway["dispatch_boundary"]["events"]))
+        self.assertEqual(self.report["outcomes"]["pending_effect_stop"]["effect_count_delta"], 1)
+
+    def test_missing_extra_or_blocked_dispatch_event_cannot_cover_an_actual_post(self):
+        changes = (lambda b: b["events"].clear(), lambda b: b["events"].append(deepcopy(b["events"][0])),
+            lambda b: b["events"][0].update(result="BLOCKED", reason="AGENT_LAUNCH_FENCED"),
+            lambda b: b["events"][0].update(reservation_id="reservation:other"),
+            lambda b: b["events"][0].update(stage="ENDPOINT_FINAL_COMMIT"),
+            lambda b: b.update(contract_digest="0" * 64), lambda b: b["events"][0].update(execution_authorized=True))
+        for change in changes:
+            self.rejects(lambda r, mutation=change: self.alter_dispatch_boundary(r, mutation))
+        self.rejects(lambda r: r["outcomes"]["useful_completion"]["gateway_inventory"].pop("dispatch_boundary"))
+
+    def test_dispatch_action_request_and_response_digests_are_bound_to_actual_permitted_begin(self):
+        for field in ("action_digest", "permit_request_digest", "permit_response_digest"):
+            self.rejects(lambda r, key=field: self.alter_dispatch_boundary(r,
+                lambda b: b["events"][0].update({key: "0" * 64})))
+
+    def test_retimed_dispatch_diagnostic_cannot_precede_begin_or_follow_committed_receipt(self):
+        case = self.report["outcomes"]["useful_completion"]
+        request = case["endpoint_after"]["requests"][len(case["endpoint_before"]["requests"])]
+        reservation = request["permit"]["result"]["reservation_id"]
+        receipt = next(r for r in case["endpoint_after"]["receipts"] if r["reservation_id"] == reservation)
+        for time in (request["permit"]["issued_at"] - 1, receipt["committed_at"] + 1):
+            self.rejects(lambda r, value=time: self.alter_dispatch_boundary(r,
+                lambda b: b["events"][0].update(observed_at=value)))
+
+    def test_rehashed_dispatch_descriptor_cannot_downgrade_profile_or_remove_guard(self):
+        def alter(report, field, value):
+            case = report["outcomes"]["useful_completion"]
+            after = case["supervisor_after"]
+            configuration = after["bridge_configuration"]
+            route = configuration["effect_gateway_configuration"]
+            if field in {"schema", "profile"}:
+                route[field] = value
+            else:
+                descriptor = route["dispatch_gate"]
+                descriptor[field] = value
+                descriptor["contract_digest"] = verifier.sha({key: item for key, item in descriptor.items() if key != "contract_digest"})
+                after["gateway"]["dispatch_boundary"]["contract_digest"] = descriptor["contract_digest"]
+            after["bridge"]["configuration_digest"] = verifier.sha(configuration)
+            case["bridge_configuration"] = deepcopy(configuration)
+            case["bridge_inventory"] = deepcopy(after["bridge"])
+            case["gateway_inventory"] = deepcopy(after["gateway"])
+            report["supervisor_final_inventory"]["case_inventories"]["useful_completion"] = deepcopy(after)
+        for field, value in (("schema", "liminal-network-gateway-store-v1"), ("profile", "arbitrary-network"),
+                ("gate_required", False), ("run_binding_digest", "0" * 64), ("effect_action_digests", []),
+                ("failure_outcome", "CANCELLED")):
+            self.rejects(lambda r, key=field, changed=value: alter(r, key, changed))
+
+    def test_post_begin_dispatch_gateway_sources_tests_and_guide_are_required(self):
+        for name in ("sdk/liminal_agent_control/external_agent_effect_gateway.py",
+                     "tests/test_agent_control_external_agent_effect_gateway.py", "docs/AGENT_CONTROL_EFFECT_DISPATCH_GATE.md"):
+            self.rejects(lambda r, path=name: r["source_files_sha256"].pop(path))
 
     @staticmethod
     def alter_closed_boundary(report, mutate):
