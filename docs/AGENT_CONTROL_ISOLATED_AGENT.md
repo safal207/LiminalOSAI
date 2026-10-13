@@ -15,6 +15,10 @@ for through its actual completion.
 
 ## The boundary
 
+The concrete launcher also requires the [closed channel inventory and live
+watchdog gate](AGENT_CONTROL_CLOSED_CHANNEL_LAUNCH.md). Missing or changed
+channels, routes or watchdog readiness deny new launch/effect admission.
+
 The worker receives a fixed configuration and exact host-fixed action proposals.
 It receives no authorization grants, signing keys, request credentials,
 controller databases or Docker socket. Its only mounted workspace contains the

@@ -71,6 +71,9 @@ SOURCE_REQUIRED = frozenset({"scripts/verify_external_stop_evidence.py", "script
     "sdk/liminal_agent_control/external_network_gateway.py", "sdk/liminal_agent_control/external_network_endpoint.py",
     "tests/test_agent_control_external_agent_evidence.py", "tests/test_agent_control_external_agent_runtime.py",
     "experiments/agent_control/observer-requirements.txt", "docs/AGENT_CONTROL_ISOLATED_AGENT.md",
+    "sdk/liminal_agent_control/external_agent_launch.py", "sdk/liminal_agent_control/external_agent_channels.py",
+    "tests/test_agent_control_external_agent_launch.py", "tests/test_agent_control_external_agent_channels.py",
+    "tests/test_agent_control_external_agent_watcher_health.py", "docs/AGENT_CONTROL_CLOSED_CHANNEL_LAUNCH.md",
     "README.md", ".github/workflows/agent-control.yml"})
 
 
@@ -497,7 +500,8 @@ def _create_argv(command: dict[str, Any]) -> list[str]:
         "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m", "--workdir", "/workspace", "--mount",
         "type=bind,src=" + spec["host_workspace"] + ",dst=/workspace,readonly", "--entrypoint", "python3", "--log-driver", "none",
         "--label", "liminal.control.registry=" + record["registry_id"], "--label", "liminal.control.owner=" + record["ownership_token"],
-        "--label", "liminal.control.plan=" + record["plan_sha256"], spec["image_id"], *spec["argv"]]
+        "--label", "liminal.control.plan=" + record["plan_sha256"],
+        "--ipc", "private", "--cgroupns", "private", "--runtime", "runc", spec["image_id"], *spec["argv"]]
 
 
 def _docker_calls(calls: Any, commands: dict[str, dict[str, Any]], *, attached: bool = False) -> None:
@@ -1202,7 +1206,7 @@ def _live_observation(value: Any, binding: dict[str, Any], command: dict[str, An
 SUPERVISOR_BASE_FIELDS = {"profile", "supervisor_pin", "authority_pin", "commands", "grants", "authority_evidence",
     "unfinished_registry", "execution_authorized", "bridge", "attach_processes", "live_observations"}
 SUPERVISOR_CAPTURE_FIELDS = {"docker_calls", "coordinator", "gateway", "command_admin_evidence",
-    "effect_admin_evidence", "bridge_configuration"}
+    "effect_admin_evidence", "bridge_configuration", "launch_boundary"}
 
 
 def _supervisor_projection(value: Any) -> dict[str, Any]:
@@ -1210,6 +1214,137 @@ def _supervisor_projection(value: Any) -> dict[str, Any]:
         and set(value) <= SUPERVISOR_BASE_FIELDS | SUPERVISOR_CAPTURE_FIELDS,
         "supervisor single-snapshot capture fields invalid")
     return {k: v for k, v in value.items() if k in SUPERVISOR_BASE_FIELDS | {"docker_calls"}}
+
+
+def _closed_loopback_url(value: Any) -> str:
+    require(type(value) is str, "closed-channel service URL missing")
+    try:
+        parsed = urlparse(value)
+        require(parsed.scheme == "http" and parsed.hostname == "127.0.0.1"
+            and parsed.port is not None and 1 <= parsed.port <= 65535
+            and value == f"http://127.0.0.1:{parsed.port}", "closed-channel service URL is not fixed owned loopback")
+    except ValueError as exc:
+        raise EvidenceError("closed-channel service URL invalid") from exc
+    return value
+
+
+def _closed_channel_contract(spec: dict, binding: dict, bridge: dict, processes: Any) -> dict:
+    """Reconstruct the exact finite contract without runtime decision imports."""
+    require(type(processes) is list, "closed-channel authority process census missing")
+    urls = {}
+    for branch in ("command", "effect"):
+        matches = [p for p in processes if type(p) is dict and p.get("role") == branch + "_external_authority"]
+        require(len(matches) == 1 and type(matches[0].get("startup")) is dict
+            and canonical(matches[0]["startup"].get("pin")) == canonical(binding[branch]["authority_pin"]),
+            "closed-channel authority startup identity mismatch")
+        urls[branch] = _closed_loopback_url(matches[0]["startup"].get("url"))
+    route = bridge["effect_gateway_configuration"]
+    endpoint_url = _closed_loopback_url(route["endpoint_url"])
+    require(route["authority_url"] == urls["effect"]
+        and all(a["arguments"]["url"] == endpoint_url + "/v1/record" for a in binding["effect_actions"]),
+        "closed-channel actual authority/endpoint route mismatch")
+    gate, watcher = "exact-host-grant-and-fresh-external-BEGIN", "bound-live-fresh-host-watchdog"
+    channels = {
+        "worker_network": {"mode": "DENIED", "boundary": "docker-network-none"},
+        "worker_workspace": {"mode": "READ_ONLY", "mount": spec["workspace_mount"], "fixture_sha256": FIXTURE_SHA256},
+        "worker_host_filesystem": {"mode": "DENIED", "boundary": "no-extra-host-mounts"},
+        "worker_control_sockets_devices": {"mode": "DENIED", "boundary": "no-added-host-socket-device-or-volume-routes"},
+        "worker_host_namespaces": {"mode": "RESTRICTED", "boundary": "no-pid-ipc-uts-cgroup-sharing",
+            "user_namespace_isolation": "NOT_ESTABLISHED",
+            "create_flags": ["--ipc", "private", "--cgroupns", "private", "--runtime", "runc"]},
+        "worker_local_tmpfs_processes": {"mode": "CONFINED", "isolation": spec["isolation"], "external_authority": False},
+        "worker_stdio_proposals": {"mode": "MEDIATED", "bridge_configuration_digest": sha(bridge),
+            "effect_action_digests": binding["effect_action_digests"], "gate": gate, "watchdog": watcher,
+            "owned_observation_required": True},
+        "worker_stdio_claims": {"mode": "OBSERVATION_ONLY", "external_authority": False},
+        "worker_stderr": {"mode": "OBSERVATION_ONLY", "external_authority": False},
+        "host_command_lifecycle": {"mode": "MEDIATED", "spec_digest": sha(spec), "authority_url": urls["command"],
+            "authority_pin": binding["command"]["authority_pin"], "supervisor_pin": binding["supervisor_pin"],
+            "gate": gate, "watchdog": watcher},
+        "host_endpoint_effect": {"mode": "MEDIATED", "endpoint_url": endpoint_url,
+            "endpoint_pin": binding["endpoint_pin"], "gate": gate, "watchdog": watcher,
+            "effect_gateway_configuration_digest": sha(route)},
+        "host_authority_control": {"mode": "TRUSTED_CONTROL", "command_url": urls["command"],
+            "effect_url": urls["effect"], "effect_pin": binding["effect"]["authority_pin"], "agent_credentials": False},
+        "host_watchdog_stop_reconciliation": {"mode": "TRUSTED_CONTROL", "watchdog": watcher,
+            "maximum_health_age_seconds": 2.0, "reconciliation_dispatches_effects": False},
+        "external_model_mcp_host_shell_delegation": {"mode": "DENIED", "supported_routes": []},
+    }
+    body = {"schema": "liminal-closed-channel-agent-launch-v1", "workflow": "owned-fixed-fixture-synthetic-record-v1",
+        "source_digest": FIXTURE_SHA256, "spec_digest": sha(spec), "run_binding_digest": sha(binding),
+        "bridge_configuration_digest": sha(bridge), "channels": channels, "execution_authorized": False}
+    return {**body, "contract_digest": sha(body)}
+
+
+def _closed_channel_projection(value: Any, command: dict) -> None:
+    """Check host diagnostic data independently; this authenticates no observer."""
+    fields = {"schema", "container_id", "HostConfig", "Config", "NetworkSettings", "Mounts",
+              "execution_authorized", "projection_digest"}
+    require(type(value) is dict and set(value) == fields and len(canonical(value)) <= 8192
+        and value["schema"] == "liminal-owned-agent-docker-channels-v1"
+        and value["container_id"] == command["container_id"] and value["execution_authorized"] is False
+        and value["projection_digest"] == sha({k: v for k, v in value.items() if k != "projection_digest"}),
+        "closed-channel Docker projection schema/identity/digest invalid")
+    expected_host = {key: [] for key in ("Binds", "VolumesFrom", "Devices", "DeviceRequests", "DeviceCgroupRules",
+        "Dns", "DnsOptions", "DnsSearch", "ExtraHosts", "Links", "GroupAdd", "CapAdd")}
+    expected_host.update({key: "" for key in ("PidMode", "UTSMode", "UsernsMode", "Cgroup", "CgroupParent",
+        "VolumeDriver", "ContainerIDFile")})
+    host = value["HostConfig"]
+    require(type(host) is dict and host.get("Isolation") == "", "closed-channel Docker isolation invalid")
+    expected_host.update({"NetworkMode": "none", "CgroupnsMode": "private", "IpcMode": "private", "Runtime": "runc",
+        "Isolation": "", "PublishAllPorts": False, "PortBindings": {}, "Privileged": False,
+        "ReadonlyRootfs": True, "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"],
+        "Tmpfs": {"/tmp": "rw,nosuid,nodev,noexec,size=64m"}, "LogConfig": {"Type": "none", "Config": {}},
+        "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0}, "AutoRemove": False,
+        "Annotations": {}, "StorageOpt": {}, "Sysctls": {}, "Init": False})
+    require(canonical(host) == canonical(expected_host), "closed-channel Docker host/device/namespace/network routes invalid")
+    require(canonical(value["Config"]) == canonical({"Volumes": {}, "ExposedPorts": {}, "Healthcheck": None, "MacAddress": ""}),
+        "closed-channel Docker image exposes alternate process or volume")
+    expected_mount = [{"Type": "bind", "Destination": "/workspace", "RW": False, "Propagation": "rprivate",
+        "source_digest": sha(command["spec"]["host_workspace"])}]
+    require(canonical(value["Mounts"]) == canonical(expected_mount), "closed-channel Docker mount source/access mismatch")
+    network = value["NetworkSettings"]
+    endpoint = {key: "" for key in ("Gateway", "IPAddress", "IPv6Gateway", "GlobalIPv6Address", "MacAddress")}
+    require(type(network) is dict and canonical(network) in (canonical({"Ports": {}, "Networks": {}}),
+        canonical({"Ports": {}, "Networks": {"none": endpoint}})), "closed-channel Docker attachment/published ports invalid")
+
+
+def _launch_boundary(value: Any, *, spec: dict, binding: dict, bridge: dict, command: dict,
+                     supervisor: dict, processes: Any) -> int:
+    fields = {"contract", "contract_digest", "channel_observations", "execution_authorized"}
+    require(type(value) is dict and set(value) == fields and value["execution_authorized"] is False,
+        "closed-channel final launch boundary missing/invalid")
+    expected = _closed_channel_contract(spec, binding, bridge, processes)
+    require(canonical(value["contract"]) == canonical(expected) and value["contract_digest"] == expected["contract_digest"],
+        "closed-channel contract differs from exact fourteen routes or actual authority startup")
+    observations = value["channel_observations"]
+    require(type(observations) is list and 2 <= len(observations) <= 128, "closed-channel observation census missing/oversized")
+    grouped = {key: [] for key in ("BEFORE_BEGIN_START", "BEFORE_DOCKER_START", "BEFORE_EFFECT_ADMISSION")}
+    previous = -1
+    for observation in observations:
+        require(type(observation) is dict and set(observation) == {"container_id", "source", "boundary", "observed_at", "projection"}
+            and observation["container_id"] == command["container_id"] and observation["source"] == "owned_docker_inspect"
+            and observation["boundary"] in grouped and _number(observation["observed_at"])
+            and observation["observed_at"] >= previous, "closed-channel live observation identity/time/boundary invalid")
+        previous = observation["observed_at"]
+        _closed_channel_projection(observation["projection"], command)
+        grouped[observation["boundary"]].append(observation)
+    require(len(grouped["BEFORE_BEGIN_START"]) == len(grouped["BEFORE_DOCKER_START"]) == 1
+        and len(grouped["BEFORE_EFFECT_ADMISSION"]) == len(supervisor["live_observations"]),
+        "closed-channel required START/effect observation count mismatch")
+    creates = [stage for stage in command["stages"] if stage["action"]["arguments"]["stage"] == "CREATE"]
+    starts = [stage for stage in command["stages"] if stage["action"]["arguments"]["stage"] == "START"]
+    require(len(creates) == len(starts) == len(supervisor["attach_processes"]) == 1,
+        "closed-channel stage/attach census mismatch")
+    create, start, attach = creates[0], starts[0], supervisor["attach_processes"][0]
+    before_begin, before_docker = grouped["BEFORE_BEGIN_START"][0], grouped["BEFORE_DOCKER_START"][0]
+    require(create["callback_result"]["finished_at"] <= before_begin["observed_at"] <= start["begin_evidence"]["response"]["issued_at"]
+        <= before_docker["observed_at"] <= attach["started_at"] <= start["callback_result"]["finished_at"],
+        "closed-channel START observations out of actual admission/dispatch order")
+    for channels, live in zip(grouped["BEFORE_EFFECT_ADMISSION"], supervisor["live_observations"]):
+        require(before_docker["observed_at"] <= live["observed_at"] <= channels["observed_at"]
+            <= start["callback_result"]["finished_at"], "closed-channel effect observation out of actual lifecycle order")
+    return len(observations)
 
 
 def _coordinator_inventory(value: Any, binding: dict[str, Any], logs: dict[str, Any]) -> dict[str, Any]:
@@ -1579,6 +1714,7 @@ def verify_report(report: Any, *, repo_root: Path = ROOT, expected_source_sha: s
         and type(daemon["daemon_id"]) is str and daemon["daemon_id"] and type(daemon["image_id"]) is str
         and re.fullmatch(r"sha256:[0-9a-f]{64}", daemon["image_id"]), "actual Docker daemon/image identity missing")
     command_receipts, all_containers, bridges, previous_endpoint = {}, set(), {}, None
+    channel_observation_count = 0
     expected_effect = {name: int(name in {"useful_completion", "duplicate_after_commit", "queued_after_stop",
         "pending_effect_stop", "lost_endpoint_response", "observation_outage"}) for name in CASE_IDS}
     for name in CASE_IDS:
@@ -1649,6 +1785,8 @@ def verify_report(report: Any, *, repo_root: Path = ROOT, expected_source_sha: s
                 require(any(canonical(observation) == canonical(item) for item in after["live_observations"]),
                     "actual live owned observation omitted from supervisor capture")
                 _live_observation(observation, binding, command, allowed[event["value"]["action_id"]])
+        channel_observation_count += _launch_boundary(after.get("launch_boundary"), spec=spec, binding=binding,
+            bridge=after["bridge_configuration"], command=command, supervisor=after, processes=report.get("processes"))
         start_state = next(e for e in command["stages"] if e["action"]["arguments"]["stage"] == "START")
         callback = start_state["callback_result"]
         require(callback["stdout_sha256"] == after["bridge"]["stdout_sha256"] and callback["stdout_bytes"] == after["bridge"]["stdout_bytes"]
@@ -1802,6 +1940,8 @@ def verify_report(report: Any, *, repo_root: Path = ROOT, expected_source_sha: s
         "actual_endpoint_requests": final_endpoint["commit_request_count"], "actual_endpoint_effects": final_endpoint["independent_sqlite_effect_count"],
         "public_authority_pairs": sum(len(log["public"]) for log in logs.values()), "public_endpoint_pairs": len(endpoint_pairs),
         "signed_lifecycle_receipts": len(command_receipts), "signed_endpoint_receipts": len(actual_receipts), "source_inputs_verified": source_count,
+        "closed_channel_contracts_verified": len(CASE_IDS), "closed_channel_observations_verified": channel_observation_count,
+        "channel_observation_signatures": "NOT_ESTABLISHED",
         "checkpoint_verification_status": "EXTERNAL_ANCHORED_VERIFIED" if trusted_command_anchor is not None and trusted_effect_anchor is not None else "LOCAL_SIGNATURE_ONLY",
         "command_authority_pin_scope": "caller_supplied" if expected_command_authority_pin is not None else "report_fixture",
         "effect_authority_pin_scope": "caller_supplied" if expected_effect_authority_pin is not None else "report_fixture",

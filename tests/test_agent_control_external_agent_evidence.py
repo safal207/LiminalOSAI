@@ -216,6 +216,33 @@ class ExternalAgentPacketEvidenceTests(unittest.TestCase):
         self.assertEqual(list(result), ["command:unit"])
         self.assertNotIn("status", result)
 
+    def test_offline_projection_requires_canonical_empty_isolation_even_after_rehash(self):
+        # Explicit public schema fixture; no runtime helper or Docker capture.
+        host = {key: [] for key in ("Binds", "VolumesFrom", "Devices", "DeviceRequests", "DeviceCgroupRules",
+            "Dns", "DnsOptions", "DnsSearch", "ExtraHosts", "Links", "GroupAdd", "CapAdd")}
+        host.update({key: "" for key in ("PidMode", "UTSMode", "UsernsMode", "Cgroup", "CgroupParent",
+            "VolumeDriver", "ContainerIDFile")})
+        host.update({"NetworkMode": "none", "CgroupnsMode": "private", "IpcMode": "private", "Runtime": "runc",
+            "Isolation": "", "PublishAllPorts": False, "PortBindings": {}, "Privileged": False, "ReadonlyRootfs": True,
+            "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"],
+            "Tmpfs": {"/tmp": "rw,nosuid,nodev,noexec,size=64m"}, "LogConfig": {"Type": "none", "Config": {}},
+            "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0}, "AutoRemove": False,
+            "Annotations": {}, "StorageOpt": {}, "Sysctls": {}, "Init": False})
+        command = {"container_id": "d" * 64, "spec": self.spec}
+        projection = {"schema": "liminal-owned-agent-docker-channels-v1", "container_id": command["container_id"],
+            "HostConfig": host, "Config": {"Volumes": {}, "ExposedPorts": {}, "Healthcheck": None, "MacAddress": ""},
+            "NetworkSettings": {"Ports": {}, "Networks": {}}, "Mounts": [{"Type": "bind", "Destination": "/workspace",
+                "RW": False, "Propagation": "rprivate", "source_digest": verifier.sha(self.spec["host_workspace"])}],
+            "execution_authorized": False}
+        projection["projection_digest"] = verifier.sha(projection)
+        self.assertIsNone(verifier._closed_channel_projection(projection, command))
+        changed = deepcopy(projection)
+        changed["HostConfig"]["Isolation"] = "default"
+        changed["projection_digest"] = verifier.sha({key: value for key, value in changed.items() if key != "projection_digest"})
+        self.assertEqual(changed["projection_digest"], verifier.sha({key: value for key, value in changed.items() if key != "projection_digest"}))
+        with self.assertRaisesRegex(verifier.EvidenceError, "closed-channel Docker isolation invalid"):
+            verifier._closed_channel_projection(changed, command)
+
     def test_inventory_no_stopped_proof_from_absence_or_timeout(self):
         self.inventory_rejects(lambda i: i["commands"][0]["observations"].pop(1), "digest mismatch")
         self.inventory_rejects(lambda i: i["commands"][0]["observations"][1]["value"]["State"].update(Pid=42))
@@ -616,6 +643,95 @@ class ExternalAgentDockerCaptureEvidenceTests(unittest.TestCase):
     def test_scope_cannot_claim_live_llm_training_or_kernel_escape_protection(self):
         for field, value in (("model_calls", 1), ("model_training", True), ("live_llm", "EXECUTED"), ("kernel_escape_resistance", "PROVEN")):
             self.rejects(lambda r, f=field, v=value: r["scope"].update({f: v}))
+
+    @staticmethod
+    def alter_closed_boundary(report, mutate):
+        """Rehash and synchronize unsigned captures so semantics are tested."""
+        after = report["outcomes"]["useful_completion"]["supervisor_after"]
+        boundary = after["launch_boundary"]
+        mutate(boundary)
+        contract = boundary.get("contract")
+        if type(contract) is dict:
+            contract["contract_digest"] = verifier.sha({key: value for key, value in contract.items() if key != "contract_digest"})
+            boundary["contract_digest"] = contract["contract_digest"]
+        for observation in boundary.get("channel_observations", []):
+            projection = observation.get("projection")
+            if type(projection) is dict:
+                projection["projection_digest"] = verifier.sha({key: value for key, value in projection.items() if key != "projection_digest"})
+        report["supervisor_final_inventory"]["case_inventories"]["useful_completion"] = deepcopy(after)
+
+    def test_current_capture_requires_closed_contract_and_two_start_observations(self):
+        result = self.verify()
+        self.assertEqual(result["closed_channel_contracts_verified"], 12)
+        self.assertGreaterEqual(result["closed_channel_observations_verified"], 24)
+        self.assertEqual(result["channel_observation_signatures"], "NOT_ESTABLISHED")
+        for name in verifier.CASE_IDS:
+            boundary = self.report["outcomes"][name]["supervisor_after"]["launch_boundary"]
+            self.assertEqual(len(boundary["contract"]["channels"]), 14)
+            kinds = [item["boundary"] for item in boundary["channel_observations"]]
+            self.assertEqual(kinds.count("BEFORE_BEGIN_START"), 1)
+            self.assertEqual(kinds.count("BEFORE_DOCKER_START"), 1)
+        self.rejects(lambda r: r["outcomes"]["useful_completion"]["supervisor_after"].pop("launch_boundary"))
+
+    def test_rehashed_closed_inventory_cannot_omit_add_or_unmediate_a_channel(self):
+        changes = (lambda b: b["contract"]["channels"].pop("worker_network"),
+            lambda b: b["contract"]["channels"].update(provider_api={"mode": "MEDIATED"}),
+            lambda b: b["contract"]["channels"]["worker_stdio_proposals"].update(gate=None),
+            lambda b: b["contract"]["channels"]["host_command_lifecycle"].update(watchdog=None))
+        for change in changes:
+            self.rejects(lambda r, mutation=change: self.alter_closed_boundary(r, mutation))
+
+    def test_rehashed_closed_contract_binds_actual_service_urls_pins_and_source(self):
+        changes = (lambda b: b["contract"].update(source_digest="0" * 64),
+            lambda b: b["contract"].update(run_binding_digest="0" * 64),
+            lambda b: b["contract"]["channels"]["host_endpoint_effect"].update(endpoint_url="http://127.0.0.1:12345"),
+            lambda b: b["contract"]["channels"]["host_command_lifecycle"]["authority_pin"].update(key_id="changed-key"),
+            lambda b: b["contract"]["channels"]["host_authority_control"].update(command_url="http://127.0.0.1:12345"))
+        for change in changes:
+            self.rejects(lambda r, mutation=change: self.alter_closed_boundary(r, mutation))
+        self.rejects(lambda r: next(p for p in r["processes"] if p["role"] == "command_external_authority")["startup"].update(url="http://127.0.0.1:12345"))
+
+    def test_rehashed_channel_projection_cannot_hide_devices_namespace_or_published_ports(self):
+        for key, value in (("Devices", [{"PathOnHost": "/dev/kvm"}]), ("DeviceRequests", [{"Count": -1}]),
+            ("VolumesFrom", ["other:rw"]), ("IpcMode", "host"), ("CgroupnsMode", "host"),
+            ("PortBindings", {"80/tcp": []}), ("ExtraHosts", ["host.docker.internal:host-gateway"]),
+            ("Runtime", "nvidia"), ("SecurityOpt", ["no-new-privileges:true", "seccomp:unconfined"])):
+            def mutate(boundary, field=key, replacement=value):
+                boundary["channel_observations"][0]["projection"]["HostConfig"][field] = replacement
+            self.rejects(lambda r, mutation=mutate: self.alter_closed_boundary(r, mutation))
+        self.rejects(lambda r: self.alter_closed_boundary(r,
+            lambda b: b["channel_observations"][0]["projection"]["HostConfig"].pop("DeviceRequests")))
+
+    def test_rehashed_channel_mount_and_container_identity_are_bound(self):
+        changes = (lambda b: b["channel_observations"][0].update(container_id="0" * 64),
+            lambda b: b["channel_observations"][0]["projection"].update(container_id="0" * 64),
+            lambda b: b["channel_observations"][0]["projection"]["Mounts"][0].update(source_digest="0" * 64),
+            lambda b: b["channel_observations"][0]["projection"]["Mounts"][0].update(RW=True),
+            lambda b: b["channel_observations"][0]["projection"]["Mounts"][0].update(Propagation="rshared"),
+            lambda b: b["channel_observations"][0]["projection"]["Mounts"].append({"Type": "bind", "Destination": "/run"}))
+        for change in changes:
+            self.rejects(lambda r, mutation=change: self.alter_closed_boundary(r, mutation))
+
+    def test_channel_observation_count_boundaries_and_lifecycle_times_are_checked(self):
+        changes = (lambda b: b["channel_observations"].pop(),
+            lambda b: b["channel_observations"].append(deepcopy(b["channel_observations"][-1])),
+            lambda b: b["channel_observations"][0].update(boundary="WORKER_CLAIM"),
+            lambda b: b["channel_observations"][0].update(source="untrusted_worker"),
+            lambda b: b["channel_observations"][0].update(observed_at=0),
+            lambda b: b["channel_observations"][1].update(observed_at=1e12))
+        for change in changes:
+            self.rejects(lambda r, mutation=change: self.alter_closed_boundary(r, mutation))
+
+    def test_namespace_contract_does_not_invent_user_namespace_isolation_or_change_create_flags(self):
+        self.rejects(lambda r: self.alter_closed_boundary(r,
+            lambda b: b["contract"]["channels"]["worker_host_namespaces"].update(user_namespace_isolation="ESTABLISHED")))
+        self.rejects(lambda r: self.alter_closed_boundary(r,
+            lambda b: b["contract"]["channels"]["worker_host_namespaces"]["create_flags"].clear()))
+
+    def test_closed_channel_runtime_sources_and_guide_are_required(self):
+        for name in ("sdk/liminal_agent_control/external_agent_launch.py", "sdk/liminal_agent_control/external_agent_channels.py",
+                     "docs/AGENT_CONTROL_CLOSED_CHANNEL_LAUNCH.md"):
+            self.rejects(lambda r, path=name: r["source_files_sha256"].pop(path))
 
 
 if __name__ == "__main__":

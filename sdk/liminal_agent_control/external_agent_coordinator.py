@@ -105,6 +105,9 @@ class ExternalAgentCoordinator:
         self._operation_lock = threading.RLock()
         self._event_lock = threading.RLock()
         self._watcher_stop = threading.Event()
+        self._watcher_ready = threading.Event()
+        self._watcher_health_lock = threading.RLock()
+        self._watcher_last_completed: float | None = None
         self._watcher: threading.Thread | None = None
         self._closed = False
         self._command_id: str | None = None
@@ -420,8 +423,13 @@ class ExternalAgentCoordinator:
 
     def _watch(self) -> None:
         try:
-            while not self._watcher_stop.wait(self.watcher_interval):
+            while not self._watcher_stop.is_set():
                 self.reconcile()
+                with self._watcher_health_lock:
+                    self._watcher_last_completed = time.monotonic()
+                    self._watcher_ready.set()
+                if self._watcher_stop.wait(self.watcher_interval):
+                    break
         except BaseException as exc:
             try:
                 self._update(watcher_failed=True)
@@ -433,6 +441,39 @@ class ExternalAgentCoordinator:
             except BaseException:
                 pass
             self._emergency_contain("WATCHER_FAILURE", exc)
+        finally:
+            self._watcher_ready.clear()
+
+    def watcher_health(self, *, max_age_seconds: float = 2.0) -> dict:
+        """Observe a completed host watcher cycle, never an execution grant.
+
+        Thread presence alone is insufficient: an alive but blocked watcher
+        loses freshness. Recovery has no inherited readiness or heartbeat.
+        This is an in-process monitor; host-process crash survival is not
+        established by this observation.
+        """
+        if (type(max_age_seconds) not in (int, float) or not math.isfinite(max_age_seconds)
+                or not 0.05 <= max_age_seconds <= 5.0):
+            raise ControlError("AGENT_WATCHER_HEALTH_WINDOW_INVALID")
+        with self._watcher_health_lock:
+            last = self._watcher_last_completed
+            now = time.monotonic()
+            age = None if last is None else now - last
+            alive = bool(self._watcher and self._watcher.is_alive())
+            stopping = self._closed or self._watcher_stop.is_set()
+            ready = self._watcher_ready.is_set() and alive and not stopping
+            fresh = bool(ready and age is not None and math.isfinite(age)
+                         and 0 <= age < max_age_seconds)
+            return {"ready": ready, "alive": alive, "fresh": fresh,
+                    "last_completed": last, "age_seconds": age,
+                    "interval_seconds": self.watcher_interval, "stopping": stopping,
+                    "execution_authorized": False}
+
+    def wait_watcher_ready(self, *, timeout: float = 5.0) -> bool:
+        if (type(timeout) not in (int, float) or not math.isfinite(timeout)
+                or not 0 < timeout <= 5):
+            raise ControlError("AGENT_WATCHER_READY_TIMEOUT_INVALID")
+        return self._watcher_ready.wait(timeout) and self.watcher_health()["fresh"]
 
     def start_watcher(self) -> None:
         if self._watcher is not None:

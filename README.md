@@ -55,6 +55,11 @@ grants and keys on the host; aggregate STOP requires both external roots,
 owned process quiescence and settled endpoint effects. Its real Docker matrix
 uses no model API calls.
 
+Its [closed channel launcher](docs/AGENT_CONTROL_CLOSED_CHANNEL_LAUNCH.md)
+requires the fixed workflow's complete 14-channel inventory and a live, fresh
+host watcher. Missing or changed routes deny launch; actual Docker channel
+inspection is repeated before START and each endpoint-effect proposal.
+
 The [orientation graph](docs/AGENT_CONTROL_ORIENTATION.md) adds distinct
 per-agent observed trajectories, evidence freshness and bounded excursions
 from host-defined checkpoints. Its local timeline viewer separates pending
