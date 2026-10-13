@@ -165,6 +165,11 @@ class ClosedChannelLaunchGate:
                 or canonical_bytes(json.loads(gateway._configuration())) != canonical_bytes(
                     item["bridge_configuration"]["effect_gateway_configuration"])):
             raise ControlError("AGENT_LAUNCH_ROUTE_BINDING_MISMATCH")
+        if (self._coordinator is not None
+                and item["bridge_configuration"]["effect_gateway_configuration"].get("schema")
+                    == "liminal-closed-channel-effect-gateway-store-v1"
+                and getattr(gateway, "launch_gate", None) is not self):
+            raise ControlError("AGENT_LAUNCH_EFFECT_GATE_BINDING_MISMATCH")
         for name, branch, role, url in (
             ("command_admin", "command", "admin", item["command_authority_url"]),
             ("command_receiver", "command", "receiver", item["command_authority_url"]),
@@ -196,6 +201,11 @@ class ClosedChannelLaunchGate:
             "command_receiver": ("begin",), "effect_receiver": ("begin",),
             "endpoint": ("commit", "query"),
         }
+        if json.loads(self._inputs_bytes)["bridge_configuration"]["effect_gateway_configuration"].get("schema") \
+                == "liminal-closed-channel-effect-gateway-store-v1":
+            route_names["coordinator"] += ("close_admission",)
+            route_names["gateway"] += ("_before_endpoint_commit", "bind_launch_gate")
+            route_names["bridge"] += ("inventory",)
         routes = {(name, method): _callable_identity(getattr(objects[name], method, None))
             for name, methods in route_names.items() for method in methods}
         self._objects, self._routes, self._coordinator = objects, routes, coordinator
@@ -223,6 +233,11 @@ class ClosedChannelLaunchGate:
         state = self._coordinator.fence_state()
         if type(state) is not dict or state.get("closed") is not False:
             raise ControlError("AGENT_LAUNCH_FENCED")
+        if json.loads(self._inputs_bytes)["bridge_configuration"]["effect_gateway_configuration"].get("schema") \
+                == "liminal-closed-channel-effect-gateway-store-v1":
+            bridge_state = objects["bridge"].inventory()
+            if type(bridge_state) is not dict or bridge_state.get("fenced") is not False:
+                raise ControlError("AGENT_LAUNCH_BRIDGE_FENCED")
         health = self._coordinator.watcher_health(max_age_seconds=WATCHDOG_MAX_AGE_SECONDS)
         if type(health) is not dict or any(health.get(name) is not True for name in ("ready", "alive", "fresh")):
             raise ControlError("AGENT_LAUNCH_WATCHDOG_UNREADY")

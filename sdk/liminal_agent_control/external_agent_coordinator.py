@@ -231,6 +231,15 @@ class ExternalAgentCoordinator:
         # one ordered boundary; it never holds a Docker or network callback.
         self.bridge.close_admission(reason, durable_close)
 
+    def close_admission(self, reason: str) -> dict:
+        """Persist local closure without waiting for Docker or remote callbacks.
+
+        This is an admission fence, not a STOPPED or no-effect certificate.
+        The watcher performs the separate containment/reconciliation work.
+        """
+        self._close_local(reason)
+        return self.fence_state()
+
     def _fresh_states(self) -> tuple[dict, dict, list[dict]]:
         states, evidence = [], []
         for branch, client in (("command", self.command_admin_client), ("effect", self.effect_admin_client)):

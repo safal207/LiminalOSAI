@@ -18,6 +18,8 @@ for through its actual completion.
 The concrete launcher also requires the [closed channel inventory and live
 watchdog gate](AGENT_CONTROL_CLOSED_CHANNEL_LAUNCH.md). Missing or changed
 channels, routes or watchdog readiness deny new launch/effect admission.
+The [effect dispatch gate](AGENT_CONTROL_EFFECT_DISPATCH_GATE.md) repeats
+readiness after signed BEGIN and before a new endpoint POST.
 
 The worker receives a fixed configuration and exact host-fixed action proposals.
 It receives no authorization grants, signing keys, request credentials,

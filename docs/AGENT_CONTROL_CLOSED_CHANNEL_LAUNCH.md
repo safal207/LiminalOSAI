@@ -41,6 +41,8 @@ validation immediately before the attached CLI starts. Every effect proposal
 requires another actual owned-process observation and channel check.
 This gate controls fresh bridge callback admission. It does not cancel an
 already admitted HTTP request or add a final endpoint commit gate.
+The fixture additionally uses the [effect dispatch gate](AGENT_CONTROL_EFFECT_DISPATCH_GATE.md)
+to repeat readiness after signed BEGIN and before sending a new endpoint POST.
 
 The inspected channel projection is public diagnostic evidence. Its source is
 the trusted host's Docker inspection, not an independent live signature. The

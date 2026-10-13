@@ -43,7 +43,8 @@ def _sources() -> dict[str, str]:
     paths += sorted((ROOT / "tests").glob("test_agent_control_external_agent*.py"))
     paths += [ROOT / path for path in ("scripts/verify_external_agent_evidence.py",
         "scripts/verify_external_stop_evidence.py", ".github/workflows/agent-control.yml",
-        "docs/AGENT_CONTROL_ISOLATED_AGENT.md", "docs/AGENT_CONTROL_CLOSED_CHANNEL_LAUNCH.md", "README.md",
+        "docs/AGENT_CONTROL_ISOLATED_AGENT.md", "docs/AGENT_CONTROL_CLOSED_CHANNEL_LAUNCH.md",
+        "docs/AGENT_CONTROL_EFFECT_DISPATCH_GATE.md", "README.md",
         "experiments/agent_control/observer-requirements.txt")]
     paths += [DESIGN, FIXTURE]
     if any(not path.is_file() for path in paths):
@@ -127,7 +128,7 @@ def _service(config_file: Path) -> int:
         ClosedChannelAgentSupervisor, ClosedChannelLaunchGate, build_channel_inventory,
     )
     from .external_network_endpoint import HTTPNetworkEndpointClient
-    from .external_network_gateway import NetworkGateway
+    from .external_agent_effect_gateway import ClosedChannelEffectGateway
     from .runtime import DockerController, RuntimeBoundaryError
 
     configuration = _decode(config_file.read_bytes())
@@ -174,7 +175,9 @@ def _service(config_file: Path) -> int:
     effect_receiver, effect_admin = authority("effect_authority", "receiver"), authority("effect_authority", "admin")
     endpoint = HTTPNetworkEndpointClient(configuration["endpoint"]["url"],
         Path(configuration["endpoint"]["request_key_file"]).read_bytes(), configuration["endpoint"]["pin"], timeout=20)
-    gateway = NetworkGateway(directory / "gateway.sqlite", gateway_id=configuration["gateway_id"],
+    binding = configuration["run_binding"]
+    gateway = ClosedChannelEffectGateway(directory / "gateway.sqlite", run_binding=binding,
+        gateway_id=configuration["gateway_id"],
         external_controller=effect_receiver, endpoint_client=endpoint,
         operator_key=Path(configuration["gateway_operator_key_file"]).read_bytes(),
         worker_key=Path(configuration["gateway_worker_key_file"]).read_bytes(), create=True)
@@ -210,7 +213,6 @@ def _service(config_file: Path) -> int:
             raise ControlError("AGENT_RUNTIME_SUPERVISOR_UNBOUND")
         return holder["supervisor"].observe_proposal(action)
 
-    binding = configuration["run_binding"]
     bridge_binding = {"run_id": binding["run_id"],
         "root_id": binding["effect"]["root_id"], "execution_id": binding["effect"]["execution_id"],
         "epoch": binding["effect"]["epoch"]}
@@ -242,6 +244,7 @@ def _service(config_file: Path) -> int:
         effect_gateway=gateway, bridge=bridge, create=True, watcher_interval=0.4, start_watcher=True)
     holder["coordinator"] = coordinator
     launch_gate.bind(coordinator)
+    gateway.bind_launch_gate(launch_gate)
     if not coordinator.wait_watcher_ready(timeout=5):
         coordinator.stop("CHANNEL_WATCHER_NOT_READY")
         raise ControlError("AGENT_RUNTIME_CHANNEL_WATCHER_NOT_READY")

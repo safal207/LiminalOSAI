@@ -245,6 +245,16 @@ class NetworkGateway:
         return self._result(action["action_id"], "COMMITTED", "ENDPOINT_COMMITTED_AND_SETTLED", reservation_id,
             receipt, dispatch_finished=dispatch_finished, settlement_status="SETTLED")
 
+    def _before_endpoint_commit(self, action: dict[str, Any], authorization: dict[str, Any],
+                                reservation_id: str, permit_pair: dict[str, Any]) -> None:
+        """Protected admission hook; legacy network-v1 keeps its frozen behavior.
+
+        A separately persisted guarded profile can require a final host check.
+        This hook precedes the dispatch try/finally so a blocked dispatch never
+        claims that an endpoint callback was invoked or finished.
+        """
+        return None
+
     def execute(self, proposed: Any) -> dict[str, Any]:
         """One fresh BEGIN, at most one endpoint POST, no operation retry."""
         with self._lock:
@@ -274,6 +284,7 @@ class NetworkGateway:
                         settlement_status="UNKNOWN")
                 self._state(action["action_id"], "PENDING", reservation_id)
                 pair = self.external_controller.evidence[-1]
+                self._before_endpoint_commit(action, authorization, reservation_id, pair)
                 # The endpoint verifies the exact signed BEGIN request challenge;
                 # a retained packet is never used as a gateway execution source.
                 try:
@@ -289,7 +300,13 @@ class NetworkGateway:
                     raise ControlError("NETWORK_GATEWAY_ENDPOINT_OBSERVATION_INVALID")
                 return self._settle(action, authorization, reservation_id, observation.get("receipt"), dispatch_finished=True)
             except ControlError as exc:
-                self._state(action["action_id"], "UNKNOWN", reservation_id)
+                try:
+                    self._state(action["action_id"], "UNKNOWN", reservation_id)
+                except Exception:
+                    # A configuration/storage fault can prevent this journal
+                    # update. It cannot justify losing a consumed reservation,
+                    # retrying POST, or repairing a differently bound store.
+                    pass
                 return self._result(action["action_id"], "UNKNOWN", str(exc), reservation_id,
                     dispatch_finished=dispatch_finished, settlement_status="UNKNOWN")
 
