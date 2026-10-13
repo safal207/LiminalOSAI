@@ -49,6 +49,12 @@ a separately admitted Docker create/start lifecycle. Its trusted supervisor
 requires finished callbacks and verified owned process quiescence before
 settling external reservations.
 
+The [isolated agent profile](docs/AGENT_CONTROL_ISOLATED_AGENT.md) puts a
+response-driven fixed-policy agent inside Docker. A bounded STDIO bridge keeps
+grants and keys on the host; aggregate STOP requires both external roots,
+owned process quiescence and settled endpoint effects. Its real Docker matrix
+uses no model API calls.
+
 The [orientation graph](docs/AGENT_CONTROL_ORIENTATION.md) adds distinct
 per-agent observed trajectories, evidence freshness and bounded excursions
 from host-defined checkpoints. Its local timeline viewer separates pending

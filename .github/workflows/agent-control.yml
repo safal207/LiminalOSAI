@@ -15,6 +15,7 @@ on:
       - 'scripts/verify_external_stop_evidence.py'
       - 'scripts/verify_external_network_evidence.py'
       - 'scripts/verify_external_command_evidence.py'
+      - 'scripts/verify_external_agent_evidence.py'
       - 'scripts/reproduce_reinforcement_contract.py'
       - 'scripts/verify_reinforcement_bundle.py'
       - 'scripts/check_orientation_view.cjs'
@@ -29,6 +30,68 @@ permissions:
   contents: read
 
 jobs:
+  isolated-agent:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      LIMINAL_EXTERNAL_AGENT_REQUIRE_DOCKER: '1'
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install pinned host signing dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/external-agent-venv"
+          "$RUNNER_TEMP/external-agent-venv/bin/python" -m pip --isolated install -r experiments/agent_control/observer-requirements.txt
+          echo "$RUNNER_TEMP/external-agent-venv/bin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/agent-control-isolated-agent"
+          echo "LIMINAL_EXTERNAL_AGENT_EVIDENCE=$RUNNER_TEMP/agent-control-isolated-agent/report.json" >> "$GITHUB_ENV"
+      - name: Resolve the pinned image and record actual Docker identity
+        run: |
+          WORKER_IMAGE=python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+          docker pull --platform linux/amd64 "$WORKER_IMAGE"
+          IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$WORKER_IMAGE")
+          echo "LIMINAL_EXTERNAL_AGENT_DOCKER_IMAGE=$IMAGE_ID" >> "$GITHUB_ENV"
+          docker image inspect "$IMAGE_ID" > "$RUNNER_TEMP/agent-control-isolated-agent/image.json"
+          docker version > "$RUNNER_TEMP/agent-control-isolated-agent/docker-version.txt"
+      - name: Require profile, STDIO, coordinator and independent evidence regressions
+        run: |
+          python3 - <<'PY'
+          import unittest
+          names = ['tests.test_agent_control_external_agent_authority',
+                   'tests.test_agent_control_external_agent_bridge',
+                   'tests.test_agent_control_external_agent_supervisor',
+                   'tests.test_agent_control_external_agent_coordinator',
+                   'tests.test_agent_control_external_agent_evidence']
+          suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromName(name) for name in names)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.testsRun > 0 and not result.skipped and result.wasSuccessful(), 'Isolated-agent regressions must execute'
+          PY
+      - name: Require real isolated agent, dual external STOP and owned endpoint effects
+        run: |
+          python3 - <<'PY'
+          import unittest
+          suite = unittest.defaultTestLoader.loadTestsFromName('tests.test_agent_control_external_agent_runtime')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.testsRun > 0 and not result.skipped and result.wasSuccessful(), 'Actual Docker agent experiment must execute'
+          PY
+      - name: Independently verify the isolated agent report at this clean revision
+        run: >-
+          python3 scripts/verify_external_agent_evidence.py
+          "$LIMINAL_EXTERNAL_AGENT_EVIDENCE"
+          --expected-source-sha "$EXPECTED_SOURCE_SHA"
+          > "$RUNNER_TEMP/agent-control-isolated-agent/verification.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-isolated-agent-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-isolated-agent/
+          if-no-files-found: error
+
   external-command:
     runs-on: ubuntu-24.04
     timeout-minutes: 15

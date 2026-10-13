@@ -66,6 +66,39 @@ def _positive_started_at(value: Any) -> bool:
 
 
 class ExternalCommandSupervisor:
+    # Defaults retain the frozen command-v1 contract. A separate owned-agent
+    # profile may override these protected host-side hooks; workers cannot
+    # select a validator, profile, receipt domain or launch implementation.
+    def _validate_action(self, action: Any) -> dict:
+        return validate_command_action(action)
+
+    def _validate_authorization(self, action: Any, authorization: Any) -> dict:
+        return validate_command_authorization(action, authorization, self.supervisor_id)
+
+    def _plan(self, spec: Any):
+        return command_plan(spec)
+
+    def _profile_name(self) -> str:
+        return COMMAND_PROFILE
+
+    def _store_schema(self) -> str:
+        return "liminal-command-supervisor-store-v1"
+
+    def _configuration_extra(self) -> dict:
+        return {}
+
+    def _verify_receipt(self, receipt: Any) -> bool:
+        return verify_command_receipt(receipt, self.pin())
+
+    def _receipt_schema(self) -> str:
+        return COMMAND_RECEIPT_SCHEMA
+
+    def _receipt_domain(self) -> bytes:
+        return COMMAND_RECEIPT_DOMAIN
+
+    def _start_dispatch(self, action: dict, command: dict):
+        return self.controller.command(["start", "--attach", action["arguments"]["container_id"]], timeout=30)
+
     def __init__(self, db_path: str | Path, registry_path: str | Path, *, supervisor_id: str,
                  key_id: str, private_key: bytes, authority_client: HTTPExternalAuthorityClient,
                  controller: DockerController | None = None, create: bool = True) -> None:
@@ -149,11 +182,16 @@ class ExternalCommandSupervisor:
             registry_meta = {row["key"]: row["value"] for row in registry_db.execute("SELECT * FROM supervisor_meta")}
         if registry_meta != {"registry_id": self.registry.registry_id}:
             raise ControlError("COMMAND_SUPERVISOR_REGISTRY_IDENTITY_CHANGED")
-        return canonical_bytes({"schema": "liminal-command-supervisor-store-v1", "profile": COMMAND_PROFILE,
+        configuration = {"schema": self._store_schema(), "profile": self._profile_name(),
             "supervisor_pin": self.pin(), "authority_pin": client.pin(), "authority_url": client.url,
             "authority_role": client.role, "authority_request_key_digest": hashlib.sha256(client.request_key).hexdigest(),
             "registry_path": str(self.registry_path), "registry_id": self.registry.registry_id,
-            "docker_binary": self.controller.docker_binary}).decode()
+            "docker_binary": self.controller.docker_binary}
+        extra = self._configuration_extra()
+        if type(extra) is not dict or set(extra) & set(configuration):
+            raise ControlError("COMMAND_SUPERVISOR_CONFIGURATION_EXTRA_INVALID")
+        configuration.update(extra)
+        return canonical_bytes(configuration).decode()
 
     def _connection(self):
         if self._closed or not self.db_path.is_file() or any(item.is_symlink() for item in (self.db_path, *self.db_path.parents)):
@@ -181,8 +219,8 @@ class ExternalCommandSupervisor:
         if row is None:
             return None
         state = json.loads(row[0])
-        action = validate_command_action(state["action"])
-        grant = validate_command_authorization(action, state["authorization"], self.supervisor_id)
+        action = self._validate_action(state["action"])
+        grant = self._validate_authorization(action, state["authorization"])
         if (action["action_id"] != action_id or state["action_digest"] != digest(action)
                 or state["authorization_digest"] != digest(grant)):
             raise ControlError("COMMAND_SUPERVISOR_GRANT_CORRUPT")
@@ -213,8 +251,8 @@ class ExternalCommandSupervisor:
     def authorize(self, action: Any, grant: Any) -> dict:
         """Trusted admin operation; workers can only submit an exact proposal."""
         with self._lock:
-            action = validate_command_action(action)
-            grant = validate_command_authorization(action, grant, self.supervisor_id)
+            action = self._validate_action(action)
+            grant = self._validate_authorization(action, grant)
             with self._connection() as db:
                 db.execute("BEGIN IMMEDIATE")
                 rows = db.execute("SELECT state_json FROM command_supervisor_grants WHERE action_id=? OR attempt_id=?",
@@ -290,7 +328,7 @@ class ExternalCommandSupervisor:
         if args["stage"] == "CREATE":
             if command is not None or self.registry.unfinished():
                 raise ControlError("COMMAND_SUPERVISOR_RECOVERY_REQUIRED")
-            plan = command_plan(args["spec"])
+            plan = self._plan(args["spec"])
             self.controller.image_id(plan.image_id)
             return
         if (command is None or command["closing"] or command["cleanup_complete"] or not command["create_confirmed"]
@@ -304,13 +342,13 @@ class ExternalCommandSupervisor:
                 or creates[0]["callback_phase"] != "FINISHED"
                 or any(s["action"]["arguments"]["stage"] == "START" for s in stages)):
             raise ControlError("COMMAND_SUPERVISOR_PARENT_NOT_READY")
-        self.controller.verify_configuration(command["registry_record"]["session_id"], command_plan(command["spec"]))
+        self.controller.verify_configuration(command["registry_record"]["session_id"], self._plan(command["spec"]))
         self._verify_fixed_configuration(command)
 
     def execute(self, proposed: Any) -> dict:
         """Fresh external admission and at most one durable host callback."""
         with self._lock:
-            action = validate_command_action(proposed)
+            action = self._validate_action(proposed)
             state = self._grant(action["action_id"])
             if state is None or canonical_bytes(state["action"]) != canonical_bytes(action):
                 return self._result(state, "DENIED", "COMMAND_EXACT_HOST_GRANT_REQUIRED", action["action_id"])
@@ -348,11 +386,11 @@ class ExternalCommandSupervisor:
             return
         spec = args["spec"]
         session_id = "liminal-control-" + uuid.uuid4().hex
-        plan = command_plan(spec)
+        plan = self._plan(spec)
         record = self.registry.register(session_id=session_id, root_id=action["root_id"], action_id=action["action_id"],
             image_id=plan.image_id, plan_sha256=plan.plan_sha256,
             backend_identity_sha256=digest({"backend": "docker", "image_id": plan.image_id}),
-            receiver_id=self.supervisor_id, broker_context_sha256=digest({"profile": COMMAND_PROFILE, "spec": spec}))
+            receiver_id=self.supervisor_id, broker_context_sha256=digest({"profile": self._profile_name(), "spec": spec}))
         image_observation = self.controller.command(["image", "inspect", plan.image_id], timeout=3)
         try:
             images = json.loads(image_observation.stdout)
@@ -383,7 +421,7 @@ class ExternalCommandSupervisor:
             if command is None:
                 raise ControlError("COMMAND_SUPERVISOR_COMMAND_MISSING")
             if stage == "CREATE":
-                plan = command_plan(command["spec"])
+                plan = self._plan(command["spec"])
                 argv = build_docker_argv(plan, docker_binary=self.controller.docker_binary,
                                          container_name=command["registry_record"]["session_id"])
                 argv[1:3] = ["create", "--interactive"]
@@ -394,7 +432,7 @@ class ExternalCommandSupervisor:
                 argv[index:index] = extra
                 result = self.controller.command(argv[1:], timeout=30)
             else:
-                result = self.controller.command(["start", "--attach", action["arguments"]["container_id"]], timeout=30)
+                result = self._start_dispatch(action, command)
             if self.after_dispatch_hook is not None:
                 self.after_dispatch_hook(stage, _copy(action), result)
         except BaseException as exc:
@@ -477,7 +515,7 @@ class ExternalCommandSupervisor:
             if type(container_id) is not str or not _ID.fullmatch(container_id):
                 raise ControlError("COMMAND_IMMUTABLE_CONTAINER_ID_INVALID")
             self.controller.bind_container_id(command["registry_record"]["session_id"], container_id)
-            self.controller.verify_configuration(command["registry_record"]["session_id"], command_plan(command["spec"]))
+            self.controller.verify_configuration(command["registry_record"]["session_id"], self._plan(command["spec"]))
             self._verify_fixed_configuration(command)
             self.registry.confirm_created(command["registry_record"], container_id)
             command.update(container_id=container_id, create_confirmed=True)
@@ -496,7 +534,7 @@ class ExternalCommandSupervisor:
     def _accept_terminal(self, state: dict, result: dict) -> dict:
         action, receipt = state["action"], result.get("receipt")
         reservation = self._bind(result, action)
-        if (not verify_command_receipt(receipt, self.pin()) or receipt["reservation_id"] != reservation
+        if (not self._verify_receipt(receipt) or receipt["reservation_id"] != reservation
                 or receipt["action_digest"] != digest(action)
                 or receipt["authorization_digest"] != digest(state["authorization"])):
             raise ControlError("COMMAND_SUPERVISOR_TERMINAL_BINDING_MISMATCH")
@@ -621,7 +659,7 @@ class ExternalCommandSupervisor:
                                 or item.get("State", {}).get("Paused") is not False
                                 or type(item.get("State", {}).get("Pid")) is not int or item["State"]["Pid"] != 0):
                             raise ControlError("COMMAND_OWNED_OBJECT_NOT_POSITIVELY_STOPPED")
-                        self.controller.verify_configuration(session, command_plan(command["spec"]))
+                        self.controller.verify_configuration(session, self._plan(command["spec"]))
                         self._verify_fixed_configuration(command)
                         if any(entry["stage"] == "START" for entry in callbacks) and not command["start_observed"]:
                             started = item.get("State", {}).get("StartedAt")
@@ -666,7 +704,7 @@ class ExternalCommandSupervisor:
                 for state in stages:
                     if state["receipt"] is None:
                         action = state["action"]
-                        body = {"schema": COMMAND_RECEIPT_SCHEMA, **{k: v for k, v in self.pin().items() if k != "public_key"},
+                        body = {"schema": self._receipt_schema(), **{k: v for k, v in self.pin().items() if k != "public_key"},
                             "reservation_id": state["reservation_id"],
                             **{field: action[field] for field in ("action_id", "attempt_id", "root_id", "execution_id", "epoch")},
                             "action_digest": digest(action), "authorization_digest": digest(state["authorization"]),
@@ -677,8 +715,8 @@ class ExternalCommandSupervisor:
                             "start_admitted": admitted, "start_outcome": "STARTED" if admitted else "NOT_STARTED",
                             "business_effects": "NOT_ESTABLISHED", "observation_digest": observation_digest,
                             "observed_at": observed_at, "status": "QUIESCENT"}
-                        receipt = {**body, "signature": self._signer.sign(COMMAND_RECEIPT_DOMAIN + canonical_bytes(body)).hex()}
-                        if not verify_command_receipt(receipt, self.pin()):
+                        receipt = {**body, "signature": self._signer.sign(self._receipt_domain() + canonical_bytes(body)).hex()}
+                        if not self._verify_receipt(receipt):
                             raise ControlError("COMMAND_SUPERVISOR_RECEIPT_CONTRACT_MISMATCH")
                         state.update(receipt=receipt, settlement_status="UNKNOWN", status="QUIESCENT_PROOF")
                         self._save_grant(state)  # proof durable before FINISH
@@ -717,7 +755,7 @@ class ExternalCommandSupervisor:
                     "result": state["callback_result"]} for state in command["stages"]]
                 command["observation_digest"] = digest({"observations": command["observations"],
                                                          "callbacks": command["callback_journal"]})
-            return {"profile": COMMAND_PROFILE, "supervisor_pin": self.pin(), "authority_pin": self.authority_client.pin(),
+            return {"profile": self._profile_name(), "supervisor_pin": self.pin(), "authority_pin": self.authority_client.pin(),
                 "commands": commands, "grants": grants, "authority_evidence": evidence,
                 "unfinished_registry": self.registry.unfinished(), "execution_authorized": False}
 
