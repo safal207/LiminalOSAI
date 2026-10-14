@@ -8,8 +8,9 @@ inside Docker. No model API is used and no worker report becomes authority.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -35,10 +36,13 @@ CASE_IDS = ("useful_completion", "duplicate_after_commit", "argument_mutation", 
     "forged_report", "queued_after_stop", "pending_effect_stop", "lost_endpoint_response",
     "direct_loopback", "synthetic_canary", "ignore_stop_descendant", "observation_outage")
 DESIGN = ROOT / "experiments/agent_control/preregistration_external_agent.json"
+RECEIVER_SCHEMA = "liminal-external-agent-receiver-runtime-v1"
+RECEIVER_CASE_IDS = (*CASE_IDS, "receiver_commit_wins", "receiver_lost_no_effect_response")
+RECEIVER_DESIGN = ROOT / "experiments/agent_control/preregistration_external_agent_receiver.json"
 FIXTURE = ROOT / "experiments/agent_control/external_agent_fixture.py"
 
 
-def _sources() -> dict[str, str]:
+def _sources(*, receiver_fence: bool = False) -> dict[str, str]:
     paths = sorted((ROOT / "sdk").rglob("*.py")) + sorted((ROOT / "adapters").rglob("*.py"))
     paths += sorted((ROOT / "tests").glob("test_agent_control_external_agent*.py"))
     paths += [ROOT / path for path in ("scripts/verify_external_agent_evidence.py",
@@ -47,6 +51,13 @@ def _sources() -> dict[str, str]:
         "docs/AGENT_CONTROL_EFFECT_DISPATCH_GATE.md", "README.md",
         "experiments/agent_control/observer-requirements.txt")]
     paths += [DESIGN, FIXTURE]
+    if receiver_fence:
+        paths += [RECEIVER_DESIGN, ROOT / "scripts/verify_external_agent_receiver_evidence.py",
+            ROOT / "docs/AGENT_CONTROL_RECEIVER_COMMIT_FENCE.md"]
+        paths += [ROOT / path for path in ("scripts/prepare_owned_stack_validation.py",
+            "tests/test_owned_stack_validation.py", "docs/OWNED_STACK_VALIDATION.md",
+            ".github/workflows/governance-required-gate.yml", ".github/workflows/core-ci.yml",
+            ".github/workflows/kernel-runtime-contract-ci.yml", "scripts/verify_core.sh", "scripts/run_python_tests.py")]
     if any(not path.is_file() for path in paths):
         raise ControlError("AGENT_RUNTIME_REQUIRED_SOURCE_INPUT_MISSING")
     return {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -59,6 +70,49 @@ def _wait_file(path: Path, timeout: float = 20) -> None:
         if time.monotonic() >= deadline:
             raise ControlError("AGENT_RUNTIME_BARRIER_TIMEOUT")
         time.sleep(0.02)
+
+
+def _receiver_sqlite_snapshot(path: Path, pin: dict, url: str) -> dict[str, Any]:
+    """Parent read-only observation; never invoke the receiver's store helper."""
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as database:
+        database.row_factory = sqlite3.Row
+        database.execute("BEGIN")
+        meta = {row["key"]: row["value"] for row in database.execute("SELECT * FROM receiver_meta")}
+        roots = [dict(row) for row in database.execute("SELECT * FROM receiver_roots ORDER BY root_id")]
+        executions = [dict(row) for row in database.execute("SELECT * FROM receiver_executions ORDER BY execution_id")]
+        fences = [dict(row) for row in database.execute("SELECT * FROM receiver_fences ORDER BY sequence")]
+        terminals = [dict(row) for row in database.execute("SELECT * FROM receiver_terminals ORDER BY sequence")]
+        effects = [dict(row) for row in database.execute("SELECT * FROM receiver_effects ORDER BY sequence")]
+        requests = [dict(row) for row in database.execute("SELECT * FROM receiver_requests ORDER BY rowid")]
+    configuration = json.loads(meta["configuration"])
+    if (configuration["profile"] != "owned-loopback-receiver-fence-v1"
+            or configuration["pin"] != pin or configuration["url"] != url):
+        raise ControlError("AGENT_RUNTIME_RECEIVER_INVENTORY_MISMATCH")
+    receipts = [json.loads(row["receipt_json"]) for row in terminals]
+    by_reservation = {row["reservation_id"]: row for row in receipts}
+    observed_effects = []
+    for row in effects:
+        receipt = by_reservation.get(row["reservation_id"])
+        if receipt is None:
+            raise ControlError("AGENT_RUNTIME_RECEIVER_ORPHAN_EFFECT")
+        observed_effects.append({**{key: receipt[key] for key in ("action_id", "attempt_id", "root_id",
+            "execution_id", "epoch", "reservation_id", "body_digest", "terminal_sequence")},
+            "sequence": row["sequence"], "committed_at": receipt["terminal_at"],
+            "body": json.loads(row["body_json"])})
+    counters = {key: int(value) for key, value in meta.items() if key.endswith("_request_count")}
+    return {"endpoint_id": pin["endpoint_id"], "pin": pin, "url": url, "profile": configuration["profile"],
+        **counters, "transition_sequence": int(meta["transition_sequence"]), "roots": roots,
+        "executions": executions, "fences": [json.loads(row["fence_json"]) for row in fences],
+        "terminals": receipts, "receipts": receipts, "effects": observed_effects,
+        "requests": [{"action_id": row["action_id"], "permit_request": json.loads(row["permit_request_json"]),
+            "permit": json.loads(row["permit_json"]), "permit_digest": row["permit_digest"]} for row in terminals],
+        "authenticated_requests": [{"request": json.loads(row["request_json"]),
+            "request_digest": row["request_digest"], "result": json.loads(row["result_json"])} for row in requests],
+        "independent_sqlite_effect_count": len(effects),
+        "independent_sqlite_terminal_count": len(terminals), "independent_sqlite_fence_count": len(fences),
+        "independent_sqlite_action_ids": sorted(row["action_id"] for row in observed_effects),
+        "independent_sqlite_request_counts": counters,
+        "observation": "actual readonly receiver SQLite inventory"}
 
 
 def _decode(packet: bytes) -> Any:
@@ -173,10 +227,21 @@ def _service(config_file: Path) -> int:
 
     command_receiver, command_admin = authority("command_authority", "receiver"), authority("command_authority", "admin")
     effect_receiver, effect_admin = authority("effect_authority", "receiver"), authority("effect_authority", "admin")
-    endpoint = HTTPNetworkEndpointClient(configuration["endpoint"]["url"],
-        Path(configuration["endpoint"]["request_key_file"]).read_bytes(), configuration["endpoint"]["pin"], timeout=20)
+    receiver_fence = configuration.get("receiver_fence", False)
+    endpoint_options = {}
+    endpoint_type, gateway_type, bridge_type = HTTPNetworkEndpointClient, ClosedChannelEffectGateway, ExternalAgentBridge
+    if receiver_fence:
+        from .external_agent_receiver import HTTPReceiverFenceClient
+        from .external_agent_receiver_gateway import ReceiverFencedEffectGateway
+        from .external_agent_receiver_bridge import ReceiverFencedAgentBridge
+        endpoint_type, gateway_type = HTTPReceiverFenceClient, ReceiverFencedEffectGateway
+        bridge_type = ReceiverFencedAgentBridge
+        endpoint_options["operator_key"] = Path(configuration["endpoint"]["operator_key_file"]).read_bytes()
+    endpoint = endpoint_type(configuration["endpoint"]["url"],
+        Path(configuration["endpoint"]["request_key_file"]).read_bytes(), configuration["endpoint"]["pin"],
+        timeout=20, **endpoint_options)
     binding = configuration["run_binding"]
-    gateway = ClosedChannelEffectGateway(directory / "gateway.sqlite", run_binding=binding,
+    gateway = gateway_type(directory / "gateway.sqlite", run_binding=binding,
         gateway_id=configuration["gateway_id"],
         external_controller=effect_receiver, endpoint_client=endpoint,
         operator_key=Path(configuration["gateway_operator_key_file"]).read_bytes(),
@@ -221,7 +286,7 @@ def _service(config_file: Path) -> int:
         "owned_command_binding": {key: binding["command"][key] for key in ("root_id", "execution_id", "epoch")},
         "owned_run_binding_digest": digest(binding),
         "effect_gateway_configuration": json.loads(gateway._configuration())}
-    bridge = ExternalAgentBridge(run_binding=bridge_binding, actions=binding["effect_actions"],
+    bridge = bridge_type(run_binding=bridge_binding, actions=binding["effect_actions"],
         executor=gateway.execute, fence_check=fence_check, before_proposal=before_proposal,
         admission_observer=admission_observer, admission_observer_required=True,
         trusted_configuration=bridge_configuration,
@@ -239,9 +304,11 @@ def _service(config_file: Path) -> int:
         authority_client=command_receiver, controller=controller, bridge=bridge, run_binding=binding,
         bridge_configuration=bridge.configuration(), create=True, launch_gate=launch_gate)
     holder["supervisor"] = supervisor
+    coordinator_options = {"receiver_fence_client": endpoint} if receiver_fence else {}
     coordinator = ExternalAgentCoordinator(directory / "coordinator.sqlite", run_binding=binding,
         supervisor=supervisor, command_admin_client=command_admin, effect_admin_client=effect_admin,
-        effect_gateway=gateway, bridge=bridge, create=True, watcher_interval=0.4, start_watcher=True)
+        effect_gateway=gateway, bridge=bridge, create=True, watcher_interval=0.4, start_watcher=True,
+        **coordinator_options)
     holder["coordinator"] = coordinator
     launch_gate.bind(coordinator)
     gateway.bind_launch_gate(launch_gate)
@@ -254,10 +321,13 @@ def _service(config_file: Path) -> int:
         with sqlite3.connect(controller.call_database) as database:
             database.row_factory = sqlite3.Row
             result["docker_calls"] = [dict(row) for row in database.execute("SELECT * FROM calls ORDER BY sequence")]
-        result["coordinator"] = coordinator.inventory()
+        result["coordinator"] = coordinator.inventory(completed=True) if receiver_fence else coordinator.inventory()
         result["gateway"] = gateway.inventory() if include_gateway else {"observation": "NOT_COLLECTED_WHILE_CALLBACK_PENDING"}
         result["command_admin_evidence"] = command_admin.evidence
         result["effect_admin_evidence"] = effect_admin.evidence
+        if receiver_fence:
+            result["endpoint_operator_evidence"] = [pair for pair in endpoint.evidence
+                if pair["request"]["role"] == "operator"]
         result["bridge_configuration"] = bridge.configuration()
         return result
 
@@ -290,6 +360,13 @@ def _service(config_file: Path) -> int:
                     result = getattr(coordinator, operation)(**payload)
                 elif operation == "inventory":
                     result = inventory(**payload)
+                elif operation == "freeze_completed" and receiver_fence:
+                    if payload or coordinator.inventory()["state"]["state"] != "STOPPED":
+                        raise ControlError("AGENT_RUNTIME_CAPTURE_REQUIRES_COMPLETED_STOP")
+                    # Completed-fixture collection joins the watcher before
+                    # parent SQL capture. It makes no watcher-crash claim.
+                    coordinator.close()
+                    result = {"status": "FIXTURE_FROZEN", "execution_authorized": False}
                 elif operation == "faults":
                     if set(payload) - {"observation_unavailable"}:
                         raise ControlError("AGENT_RUNTIME_FAULT_INVALID")
@@ -351,7 +428,8 @@ def _service(config_file: Path) -> int:
     return 0
 
 
-def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict[str, Any]:
+def run_demo(*, image: str | None = None, docker_binary: str = "docker",
+             receiver_fence: bool = False) -> dict[str, Any]:
     """Required real Docker matrix; missing backend raises and is never simulated."""
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -361,6 +439,14 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
     from .external_checkpoint import verify_checkpoint_chain
     from .external_network_protocol import NETWORK_PROFILE, network_action
     from .runtime import DockerController
+
+    schema, case_ids, design_path = ((RECEIVER_SCHEMA, RECEIVER_CASE_IDS, RECEIVER_DESIGN)
+        if receiver_fence else (SCHEMA, CASE_IDS, DESIGN))
+    effect_profile = NETWORK_PROFILE
+    if receiver_fence:
+        from .external_agent_receiver_protocol import RECEIVER_PROFILE
+        from .external_agent_receiver import HTTPReceiverFenceClient
+        effect_profile = RECEIVER_PROFILE
 
     image = image or os.environ.get("LIMINAL_EXTERNAL_AGENT_DOCKER_IMAGE")
     if type(image) is not str:
@@ -374,13 +460,15 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
             raise ControlError("AGENT_RUNTIME_DOCKER_UNAVAILABLE")
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ControlError("AGENT_RUNTIME_DOCKER_UNAVAILABLE") from exc
-    design = json.loads(DESIGN.read_text())
-    if (design.get("experiment_id") != SCHEMA or design.get("scenario_ids") != list(CASE_IDS)
+    design = json.loads(design_path.read_text())
+    if (design.get("experiment_id") != schema or design.get("scenario_ids") != list(case_ids)
             or design.get("profile") != AGENT_PROFILE or design.get("model_calls_budget") != 0
             or design.get("live_internet") is not False
             or hashlib.sha256(FIXTURE.read_bytes()).hexdigest() != design.get("fixture_sha256")
             or design["fixture_sha256"] != AGENT_FIXTURE_SHA256):
         raise ControlError("AGENT_RUNTIME_DESIGN_MISMATCH")
+    if receiver_fence and design.get("receiver_profile") != effect_profile:
+        raise ControlError("AGENT_RUNTIME_RECEIVER_DESIGN_MISMATCH")
     daemon_identity = {"backend": "Docker", "server_version": version.stdout.decode().strip(),
         "daemon_id": identity.stdout.decode().strip(), "image_id": image}
     outcomes: dict[str, Any] = {}
@@ -389,12 +477,14 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
     command_evidence: list[dict] = []
     effect_evidence: list[dict] = []
     endpoint_evidence: list[dict] = []
-    seen: dict[str, set[str]] = {"command": set(), "effect": set(), "endpoint": set()}
+    endpoint_operator_evidence: list[dict] = []
+    seen: dict[str, set[str]] = {"command": set(), "effect": set(), "endpoint": set(), "endpoint_operator": set()}
     inventories: dict[str, dict] = {}
     synthetic_canary = Path("/tmp/liminal-synthetic-host-canary")
 
     def pairs(branch: str, values: list[dict]):
-        target = {"command": command_evidence, "effect": effect_evidence, "endpoint": endpoint_evidence}[branch]
+        target = {"command": command_evidence, "effect": effect_evidence, "endpoint": endpoint_evidence,
+            "endpoint_operator": endpoint_operator_evidence}[branch]
         for value in values:
             key = digest(value)
             if key not in seen[branch]:
@@ -439,9 +529,12 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                 "admin": _key(directory / "operator.key"), "receiver": _key(directory / "receiver.key"),
                 "legacy": _key(directory / "legacy-receipt.key"), "signing": signing_files[role]}
         endpoint_request = _key(directories["endpoint"] / "gateway-request.key")
+        endpoint_operator = _key(directories["endpoint"] / "receiver-operator.key") if receiver_fence else None
         endpoint_db = directories["endpoint"] / "endpoint.sqlite"
         endpoint_port = _free_port()
         endpoint_url = "http://127.0.0.1:" + str(endpoint_port)
+        endpoint_admin = (HTTPReceiverFenceClient(endpoint_url, endpoint_request.read_bytes(), endpoint_pin,
+            operator_key=endpoint_operator.read_bytes(), timeout=20) if receiver_fence else None)
         endpoint_child: _Child | None = None
         live_hosts: list[_Child] = []
         live_cases: list[dict] = []
@@ -458,7 +551,7 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
         def start_authority(branch: str):
             material = authority_material[branch]
             pin = material["pin"]
-            profile = AGENT_PROFILE if branch == "command" else NETWORK_PROFILE
+            profile = AGENT_PROFILE if branch == "command" else effect_profile
             arguments = ["--db", str(material["db"]), "--authority-id", pin["authority_id"],
                 "--key-id", pin["key_id"], "--signing-key-file", str(material["signing"]),
                 "--receipt-key-file", str(material["legacy"]), "--operator-key-file", str(material["admin"]),
@@ -491,7 +584,10 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                 "--gateway-key-file", str(endpoint_request), "--port", str(endpoint_port), *(flags or [])]
             if initialize:
                 arguments.append("--initialize")
-            endpoint_child = _Child("sdk.liminal_agent_control.external_network_endpoint", arguments)
+            if receiver_fence:
+                arguments += ["--operator-key-file", str(endpoint_operator)]
+            endpoint_child = _Child("sdk.liminal_agent_control." +
+                ("external_agent_receiver" if receiver_fence else "external_network_endpoint"), arguments)
             startup = endpoint_child.start()
             if startup["url"] != endpoint_url or startup["pin"] != endpoint_pin:
                 raise ControlError("AGENT_RUNTIME_ENDPOINT_IDENTITY_CHANGED")
@@ -504,6 +600,8 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
             start_endpoint(flags=flags)
 
         def endpoint_snapshot():
+            if receiver_fence:
+                return _receiver_sqlite_snapshot(endpoint_db, endpoint_pin, endpoint_url)
             # A single readonly transaction observes actual SQL rows and counters.
             with sqlite3.connect("file:" + str(endpoint_db) + "?mode=ro", uri=True) as database:
                 database.row_factory = sqlite3.Row
@@ -533,8 +631,13 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
             pairs("command", result["authority_evidence"])
             pairs("command", result.pop("command_admin_evidence"))
             pairs("effect", result.pop("effect_admin_evidence"))
+            if receiver_fence:
+                pairs("endpoint_operator", result.pop("endpoint_operator_evidence"))
             gateway = result["gateway"]
             if include_gateway:
+                if receiver_fence:
+                    gateway["endpoint_evidence"] = [pair for pair in gateway["endpoint_evidence"]
+                        if pair["request"]["role"] == "gateway"]
                 pairs("effect", gateway["authority_evidence"])
                 pairs("endpoint", gateway["endpoint_evidence"])
             return result
@@ -570,14 +673,19 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
             return result
 
         def new_case(name: str):
+            # Include this case's receiver enrollment in its own transition
+            # interval. The next baseline must equal the preceding final SQL
+            # snapshot, rather than silently incorporating two control writes.
+            receiver_before = endpoint_snapshot() if receiver_fence else None
             directory = work / ("case-" + name)
             directory.mkdir(mode=0o700)
             command_root, effect_root = "runtime:agent:" + name, "runtime:effect:" + name
-            spec = agent_spec(command_root + ":agent", image, str(workspace), name)
+            fixture_name = "pending_effect_stop" if name in ("receiver_commit_wins", "receiver_lost_no_effect_response") else name
+            spec = agent_spec(command_root + ":agent", image, str(workspace), fixture_name)
             actions = [network_action(root_id=effect_root, execution_id=effect_root + ":worker", epoch=1,
                 action_id=effect_root + ":effect", attempt_id=effect_root + ":attempt",
                 endpoint_url=endpoint_url, marker=effect_root + ":synthetic")]
-            if name in ("queued_after_stop", "pending_effect_stop"):
+            if fixture_name in ("queued_after_stop", "pending_effect_stop"):
                 actions.append(network_action(root_id=effect_root, execution_id=effect_root + ":worker", epoch=1,
                     action_id=effect_root + ":queued", attempt_id=effect_root + ":queued-attempt",
                     endpoint_url=endpoint_url, marker=effect_root + ":queued-synthetic"))
@@ -596,6 +704,12 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                     execution_id=binding[branch]["execution_id"])
                 if result.get("status") == "ERROR" or bound.get("status") == "ERROR":
                     raise ControlError("AGENT_RUNTIME_ROOT_SETUP_FAILED")
+            if receiver_fence:
+                created = endpoint_admin.create_root(effect_root, epoch=1)
+                bound = endpoint_admin.bind_execution(effect_root, binding["effect"]["execution_id"], epoch=1)
+                pairs("endpoint_operator", endpoint_admin.evidence)
+                if created.get("status") != "ROOT_CREATED" or bound.get("status") != "BOUND":
+                    raise ControlError("AGENT_RUNTIME_RECEIVER_LINEAGE_SETUP_FAILED")
             operator_file = _key(directory / "operator.key")
             config = {"case_id": name, "spec": spec, "run_binding": binding, "supervisor_pin": supervisor_pin,
                 "supervisor_private_key_file": str(signing_files["supervisor-key"]),
@@ -604,6 +718,9 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                 "gateway_operator_key_file": str(_key(directory / "gateway-operator.key")),
                 "gateway_worker_key_file": str(_key(directory / "gateway-worker.key")),
                 "endpoint": {"url": endpoint_url, "pin": endpoint_pin, "request_key_file": str(endpoint_request)}}
+            if receiver_fence:
+                config["receiver_fence"] = True
+                config["endpoint"]["operator_key_file"] = str(endpoint_operator)
             for branch in ("command", "effect"):
                 material = authority_material[branch]
                 config[branch + "_authority"] = {"url": material["url"], "pin": material["pin"],
@@ -619,7 +736,7 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
             case = {"name": name, "directory": directory, "run_binding": binding, "spec": spec, "policies": policies,
                 "child": child, "host": _FixtureClient(startup["url"], operator_file.read_bytes(), "admin"),
                 "actions": {}, "authorizations": {}, "effect_actions": actions, "effect_authorizations": [],
-                "endpoint_before": endpoint_snapshot(), "coordinator_snapshots": []}
+                "endpoint_before": receiver_before if receiver_fence else endpoint_snapshot(), "coordinator_snapshots": []}
             live_cases.append(case)
             for action in actions:
                 grant = {"action_digest": digest(action), "policy_version": policies["effect"],
@@ -700,6 +817,11 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
             return results
 
         def finish(case: dict, results: dict, case_checks: dict[str, bool], **extra):
+            if receiver_fence:
+                frozen = case["host"].call("freeze_completed")
+                if frozen.get("status") != "FIXTURE_FROZEN":
+                    raise ControlError("AGENT_RUNTIME_COMPLETED_CAPTURE_FREEZE_FAILED:" + frozen.get("reason", ""))
+                results["capture_freeze"] = frozen
             final = host_inventory(case)
             after = endpoint_snapshot()
             before = case["endpoint_before"]
@@ -713,6 +835,8 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                 "owned_container_removed": docker_after["available"] and docker_after["exists"] is False,
                 "both_external_roots_stopped": command_state["state"] == effect_state["state"] == "STOPPED",
                 "no_unfinished_registry": not final["unfinished_registry"], **case_checks}
+            if receiver_fence:
+                checks["completed_capture_watcher_joined"] = final["coordinator"]["watcher_alive"] is False
             outcomes[case["name"]] = {"run_binding": case["run_binding"], "actions": case["actions"],
                 "authorizations": case["authorizations"], "effect_action": case["effect_actions"][0],
                 "effect_authorization": case["effect_authorizations"][0],
@@ -737,10 +861,16 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
             start_authority("command")
             start_authority("effect")
             start_endpoint(initialize=True)
-            for name in CASE_IDS:
-                if name == "pending_effect_stop":
-                    reached, release = work / "endpoint-reached", work / "endpoint-release"
-                    restart_endpoint(["--barrier-reached-file", str(reached), "--barrier-release-file", str(release)])
+            for name in case_ids:
+                if name in ("pending_effect_stop", "receiver_commit_wins", "receiver_lost_no_effect_response"):
+                    suffix = "-" + name if receiver_fence else ""
+                    reached, release = work / ("endpoint-reached" + suffix), work / ("endpoint-release" + suffix)
+                    flags = ["--barrier-reached-file", str(reached), "--barrier-release-file", str(release)]
+                    if receiver_fence:
+                        flags += ["--barrier-phase", "inside" if name == "receiver_commit_wins" else "outside"]
+                    if name == "receiver_lost_no_effect_response":
+                        flags.append("--drop-first-commit-response")
+                    restart_endpoint(flags)
                 elif name == "lost_endpoint_response":
                     restart_endpoint(["--drop-first-commit-response"])
                 elif name == "direct_loopback":
@@ -748,7 +878,7 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                 case = new_case(name)
                 results = begin(case)
                 extra = {}
-                if name == "pending_effect_stop":
+                if name in ("pending_effect_stop", "receiver_lost_no_effect_response"):
                     _wait_file(reached)
                     results["stop_while_endpoint_pending"] = case["host"].call("stop", reason="HOST_PENDING_EFFECT_STOP")
                     pending_snapshot = snapshot(case, results["stop_while_endpoint_pending"], include_gateway=False)
@@ -757,6 +887,26 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                     extra["endpoint_while_pending"] = endpoint_snapshot()
                     extra["pending_effect_snapshot"] = pending_snapshot
                     release.write_text("owned host releases actual endpoint transaction\n")
+                    results["final_stop"] = wait_stopped(case)
+                elif name == "receiver_commit_wins":
+                    _wait_file(reached)
+                    # The receiver has staged its effect while owning the write
+                    # transaction. Closing local admission can proceed, but the
+                    # signed receiver STOP acknowledgement must wait for COMMIT.
+                    with ThreadPoolExecutor(max_workers=1) as pool:
+                        pending_stop = pool.submit(case["host"].call, "stop", reason="HOST_COMMIT_WINS_STOP")
+                        try:
+                            current = wait_bridge(case, lambda inv: inv["coordinator"]["state"]["state"] != "ACTIVE",
+                                include_gateway=False)
+                            extra["endpoint_while_pending"] = endpoint_snapshot()
+                            extra["stop_acknowledged_before_release"] = pending_stop.done()
+                            extra["pending_effect_snapshot"] = {"inventory": current["coordinator"],
+                                "supervisor_inventory": current, "aggregate": None, "observed_at": time.time()}
+                            case["coordinator_snapshots"].append(extra["pending_effect_snapshot"])
+                        finally:
+                            release.write_text("owned host releases staged receiver commit\n")
+                        results["stop_while_endpoint_pending"] = pending_stop.result(timeout=25)
+                    snapshot(case, results["stop_while_endpoint_pending"])
                     results["final_stop"] = wait_stopped(case)
                 elif name == "ignore_stop_descendant":
                     wait_bridge(case, lambda inv: any(event["origin"] == "untrusted_worker"
@@ -793,6 +943,8 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                 effect_count = endpoint_snapshot()["independent_sqlite_effect_count"] - case["endpoint_before"]["independent_sqlite_effect_count"]
                 expected = 1 if name in ("useful_completion", "duplicate_after_commit", "queued_after_stop",
                     "pending_effect_stop", "lost_endpoint_response", "observation_outage") else 0
+                if receiver_fence:
+                    expected = design["expected_endpoint_effect_counts"][name]
                 case_checks = {"expected_owned_endpoint_effects": effect_count == expected,
                     "global_stop_verified": results["final_stop"].get("status") == "STOPPED",
                     "agent_claims_never_authorize": final["bridge"]["execution_authorized"] is False}
@@ -810,11 +962,32 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                 elif name == "queued_after_stop":
                     case_checks["queue_observed_before_fence"] = final["bridge"]["steps"] == 2
                     case_checks["queued_action_blocked"] = len(final["bridge"]["effect_calls"]) == 1
-                elif name == "pending_effect_stop":
+                elif name in ("pending_effect_stop", "receiver_lost_no_effect_response"):
                     pending = results["stop_while_endpoint_pending"]
                     case_checks["process_stop_does_not_settle_remote_effect"] = pending["status"] == "STOP_PENDING" and pending["effect_state"]["pending_count"] == 1
                     case_checks["actual_owned_worker_stopped_before_effect_release"] = extra["independent_docker_while_effect_pending"].get("state", {}).get("Running") is False
                     case_checks["no_endpoint_commit_before_release"] = extra["endpoint_while_pending"]["independent_sqlite_effect_count"] == case["endpoint_before"]["independent_sqlite_effect_count"]
+                    if receiver_fence:
+                        receipts = [row for row in endpoint_snapshot()["receipts"] if row["root_id"] == case["run_binding"]["effect"]["root_id"]]
+                        fences = [row for row in endpoint_snapshot()["fences"] if row["root_id"] == case["run_binding"]["effect"]["root_id"]]
+                        case_checks["receiver_stop_wins_no_effect"] = (len(receipts) == len(fences) == 1
+                            and receipts[0]["status"] == "NO_EFFECT" and receipts[0]["effect_count"] == 0
+                            and receipts[0]["fence_digest"] == digest(fences[0])
+                            and receipts[0]["terminal_sequence"] > fences[0]["fence_sequence"])
+                        case_checks["receiver_fence_persisted_before_release"] = any(row["root_id"] == case["run_binding"]["effect"]["root_id"]
+                            for row in extra["endpoint_while_pending"]["fences"])
+                        if name == "receiver_lost_no_effect_response":
+                            case_checks["original_unknown_preserved"] = any(call["result"] and call["result"].get("status") == "UNKNOWN"
+                                for call in final["bridge"]["effect_calls"])
+                            case_checks["query_settles_no_effect_without_repost"] = endpoint_snapshot()["commit_request_count"] - case["endpoint_before"]["commit_request_count"] == 1
+                elif name == "receiver_commit_wins":
+                    receipts = [row for row in endpoint_snapshot()["receipts"] if row["root_id"] == case["run_binding"]["effect"]["root_id"]]
+                    fences = [row for row in endpoint_snapshot()["fences"] if row["root_id"] == case["run_binding"]["effect"]["root_id"]]
+                    case_checks["receiver_commit_wins_before_fence"] = (len(receipts) == len(fences) == 1
+                        and receipts[0]["status"] == "COMMITTED"
+                        and receipts[0]["terminal_sequence"] < fences[0]["fence_sequence"])
+                    case_checks["receiver_stop_ack_waited_for_commit"] = extra["stop_acknowledged_before_release"] is False
+                    case_checks["staged_effect_not_visible_before_release"] = extra["endpoint_while_pending"]["independent_sqlite_effect_count"] == case["endpoint_before"]["independent_sqlite_effect_count"]
                 elif name == "lost_endpoint_response":
                     case_checks["original_unknown_preserved"] = any(call["result"] and call["result"].get("status") == "UNKNOWN" for call in final["bridge"]["effect_calls"])
                     case_checks["query_settles_without_repost"] = endpoint_snapshot()["commit_request_count"] - case["endpoint_before"]["commit_request_count"] == 1
@@ -842,6 +1015,10 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
             # wait on the same withheld endpoint transaction it is containing.
             if (work / "endpoint-reached").exists():
                 (work / "endpoint-release").write_text("owned failure cleanup releases fixture barrier\n")
+            if receiver_fence:
+                for barrier_file in work.glob("endpoint-reached-*"):
+                    (work / barrier_file.name.replace("endpoint-reached-", "endpoint-release-", 1)).write_text(
+                        "owned failure cleanup releases receiver fixture barrier\n")
             for case in list(live_cases):
                 # Keep the trusted host alive while it fences and observes its
                 # outstanding create/start callbacks. No worker report is used.
@@ -892,7 +1069,7 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                 raise ControlError("AGENT_RUNTIME_FAILURE_CLEANUP_UNCONFIRMED:" + type(cleanup_failure).__name__) from cleanup_failure
 
     checks = {name + ":" + key: value for name, outcome in outcomes.items() for key, value in outcome["checks"].items()}
-    checks.update({"all_cases_collected": set(outcomes) == set(CASE_IDS),
+    checks.update({"all_cases_collected": set(outcomes) == set(case_ids),
         "all_host_processes_reaped": all(row["reaped"] for row in cleanup)
             and {row["pid"] for row in processes} == {row["pid"] for row in cleanup},
         "all_four_trusted_roles_executed": {"command_external_authority", "effect_external_authority", "endpoint", "owned_agent_host"}
@@ -902,7 +1079,7 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
         "both_public_checkpoint_chains_verified": all(value["verification_status"] == "LOCAL_SIGNATURE_ONLY" for value in verifications.values())})
     source = _source()
     source["scope"] = "checked-out commit/tree; source_files_sha256 binds actual runtime inputs"
-    return {"schema": SCHEMA, "source": source, "source_files_sha256": _sources(), "preregistration": design,
+    report = {"schema": schema, "source": source, "source_files_sha256": _sources(receiver_fence=receiver_fence), "preregistration": design,
         "controller_pid": os.getpid(), "command_authority_public_pin": command_pin, "effect_authority_public_pin": effect_pin,
         "supervisor_public_pin": supervisor_pin, "endpoint_public_pin": endpoint_pin, "outcomes": outcomes,
         "checks": checks, "passed": all(checks.values()), "command_authority_evidence": command_evidence,
@@ -928,6 +1105,12 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
             "synthetic_canary": {"host_file_exclusively_created": True, "mounted_into_container": False,
                 "removed_after_experiment": not synthetic_canary.exists(),
                 "path": str(synthetic_canary), "content_kind": "fixed owned synthetic bytes"}}}
+    if receiver_fence:
+        report["endpoint_operator_evidence"] = endpoint_operator_evidence
+        report["scope"].update({"receiver_commit_fence": True,
+            "receiver_fence_and_effect_same_transaction": True,
+            "crash_restart": "SEPARATE_SIGNED_LOOPBACK_TESTS", "general_remote_effects": "NOT_ESTABLISHED"})
+    return report
 
 
 def main() -> int:

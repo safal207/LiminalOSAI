@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from sdk.liminal_governance_capsule import (
     ALGORITHM as GOVERNANCE_ALGORITHM,
@@ -45,6 +46,7 @@ from sdk.liminal_portable_receipt import (
     project_rinse_trace_event,
     verify_portable_receipt,
 )
+from sdk.liminal_portable_receipt import _ledger as projection_ledger_module
 
 NOW = 2_100_000_000
 REPOSITORY = "safal207/LiminalOSAI"
@@ -656,6 +658,99 @@ class PortableReceiptTests(unittest.TestCase):
                 safe_bindings={"commit_sha": CHECKED_HEAD, "token": "secret-token-value"},
                 safe_expectations={"state": "success"},
             )
+
+
+class ProjectionLedgerReplayTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.ledger = ProjectionLedger(self.temp.name)
+
+    @staticmethod
+    def fixture_digest(value):
+        encoded = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def write_fixture_chain(self, receipt_refs):
+        entries = []
+        previous = None
+        for index, receipt_hash in enumerate(receipt_refs, start=1):
+            body = {
+                "schema_version": "liminal-portable-receipt-projection-ledger-v1.2",
+                "sequence": index,
+                "source_receipt_sha256": receipt_hash,
+                "projection_profile": "replay-test",
+                "projection_sha256": self.fixture_digest({"sequence": index, "text": "тест"}),
+                "previous_entry_sha256": previous,
+                "authority": AUTHORITY,
+            }
+            entry = {**body, "entry_sha256": self.fixture_digest(body)}
+            entries.append(entry)
+            previous = entry["entry_sha256"]
+        self.ledger.journal_path.write_text(
+            "".join(json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n" for entry in entries),
+            encoding="utf-8",
+        )
+        return entries
+
+    def test_replay_and_snapshot_preserve_receipt_order_and_hashes(self):
+        refs = ["c" * 64, "a" * 64, "b" * 64]
+        entries = self.write_fixture_chain(refs)
+        original = self.ledger.journal_path.read_bytes()
+        state = self.ledger.verify()
+        self.assertEqual(state["receipt_refs"], refs)
+        self.assertEqual(state["head_sha256"], entries[-1]["entry_sha256"])
+        expected_projection = self.fixture_digest([entry["projection_sha256"] for entry in entries])
+        self.assertEqual(state["projection_digest"], expected_projection)
+        body = {
+            "schema_version": "liminal-portable-receipt-projection-snapshot-v1.2",
+            "entry_count": 3,
+            "head_sha256": entries[-1]["entry_sha256"],
+            "receipt_refs": refs,
+            "projection_digest": expected_projection,
+            "authority": AUTHORITY,
+        }
+        snapshot = self.ledger.write_snapshot()
+        self.assertEqual(snapshot, {**body, "snapshot_sha256": self.fixture_digest(body)})
+        reopened = ProjectionLedger(self.temp.name)
+        self.assertEqual(reopened.verify(), state)
+        self.assertTrue(reopened.verify_snapshot()["replay_equal"])
+        self.assertEqual(self.ledger.journal_path.read_bytes(), original)
+
+    def test_replay_rejects_nonconsecutive_duplicate_in_valid_hash_chain(self):
+        self.write_fixture_chain(["c" * 64, "a" * 64, "c" * 64])
+        with self.assertRaisesRegex(ReceiptError, "contains duplicate receipt reference"):
+            self.ledger.verify()
+
+    def test_receipt_duplicate_checks_have_linear_operation_count(self):
+        count = 512
+        refs = [hashlib.sha256(str(index).encode("ascii")).hexdigest() for index in range(count)]
+        self.write_fixture_chain(refs)
+        operations = {"equality": 0, "hash": 0}
+        original_sha256 = projection_ledger_module.sha256
+
+        class CountedDigest(str):
+            def __eq__(self, other):
+                operations["equality"] += 1
+                return str.__eq__(self, other)
+
+            def __hash__(self):
+                operations["hash"] += 1
+                return str.__hash__(self)
+
+        def counted_digest(value, name):
+            normalized = original_sha256(value, name)
+            return CountedDigest(normalized) if name == "projection ledger receipt" else normalized
+
+        with mock.patch.object(projection_ledger_module, "sha256", counted_digest):
+            state = self.ledger.verify()
+        # Count actual membership work without a machine-dependent time threshold.
+        self.assertLessEqual(operations["equality"], 2 * count)
+        self.assertLessEqual(operations["hash"], 2 * count)
+        self.assertEqual(state["entry_count"], count)
+        self.assertEqual(state["receipt_refs"], refs)
 
 
 if __name__ == "__main__":

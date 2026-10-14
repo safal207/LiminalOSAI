@@ -1,0 +1,250 @@
+{
+  "schema": "liminal-architecture-efficiency-v1",
+  "baseline_commit": "59579e73eea8fff9a859d5dddb501d232fbbb98b",
+  "measurement_scope": "Local synthetic fixtures; candidate measured from working tree. Exact measured source bytes are identified below. Timing is not a production throughput claim.",
+  "candidate_file_sha256": {
+    "sdk/liminal_trcp/sdk.py": "7e047384ba8726da59747366c57489b2de15b5829d67482a16d90041a6edeeba",
+    "sdk/liminal_trcp/evidence.py": "f67f88c71965f92b193ed1abdb0f19f799714eaf0a45b30e01b150ddbdabfc5e",
+    "sdk/liminal_trcp/adapter.py": "6c3c715ee5c0f5e932c1a26a9e70283e450ca9831733d010830a8062f7b0ed20",
+    "tools/benchmark_workload_snapshot.py": "afa7ce969f44ab255b4e2469423a433e0fccb2796edf3057440173d29f2fd045",
+    "core/qel.c": "a6f02ff5677d17e052dd82aeb9e2599016ff5e8d9d2163b20aa15dd9efb416fc",
+    "core/vse.c": "110bbce02bd19468c3a77c3531df46a6d2fe1c02dddc3caae6d86b5dfc37a7d0",
+    "collective/graph.c": "69816210d405f10af3ac6da4c8274e60ab1eb7c93bf0d519e5499a0b73c30fb1",
+    "include/collective.h": "5751434727b9c10de9436a6f9a77566d12dc6b1da5d3f311856eacb3227b3474"
+  },
+  "trcp": {
+    "before": {
+      "source": "59579e73eea8fff9a859d5dddb501d232fbbb98b",
+      "dirty": false,
+      "python": "3.12.14",
+      "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+      "rows": 300,
+      "samples": 21,
+      "iterations": 10,
+      "json_copy_calls_per_validation": 3,
+      "results": {
+        "validate_snapshot": {
+          "median_ms": 2.0576,
+          "samples_ms": [
+            2.0197,
+            2.0576,
+            2.2686,
+            1.9911,
+            2.0421,
+            2.2695,
+            1.9587,
+            2.0766,
+            2.5152,
+            2.0792,
+            2.7097,
+            2.7388,
+            2.0022,
+            1.9542,
+            1.9346,
+            1.9244,
+            2.068,
+            2.1294,
+            1.909,
+            1.9341,
+            2.0928
+          ],
+          "artifact_sha256": "937ba6ec3ff8e11df03967ca9aced23b747c5a25355ffc138e04706537a2c90d"
+        },
+        "build_workload_evidence": {
+          "median_ms": 2.6761,
+          "samples_ms": [
+            2.6108,
+            3.1051,
+            2.6259,
+            2.695,
+            3.1104,
+            2.6761,
+            2.6391,
+            2.5532,
+            2.6251,
+            2.8228,
+            2.7025,
+            2.5659,
+            2.6079,
+            3.371,
+            2.9553,
+            2.7544,
+            2.6533,
+            2.6849,
+            2.6953,
+            2.565,
+            2.6207
+          ],
+          "artifact_sha256": "67ee76fb1695496b2e86eef9d9af014e84545e34d3c8e6958df5f88b50f2944b"
+        },
+        "run_external_workload": {
+          "median_ms": 13.2567,
+          "samples_ms": [
+            12.9702,
+            12.6204,
+            13.0376,
+            12.5756,
+            13.0259,
+            13.2567,
+            13.2545,
+            12.4562,
+            13.1587,
+            17.6649,
+            16.044,
+            14.9562,
+            14.2375,
+            13.1991,
+            13.7659,
+            13.5143,
+            14.1566,
+            13.9366,
+            13.3193,
+            13.5067,
+            13.1225
+          ],
+          "artifact_sha256": "30f801e51d776318e2503e4fffde5cc583d285a0b0cd7c9a46628fce124aa39c"
+        }
+      }
+    },
+    "after": {
+      "source": "59579e73eea8fff9a859d5dddb501d232fbbb98b",
+      "dirty": true,
+      "python": "3.12.14",
+      "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+      "rows": 300,
+      "samples": 21,
+      "iterations": 10,
+      "json_copy_calls_per_validation": 1,
+      "results": {
+        "validate_snapshot": {
+          "median_ms": 0.9625,
+          "samples_ms": [
+            1.0177,
+            1.0523,
+            1.0626,
+            0.9554,
+            0.9788,
+            1.0027,
+            4.7638,
+            0.9441,
+            0.9449,
+            1.0095,
+            0.961,
+            0.9699,
+            0.9625,
+            0.9213,
+            0.9254,
+            0.9361,
+            1.0128,
+            0.9504,
+            0.9266,
+            0.9952,
+            0.9588
+          ],
+          "artifact_sha256": "937ba6ec3ff8e11df03967ca9aced23b747c5a25355ffc138e04706537a2c90d"
+        },
+        "build_workload_evidence": {
+          "median_ms": 1.4967,
+          "samples_ms": [
+            1.4583,
+            1.4948,
+            1.517,
+            1.4965,
+            1.4658,
+            1.489,
+            1.4579,
+            1.4569,
+            1.5222,
+            1.5485,
+            1.5114,
+            1.4899,
+            1.5135,
+            1.4765,
+            1.5644,
+            1.5143,
+            1.5,
+            1.5159,
+            1.4967,
+            1.5681,
+            1.4801
+          ],
+          "artifact_sha256": "67ee76fb1695496b2e86eef9d9af014e84545e34d3c8e6958df5f88b50f2944b"
+        },
+        "run_external_workload": {
+          "median_ms": 10.7183,
+          "samples_ms": [
+            10.2965,
+            11.32,
+            10.3751,
+            10.7361,
+            10.5482,
+            11.791,
+            10.2722,
+            10.6111,
+            10.7183,
+            10.4125,
+            10.878,
+            10.4004,
+            11.1483,
+            11.3612,
+            11.4881,
+            11.6796,
+            10.9853,
+            10.5706,
+            10.658,
+            11.0053,
+            10.6185
+          ],
+          "artifact_sha256": "30f801e51d776318e2503e4fffde5cc583d285a0b0cd7c9a46628fce124aa39c"
+        }
+      }
+    }
+  },
+  "qel": {
+    "base": "raw_flushes=4096 first_commit_flushes=4096 two_commits_flushes=8192 influence=0x1.76c8b4p-1",
+    "updated": "raw_flushes=4096 first_commit_flushes=1 two_commits_flushes=2 influence=0x1.76c8b4p-1",
+    "raw_rows": 4096,
+    "revision_rows": 8192,
+    "exact_raw_parity": true,
+    "exact_revision_parity": true,
+    "raw_sha256": "74df86d3e644ae763af5b6ced831cb1e787332dbb95794baa91c6e73656c0978",
+    "revision_sha256": "69737602afedbac64970590ac15b9bb901225c260d22f2123d85907036855d5e"
+  },
+  "vse": [
+    {
+      "seed": 42,
+      "exact_stdout_parity": true,
+      "exact_trace_parity": true,
+      "trace_rows": 176,
+      "trace_sha256": "3d514b186cb4f23fd7df379d78cd62b4e799ecf8b1bda557a06ff60839889bcb",
+      "base": "warm_allocations=512 warm_frees=512 rand_samples=128",
+      "updated": "warm_allocations=0 warm_frees=0 rand_samples=128"
+    },
+    {
+      "seed": 1234,
+      "exact_stdout_parity": true,
+      "exact_trace_parity": true,
+      "trace_rows": 176,
+      "trace_sha256": "b1afd38b5c28c5eb6f6fabff387030836c25c01de6e73b119d10ec56bc80fcc9",
+      "base": "warm_allocations=512 warm_frees=512 rand_samples=128",
+      "updated": "warm_allocations=0 warm_frees=0 rand_samples=128"
+    },
+    {
+      "seed": 98765,
+      "exact_stdout_parity": true,
+      "exact_trace_parity": true,
+      "trace_rows": 176,
+      "trace_sha256": "cc74ce1870a37f7cb1232ca256de595a64ae834079fc93dfeac0c8497c13367b",
+      "base": "warm_allocations=512 warm_frees=512 rand_samples=128",
+      "updated": "warm_allocations=0 warm_frees=0 rand_samples=128"
+    }
+  ],
+  "graph": {
+    "cycles": 64,
+    "nodes": 16,
+    "edges": 120,
+    "metric_and_edge_bytes": 123904,
+    "exact_byte_parity": true,
+    "sha256": "8f194dfbf485b986e5da2f887ab41634d7611fa3d3c0944c8de75c6ba5ee7702"
+  }
+}

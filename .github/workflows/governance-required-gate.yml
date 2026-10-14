@@ -2,20 +2,23 @@ name: LiminalOSAI Governance Required Gate
 
 on:
   pull_request:
+    branches: [main, 'agent/**']
+  push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: liminalos-governance-gate-${{ github.event.pull_request.number }}
+  group: liminalos-governance-gate-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   governance-gate:
     name: Governance Required Gate
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
 
     steps:
       - uses: actions/checkout@v4
@@ -23,14 +26,38 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Record verified pull request head
-        run: echo "governance-gate-head ${GITHUB_SHA}"
+      - name: Record validation subject
+        run: |
+          git rev-parse HEAD
+          echo "event-sha ${GITHUB_SHA}"
+          echo "pull-request-head ${{ github.event.pull_request.head.sha }}"
 
-      - name: Repository hygiene
-        run: python3 -m unittest tests/test_repo_hygiene.py -v
+      - name: Record OpenSSL version
+        run: openssl version -a
+
+      - name: Prepare real owned-stack prerequisites when the SDK is present
+        run: >-
+          python3 scripts/prepare_owned_stack_validation.py
+          --output-directory "$RUNNER_TEMP/owned-stack-validation"
+
+      - name: Complete repository baseline
+        run: make validate
 
       - name: Declared gate scope
         run: |
-          echo "This gate always runs for every pull request targeting main."
-          echo "It is an honest always-run branch protection gate, not a substitute for path-specific security CI."
+          echo "This gate always runs for pull requests targeting main or stacked agent/** branches."
+          echo "It builds both binaries, runs smoke checks, every C test and discovered Python regressions without skips."
+          echo "Owned-stack prerequisites include actual Docker images and receiver capture before discovery."
+          echo "Preparation readiness is not a test PASS; this unchanged make validate gate must complete."
+          echo "Specialized compiler, sanitizer, Docker and evidence workflows retain their own checks."
           echo "Path-filtered workflows remain gated by their own paths filters and are intentionally not required checks."
+
+      - name: Upload actual owned-stack preparation and capture evidence
+        if: always() && hashFiles('sdk/liminal_agent_control/__init__.py') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: governance-owned-stack-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/owned-stack-validation/preparation.json
+            ${{ runner.temp }}/owned-stack-validation/evidence/
+          if-no-files-found: warn

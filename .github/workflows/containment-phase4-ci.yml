@@ -9,6 +9,7 @@ on:
       - 'sdk/liminal_capability_broker/**'
       - 'sdk/liminal_causal_escalation/**'
       - 'sdk/liminal_post_sandbox_contracts/**'
+      - 'scripts/check_forbidden.py'
 
 permissions:
   contents: read
@@ -52,4 +53,4 @@ jobs:
           PY
       - name: Secret-shaped material scan
         run: |
-          ! grep -RniE '(BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|Bearer [A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,})' sdk/liminal_containment tests/test_containment_phase4.py
+          python3 scripts/check_forbidden.py -- -RniE '(BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|Bearer [A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,})' sdk/liminal_containment tests/test_containment_phase4.py

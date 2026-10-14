@@ -27,7 +27,6 @@ static void write_obs_json(FILE* f, const qel_obs_t* o, float adj, bool revised)
     "\"adj_infl\":%.4f,\"revised\":%s}\n",
     o->t, o->amp, o->tempo, o->consent, o->influence, o->harmony,
     o->ctx, adj, revised ? "true":"false");
-  fflush(f);
 }
 
 qel_state* qel_init(const char* dir, uint32_t cap) {
@@ -80,6 +79,7 @@ void qel_mark_observation(qel_state* s, const qel_obs_t* o) {
   slot->revised = false;
   s->head++; if (s->size < s->cap) s->size++;
   write_obs_json(s->log_raw, o, slot->adj_infl, false);
+  fflush(s->log_raw);
 }
 
 // простая «ретро-волна» — эксп. затухание по времени и маске
@@ -102,10 +102,15 @@ void qel_apply_retro(qel_state* s, const qel_retro_t* r) {
 
 void qel_commit_revision(qel_state* s) {
   if (!s) return;
+  bool wrote_revision = false;
   for (uint32_t i = 0; i < s->size; ++i) {
     qel_slot_t* slot = &s->ring[(s->head - s->size + i + s->cap) % s->cap];
-    if (slot->revised) write_obs_json(s->log_rev, &slot->o, slot->adj_infl, true);
+    if (slot->revised) {
+      write_obs_json(s->log_rev, &slot->o, slot->adj_infl, true);
+      wrote_revision = true;
+    }
   }
+  if (wrote_revision) fflush(s->log_rev);
 }
 
 // быстрый гейт для онлайна

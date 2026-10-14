@@ -13,7 +13,7 @@ import hmac
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterator, Mapping, Protocol
 
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
@@ -201,7 +201,7 @@ class EffectCommitAuthorizationReceipt:
             "host_binding_sha256": self.host_binding_sha256,
             "issued_at_unix": self.issued_at_unix,
             "expires_at_unix": self.expires_at_unix,
-            "authority": AUTHORITY,
+            "authority": dict(AUTHORITY),
         }
 
     def as_document(self) -> dict[str, Any]:
@@ -241,7 +241,7 @@ class EffectCommitReceipt:
             "effect_outcome": self.effect_outcome,
             "result_sha256": self.result_sha256,
             "reason_codes": list(self.reason_codes),
-            "authority": AUTHORITY,
+            "authority": dict(AUTHORITY),
         }
 
     def as_document(self) -> dict[str, Any]:
@@ -312,6 +312,9 @@ class EffectCommitBroker:
         capability_decision: Mapping[str, Any],
     ) -> tuple[str, dict[str, Any]]:
         operation.validate()
+        # A frozen dataclass does not freeze nested scope lists. Bind the lease
+        # to a detached, normalized snapshot before invoking provider callbacks.
+        operation = replace(operation, scope=operation.normalized_scope())
         capability = dict(capability_decision)
         if capability.get("decision") != "ALLOW":
             raise EffectCommitError("capability_decision_not_allow")
@@ -415,6 +418,11 @@ class EffectCommitBroker:
     def commit_receipts(self) -> tuple[dict[str, Any], ...]:
         return tuple(item.as_document() for item in self._commits)
 
+    def commit_cursor(self) -> tuple[int, str]:
+        """Read count and latest digest without exporting historical receipts."""
+        with self._lock:
+            return len(self._commits), self._commits[-1].receipt_sha256 if self._commits else ZERO_SHA256
+
     def state_document(self) -> dict[str, Any]:
         with self._lock:
             body = {
@@ -424,7 +432,7 @@ class EffectCommitBroker:
                 "contained": self._contained,
                 "authorization_count": len(self._authorizations),
                 "commit_count": len(self._commits),
-                "authority": AUTHORITY,
+                "authority": dict(AUTHORITY),
             }
             return {**body, "state_sha256": canonical_sha256(body)}
 
@@ -472,7 +480,10 @@ class EffectCommitBroker:
                 # can never be retried with the same authority token.
                 lease.consumed = True
                 try:
-                    observation = executor(lease.operation)
+                    # The trusted callback receives its own scope document; it
+                    # cannot mutate the operation retained as lease evidence.
+                    callback_operation = replace(lease.operation, scope=lease.operation.normalized_scope())
+                    observation = executor(callback_operation)
                     if not isinstance(observation, ExecutionObservation):
                         raise EffectCommitError("executor_observation_invalid")
                     observation.validate()

@@ -52,6 +52,11 @@ materialize dependencies.
 
 ## Wheel validation
 
+The materializer reads the staged archive once into an immutable byte snapshot,
+bounded at 256 MiB. Both the audit and extraction consume that same snapshot.
+A later host replacement of the staged file therefore cannot substitute bytes
+after approval; a read-only container mount alone would not prevent that host change.
+
 Before any output file is created, the adapter verifies:
 
 1. wheel is a regular top-level staged file, not a symlink;
@@ -92,15 +97,29 @@ counts and trusted input roots.
 
 ## Docker receipt bridge
 
-`WheelMaterializingDockerExecutor` reuses the existing hardened Docker argv. It
-captures one bounded JSON line from the immutable installer image, validates the
-materialization receipt and checks it against the exact plan arguments. Raw
-stdout is discarded after verification. The `ExecutionObservation` contains only
-receipt/audit/output-manifest digests and counts.
+`WheelMaterializingDockerExecutor` uses the shared `run_docker_plan` lifecycle
+with the hardened Docker argv and a fresh host-assigned session name. It captures
+one JSON line with a 64 KiB stdout limit enforced during reading; workload stderr
+is discarded. Timeout or overflow stops the client, removes the exact container
+and verifies absence. Normal completion also requires an absence check; cleanup
+or survivor-verification failure cannot produce a successful receipt.
+
+The bridge validates the materialization receipt against the exact plan arguments.
+Raw stdout is discarded after verification. The `ExecutionObservation` contains
+only receipt/audit/output-manifest digests and counts.
 
 This means the package receipt is transitively bound to the concrete materializer
 result through the existing RuntimeMediator and IsolatedExecutionBroker receipt
 chain.
+
+The local regression suite replaces the staged wheel after audit and checks that
+only the approved snapshot is materialized. Fake-CLI subprocess tests cover the
+shared timeout, overflow and cleanup paths without a Docker daemon. Separate
+real-daemon installer isolation probes and governed wheel materialization passed
+in [CI run 38481395883](https://github.com/safal207/LiminalOSAI/actions/runs/38481395883)
+for revision `5f4843a975244e4844c6b0c0f77c6b6e1a82635d`. That evidence applies to
+the recorded revision and probe scope; the local tests establish adapter behavior
+rather than container isolation, and later changes require their own verification.
 
 ## Explicit nonclaims
 

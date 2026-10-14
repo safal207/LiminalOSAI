@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from ._contracts import (
     APPROVAL_LEDGER_SCHEMA,
@@ -22,6 +23,25 @@ from ._contracts import (
 
 ZERO_HASH = "0" * 64
 DECISIONS = ("approve", "deny")
+
+
+@contextmanager
+def _exclusive_lock(path: Path) -> Iterator[None]:
+    lock_path = path.with_name(path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        raise PolicyError(f"approval ledger lock already exists: {lock_path}") from exc
+    try:
+        try:
+            os.write(descriptor, str(os.getpid()).encode("ascii"))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        yield
+    finally:
+        lock_path.unlink(missing_ok=True)
 
 
 def _atomic_write_json(path: Path, value: Any) -> None:
@@ -68,18 +88,19 @@ class ApprovalLedger:
     @classmethod
     def create(cls, path: str | Path, snapshot: PolicySnapshot) -> "ApprovalLedger":
         target = Path(path)
-        if target.exists():
-            raise PolicyError(f"approval ledger already exists: {target}")
-        document = {
-            "schema_version": APPROVAL_LEDGER_SCHEMA,
-            "snapshot_sha256": snapshot.snapshot_sha256,
-            "plan_sha256": snapshot.plan_sha256,
-            "policy_sha256": snapshot.policy_sha256,
-            "entries": [],
-            "head_sha256": ZERO_HASH,
-            "authority": AUTHORITY,
-        }
-        _atomic_write_json(target, document)
+        with _exclusive_lock(target):
+            if target.exists():
+                raise PolicyError(f"approval ledger already exists: {target}")
+            document = {
+                "schema_version": APPROVAL_LEDGER_SCHEMA,
+                "snapshot_sha256": snapshot.snapshot_sha256,
+                "plan_sha256": snapshot.plan_sha256,
+                "policy_sha256": snapshot.policy_sha256,
+                "entries": [],
+                "head_sha256": ZERO_HASH,
+                "authority": AUTHORITY,
+            }
+            _atomic_write_json(target, document)
         return cls(target)
 
     @staticmethod
@@ -203,36 +224,37 @@ class ApprovalLedger:
         requirement_id: str,
         evidence_locator: str | None = None,
     ) -> dict[str, Any]:
-        document = self.read(snapshot)
-        event = {
-            "type": "approval_attestation",
-            "approval_id": approval_id,
-            "principal_id": principal_id,
-            "role": role,
-            "decision": decision,
-            "requirement_id": requirement_id,
-            "snapshot_sha256": snapshot.snapshot_sha256,
-            "evidence_locator": evidence_locator,
-        }
-        prior_ids = {entry["event"]["approval_id"] for entry in document["entries"]}
-        prior_principals = {
-            (entry["event"]["requirement_id"], entry["event"]["principal_id"])
-            for entry in document["entries"]
-        }
-        normalized = self._validate_event(
-            event, index=len(document["entries"]), snapshot=snapshot,
-            approval_ids=prior_ids, principal_requirements=prior_principals,
-        )
-        payload = {
-            "index": len(document["entries"]),
-            "previous_sha256": document["head_sha256"],
-            "event": normalized,
-        }
-        entry = {**payload, "entry_sha256": canonical_sha256(payload)}
-        document["entries"].append(entry)
-        document["head_sha256"] = entry["entry_sha256"]
-        _atomic_write_json(self.path, document)
-        return entry
+        with _exclusive_lock(self.path):
+            document = self.read(snapshot)
+            event = {
+                "type": "approval_attestation",
+                "approval_id": approval_id,
+                "principal_id": principal_id,
+                "role": role,
+                "decision": decision,
+                "requirement_id": requirement_id,
+                "snapshot_sha256": snapshot.snapshot_sha256,
+                "evidence_locator": evidence_locator,
+            }
+            prior_ids = {entry["event"]["approval_id"] for entry in document["entries"]}
+            prior_principals = {
+                (entry["event"]["requirement_id"], entry["event"]["principal_id"])
+                for entry in document["entries"]
+            }
+            normalized = self._validate_event(
+                event, index=len(document["entries"]), snapshot=snapshot,
+                approval_ids=prior_ids, principal_requirements=prior_principals,
+            )
+            payload = {
+                "index": len(document["entries"]),
+                "previous_sha256": document["head_sha256"],
+                "event": normalized,
+            }
+            entry = {**payload, "entry_sha256": canonical_sha256(payload)}
+            document["entries"].append(entry)
+            document["head_sha256"] = entry["entry_sha256"]
+            _atomic_write_json(self.path, document)
+            return entry
 
     def summary(self, snapshot: PolicySnapshot) -> dict[str, Any]:
         document = self.read(snapshot)

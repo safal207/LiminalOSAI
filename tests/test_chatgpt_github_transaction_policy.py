@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 
 from sdk.liminal_github_bridge import GitHubAgentBridge
 from sdk.liminal_github_policy import (
     AUTHORITY,
+    ApprovalLedger,
     GitHubTransactionPolicyEngine,
     PolicyError,
     PolicySnapshot,
     TransactionPolicy,
     default_rule_documents,
 )
+from sdk.liminal_github_policy import _ledger as approval_ledger_module
 from sdk.liminal_github_runtime import ConnectedGitHubRuntime
 from sdk.liminal_github_transaction import GitHubTransactionOrchestrator, checkpoint_reference
 
@@ -349,6 +354,128 @@ class PolicyEngineTests(unittest.TestCase):
             decision="deny", requirement_id=requirement.requirement_id,
         )
         self.assertEqual(engine.verify()["approval"]["status"], "denied")
+
+    def test_concurrent_approval_cannot_overwrite_accepted_denial(self):
+        engine = self.create_engine()
+        self.approve_all(engine)
+        snapshot = engine.snapshot
+        requirement = snapshot.requirements[0]
+        role = next(iter(requirement.required_role_counts))
+        denied_ledger = ApprovalLedger(engine.approval_ledger.path)
+        approved_ledger = ApprovalLedger(engine.approval_ledger.path)
+        lock_path = denied_ledger.path.with_name(denied_ledger.path.name + ".lock")
+        entered_write = threading.Event()
+        release_write = threading.Event()
+        write_json = approval_ledger_module._atomic_write_json
+
+        def paused_write(path, document):
+            entered_write.set()
+            if not release_write.wait(timeout=5):
+                raise AssertionError("approval writer was not released")
+            write_json(path, document)
+
+        def append(ledger, decision):
+            return ledger.append(
+                snapshot, approval_id=f"concurrent-{decision}",
+                principal_id=f"concurrent-principal-{decision}", role=role,
+                decision=decision, requirement_id=requirement.requirement_id,
+            )
+
+        with mock.patch.object(approval_ledger_module, "_atomic_write_json", paused_write):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pending = pool.submit(append, denied_ledger, "deny")
+                try:
+                    self.assertTrue(entered_write.wait(timeout=5))
+                    with mock.patch.object(approved_ledger, "read", wraps=approved_ledger.read) as read:
+                        with self.assertRaisesRegex(PolicyError, "approval ledger lock already exists"):
+                            append(approved_ledger, "approve")
+                        read.assert_not_called()
+                    self.assertTrue(lock_path.exists())
+                finally:
+                    release_write.set()
+                denial = pending.result(timeout=5)
+
+        self.assertEqual(denial["event"]["decision"], "deny")
+        self.assertFalse(lock_path.exists())
+        approval = append(approved_ledger, "approve")
+        self.assertEqual(approval["previous_sha256"], denial["entry_sha256"])
+        summary = approved_ledger.summary(snapshot)
+        self.assertEqual(summary["status"], "denied")
+        self.assertIn("concurrent-deny", summary["denial_approval_ids"])
+
+    def test_concurrent_approval_ledger_create_rejects_second_writer(self):
+        snapshot = self.create_engine().snapshot
+        target = self.root / "concurrent-create.json"
+        lock_path = target.with_name(target.name + ".lock")
+        entered_write = threading.Event()
+        release_write = threading.Event()
+        write_json = approval_ledger_module._atomic_write_json
+
+        def paused_write(path, document):
+            entered_write.set()
+            if not release_write.wait(timeout=5):
+                raise AssertionError("ledger creator was not released")
+            write_json(path, document)
+
+        with mock.patch.object(approval_ledger_module, "_atomic_write_json", paused_write):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pending = pool.submit(ApprovalLedger.create, target, snapshot)
+                try:
+                    self.assertTrue(entered_write.wait(timeout=5))
+                    with self.assertRaisesRegex(PolicyError, "approval ledger lock already exists"):
+                        ApprovalLedger.create(target, snapshot)
+                    self.assertTrue(lock_path.exists())
+                finally:
+                    release_write.set()
+                ledger = pending.result(timeout=5)
+
+        self.assertEqual(ledger.read(snapshot)["entries"], [])
+        self.assertFalse(lock_path.exists())
+        original = target.read_bytes()
+        with self.assertRaisesRegex(PolicyError, "approval ledger already exists"):
+            ApprovalLedger.create(target, snapshot)
+        self.assertEqual(target.read_bytes(), original)
+        self.assertFalse(lock_path.exists())
+
+    def test_approval_append_failures_release_lock_and_preserve_document(self):
+        engine = self.create_engine()
+        snapshot = engine.snapshot
+        ledger = engine.approval_ledger
+        requirement = snapshot.requirements[0]
+        role = next(iter(requirement.required_role_counts))
+        lock_path = ledger.path.with_name(ledger.path.name + ".lock")
+        kwargs = dict(
+            approval_id="after-failure", principal_id="after-failure-principal",
+            role=role, decision="deny", requirement_id=requirement.requirement_id,
+        )
+        original = ledger.path.read_bytes()
+        failures = (
+            (ledger, "read", PolicyError("read failed")),
+            (ledger, "_validate_event", PolicyError("validation failed")),
+            (approval_ledger_module, "_atomic_write_json", OSError("write failed")),
+        )
+        for owner, method, error in failures:
+            with self.subTest(failure=method):
+                with mock.patch.object(owner, method, side_effect=error):
+                    with self.assertRaisesRegex(type(error), str(error)):
+                        ledger.append(snapshot, **kwargs)
+                self.assertFalse(lock_path.exists())
+                self.assertEqual(ledger.path.read_bytes(), original)
+        ledger.append(snapshot, **kwargs)
+        self.assertEqual(ledger.summary(snapshot)["status"], "denied")
+
+    def test_approval_lock_setup_failure_closes_descriptor_and_releases_lock(self):
+        snapshot = self.create_engine().snapshot
+        target = self.root / "setup-failure.json"
+        lock_path = target.with_name(target.name + ".lock")
+        with mock.patch.object(approval_ledger_module.os, "write", side_effect=OSError("lock write failed")):
+            with mock.patch.object(approval_ledger_module.os, "close", wraps=approval_ledger_module.os.close) as close:
+                with self.assertRaisesRegex(OSError, "lock write failed"):
+                    ApprovalLedger.create(target, snapshot)
+                close.assert_called_once()
+        self.assertFalse(lock_path.exists())
+        self.assertFalse(target.exists())
+        ApprovalLedger.create(target, snapshot)
 
     def test_authorize_step_blocked_until_all_approvals_ready(self):
         engine = self.create_engine()

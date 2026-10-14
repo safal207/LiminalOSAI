@@ -439,7 +439,7 @@ class SQLiteGovernanceStore:
             "reservation_id_sha256": _sha(reservation_sha, "reservation_id_sha256"),
             "reservation_payload_sha256": _sha(payload_sha, "reservation_payload_sha256"),
             "reservation_active": bool(active),
-            "authority": AUTHORITY,
+            "authority": dict(AUTHORITY),
         }
         return {**body, "state_sha256": canonical_sha256(body)}
 
@@ -552,7 +552,7 @@ class DurableEffectAuthorizationReceipt:
             "causal_authorization_receipt_sha256": self.causal_authorization_receipt_sha256,
             "issued_at_unix": self.issued_at_unix,
             "expires_at_unix": self.expires_at_unix,
-            "authority": AUTHORITY,
+            "authority": dict(AUTHORITY),
         }
 
     def as_document(self) -> dict[str, Any]:
@@ -594,7 +594,7 @@ class DurableEffectCommitReceipt:
             "effect_outcome": self.effect_outcome,
             "result_sha256": self.result_sha256,
             "reason_codes": list(self.reason_codes),
-            "authority": AUTHORITY,
+            "authority": dict(AUTHORITY),
         }
 
     def as_document(self) -> dict[str, Any]:
@@ -763,7 +763,7 @@ class DurableGovernanceEffectBroker:
             # effect stack. The durable reservation intentionally remains active
             # until the post-effect world has been durably acknowledged.
             lease.consumed = True
-            before_inner = len(self.delegate.commit_receipts())
+            before_inner, _ = self.delegate.commit_cursor()
             try:
                 observation = self.delegate.consume_for_trusted_adapter(
                     lease.causal_lease_id,
@@ -874,6 +874,11 @@ class DurableGovernanceEffectBroker:
     def commit_receipts(self) -> tuple[dict[str, Any], ...]:
         return tuple(item.as_document() for item in self._commits)
 
+    def commit_cursor(self) -> tuple[int, str]:
+        """Read count and latest digest under the shared commit fence."""
+        with self.commit_fence.hold():
+            return len(self._commits), self._commits[-1].receipt_sha256 if self._commits else ZERO_SHA256
+
     def state_document(self) -> dict[str, Any]:
         durable = self.store.read_state(root_id=self.root_id)
         body = {
@@ -885,7 +890,7 @@ class DurableGovernanceEffectBroker:
             "durable_state_sha256": durable["state_sha256"],
             "authorization_count": len(self._authorizations),
             "commit_count": len(self._commits),
-            "authority": AUTHORITY,
+            "authority": dict(AUTHORITY),
         }
         return {**body, "state_sha256": canonical_sha256(body)}
 
@@ -928,11 +933,10 @@ class DurableGovernanceEffectBroker:
         return lease
 
     def _latest_inner_commit(self, before_count: int) -> str:
-        commits = self.delegate.commit_receipts()
-        if len(commits) <= before_count:
+        count, digest = self.delegate.commit_cursor()
+        if count <= before_count:
             return ZERO_SHA256
-        value = commits[-1].get("receipt_sha256")
-        return _sha(value, "causal_commit_receipt_sha256")
+        return _sha(digest, "causal_commit_receipt_sha256")
 
     def _append_commit(
         self,

@@ -16,13 +16,22 @@ on:
       - 'scripts/verify_external_network_evidence.py'
       - 'scripts/verify_external_command_evidence.py'
       - 'scripts/verify_external_agent_evidence.py'
+      - 'scripts/verify_external_agent_receiver_evidence.py'
+      - 'scripts/prepare_owned_stack_validation.py'
+      - 'scripts/run_python_tests.py'
+      - 'scripts/verify_core.sh'
       - 'scripts/reproduce_reinforcement_contract.py'
       - 'scripts/verify_reinforcement_bundle.py'
       - 'scripts/check_orientation_view.cjs'
       - 'scripts/check_center_view.cjs'
       - 'experiments/agent_control/**'
       - 'docs/AGENT_CONTROL*'
+      - 'docs/OWNED_STACK_VALIDATION.md'
+      - 'tests/test_owned_stack_validation.py'
       - '.github/workflows/agent-control.yml'
+      - '.github/workflows/governance-required-gate.yml'
+      - '.github/workflows/core-ci.yml'
+      - '.github/workflows/kernel-runtime-contract-ci.yml'
       - 'Makefile'
   workflow_dispatch:
 
@@ -30,6 +39,78 @@ permissions:
   contents: read
 
 jobs:
+  receiver-agent:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      LIMINAL_EXTERNAL_AGENT_RECEIVER_REQUIRE_DOCKER: '1'
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install pinned host signing dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/external-agent-receiver-venv"
+          "$RUNNER_TEMP/external-agent-receiver-venv/bin/python" -m pip --isolated install -r experiments/agent_control/observer-requirements.txt
+          echo "$RUNNER_TEMP/external-agent-receiver-venv/bin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/agent-control-receiver-fence"
+          echo "LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE=$RUNNER_TEMP/agent-control-receiver-fence/report.json" >> "$GITHUB_ENV"
+      - name: Resolve the pinned image and record actual Docker identity
+        run: |
+          WORKER_IMAGE=python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+          docker pull --platform linux/amd64 "$WORKER_IMAGE"
+          IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$WORKER_IMAGE")
+          echo "LIMINAL_EXTERNAL_AGENT_DOCKER_IMAGE=$IMAGE_ID" >> "$GITHUB_ENV"
+          docker image inspect "$IMAGE_ID" > "$RUNNER_TEMP/agent-control-receiver-fence/image.json"
+          docker version > "$RUNNER_TEMP/agent-control-receiver-fence/docker-version.txt"
+      - name: Require receiver fence, authority, gateway, coordinator and evidence regressions
+        run: |
+          python3 - <<'PY'
+          import unittest
+          names = ['tests.test_agent_control_external_agent_receiver',
+                   'tests.test_agent_control_external_agent_receiver_integration',
+                   'tests.test_agent_control_external_agent_receiver_evidence.ReceiverPacketEvidenceTests']
+          suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromName(name) for name in names)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.testsRun > 0 and not result.skipped and result.wasSuccessful(), 'Receiver fence regressions must execute'
+          PY
+      - name: Require real isolated agent and receiver commit fence ordering
+        run: |
+          python3 - <<'PY'
+          import unittest
+          suite = unittest.defaultTestLoader.loadTestsFromName('tests.test_agent_control_external_agent_receiver_runtime')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.testsRun > 0 and not result.skipped and result.wasSuccessful(), 'Actual Docker receiver fence experiment must execute'
+          PY
+      - name: Require captured receiver evidence tamper regressions
+        run: |
+          python3 - <<'PY'
+          import os
+          import unittest
+          from pathlib import Path
+          assert Path(os.environ['LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE']).is_file(), 'Captured receiver report must exist'
+          suite = unittest.defaultTestLoader.loadTestsFromName('tests.test_agent_control_external_agent_receiver_evidence.ReceiverCaptureMutationTests')
+          assert suite.countTestCases() == 9, 'All nine capture checks must be discovered'
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.testsRun == 9 and not result.skipped and result.wasSuccessful(), 'Captured receiver evidence regressions must execute'
+          PY
+      - name: Independently verify the receiver fence report at this clean revision
+        run: >-
+          python3 scripts/verify_external_agent_receiver_evidence.py
+          "$LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE"
+          --expected-source-sha "$EXPECTED_SOURCE_SHA"
+          > "$RUNNER_TEMP/agent-control-receiver-fence/verification.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-receiver-fence-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-receiver-fence/
+          if-no-files-found: error
+
   isolated-agent:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -665,13 +746,23 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Install optional observer dependency for full regression suite
+      - name: Install pinned signing dependency for deterministic agent tests
         run: |
           python3 -m venv "$RUNNER_TEMP/local-observer-venv"
           "$RUNNER_TEMP/local-observer-venv/bin/python" -m pip --isolated install -r experiments/agent_control/observer-requirements.txt
           echo "$RUNNER_TEMP/local-observer-venv/bin" >> "$GITHUB_PATH"
-      - name: Existing and new regression suites
-        run: make test
+      - name: C contracts and deterministic agent unit tests
+        run: |
+          make test-c
+          python3 scripts/run_python_tests.py \
+            tests.test_agent_control_authority \
+            tests.test_agent_control_evaluation \
+            tests.test_agent_control_supervisor_registry \
+            tests.test_agent_control_runtime.RuntimeProtocolTests \
+            tests.test_agent_control_runtime.RuntimeCleanupTests \
+            tests.test_agent_control_runtime.DockerObservationRaceTests \
+            tests.test_agent_control_runtime.MatchedQueueProtocolTests \
+            tests.test_agent_control_fault_runtime.FaultRuntimeTests
       - name: Deterministic A/B/C and external-key verification
         shell: bash
         run: |

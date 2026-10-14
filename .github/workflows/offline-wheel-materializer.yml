@@ -14,6 +14,7 @@ on:
       - 'sdk/liminal_post_sandbox_contracts/**'
       - 'adapters/docker/**'
       - '.github/workflows/offline-wheel-materializer.yml'
+      - 'scripts/check_forbidden.py'
 
 permissions:
   contents: read
@@ -60,8 +61,8 @@ jobs:
         run: |
           set -euo pipefail
           test -f adapters/packages/liminal_wheel_materializer.py
-          ! grep -nE '(^|[[:space:]])(import|from)[[:space:]]+(socket|subprocess|urllib|http|requests)([[:space:].]|$)' adapters/packages/liminal_wheel_materializer.py
-          ! grep -nE '(__import__|importlib\.import_module)' adapters/packages/liminal_wheel_materializer.py
+          python3 scripts/check_forbidden.py -- -nE '(^|[[:space:]])(import|from)[[:space:]]+(socket|subprocess|urllib|http|requests)([[:space:].]|$)' adapters/packages/liminal_wheel_materializer.py
+          python3 scripts/check_forbidden.py -- -nE '(__import__|importlib\.import_module)' adapters/packages/liminal_wheel_materializer.py
 
       - name: Verify explicit materializer authority boundary
         run: |
@@ -92,9 +93,3 @@ jobs:
 
       - name: Run real governed Docker wheel materialization
         run: python3 examples/offline_wheel_materializer/docker_self_check.py --image-id "$LIMINAL_WHEEL_IMAGE_ID"
-
-      - name: Build production kernel fixture
-        run: make
-
-      - name: Run full repository regression
-        run: python3 -m unittest discover -s tests -p 'test_*.py'

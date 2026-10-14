@@ -8,6 +8,7 @@ import os
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 from adapters.packages.liminal_wheel_materializer import (
@@ -115,6 +116,35 @@ class OfflineWheelMaterializerTests(unittest.TestCase):
     def test_artifact_digest_mismatch_fails_closed(self):
         with self.assertRaises(WheelMaterializationError):
             self._audit(expected_artifact_sha256="0" * 64)
+
+    def test_host_swap_after_audit_cannot_change_materialized_bytes(self):
+        target = os.path.join(self.tmp.name, "snapshot-target")
+        os.mkdir(target)
+        changed_wheel = make_wheel(extra={"unexpected.pth": b"inert regression fixture\n"})
+        real_open = os.open
+
+        def swap_when_target_opens(path, *args, **kwargs):
+            # The audit has finished at this boundary; simulate the host replacing
+            # the staged artifact before the container starts writing its output.
+            if path == target:
+                with open(self.wheel_path, "wb") as staged:
+                    staged.write(changed_wheel)
+            return real_open(path, *args, **kwargs)
+
+        with patch("adapters.packages.liminal_wheel_materializer.os.open", side_effect=swap_when_target_opens):
+            result = self.materializer.materialize(
+                wheel_path=self.wheel_path,
+                wheel_filename=WHEEL_NAME,
+                target_dir=target,
+                expected_artifact_sha256=self.artifact_sha,
+                expected_distribution_name=PACKAGE,
+                expected_version=VERSION,
+            )
+        self.assertEqual(result["audit"].artifact_sha256, self.artifact_sha)
+        self.assertEqual(result["file_count"], result["audit"].file_count)
+        self.assertFalse(os.path.exists(os.path.join(target, "unexpected.pth")))
+        with open(os.path.join(target, "demo_pkg", "__init__.py"), "rb") as materialized:
+            self.assertEqual(materialized.read(), b"VALUE = 1\n")
 
     def test_filename_coordinate_mismatch_fails_closed(self):
         with self.assertRaises(WheelMaterializationError):
