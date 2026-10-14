@@ -44,6 +44,15 @@ def _exclusive_lock(path: Path) -> Iterator[None]:
         lock_path.unlink(missing_ok=True)
 
 
+def _fsync_directory(path: Path) -> None:
+    """Acknowledge replacement only after its directory entry is durable."""
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _atomic_write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = tempfile.NamedTemporaryFile(
@@ -58,6 +67,7 @@ def _atomic_write_json(path: Path, value: Any) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
+        _fsync_directory(path.parent)
     except Exception:
         temp_path.unlink(missing_ok=True)
         raise

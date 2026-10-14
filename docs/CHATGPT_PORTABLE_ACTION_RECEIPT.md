@@ -157,7 +157,11 @@ claim: causal validity remains `NOT_EVALUATED`.
 
 `ProjectionLedger` in this repository is only a small conformance harness for
 append → snapshot → reopen → full-replay equality. It is not LiminalDB and must
-not be represented as production LiminalDB persistence.
+not be represented as production LiminalDB persistence. Cooperative append and
+snapshot writers share one exclusive lock, and journal updates use synchronized
+atomic replacement. Older snapshots are accepted only as verified journal
+prefixes; verification distinguishes checkpoint equality from current-tip
+equality. See [local journal contracts and recovery](LOCAL_JOURNAL_RELIABILITY.md).
 
 ### RINSE
 

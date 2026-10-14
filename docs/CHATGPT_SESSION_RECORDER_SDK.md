@@ -166,11 +166,15 @@ Every mutation:
 2. validates the complete existing journal and hash chain;
 3. writes a temporary file in the same directory;
 4. flushes it with `fsync`;
-5. atomically replaces the journal.
+5. atomically replaces the journal;
+6. synchronizes the parent directory before acknowledging success.
 
 A concurrent writer receives an error rather than interleaving records. The SDK
 does not automatically remove a lock left behind by a terminated process,
 because guessing that a lock is stale could permit unsafe concurrent writes.
+Directory-sync errors propagate and can mean the new journal is already visible;
+verify the exact event before retrying. The [local journal recovery contract](LOCAL_JOURNAL_RELIABILITY.md)
+describes uncertain outcomes, filesystem assumptions and manual lock recovery.
 
 ## Authorization boundary
 

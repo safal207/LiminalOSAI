@@ -105,14 +105,10 @@ def exact_keys(raw: dict[str, Any], expected: set[str], name: str) -> None:
 
 
 def _fsync_directory(path: Path) -> None:
-    try:
-        descriptor = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
+    """Acknowledge replacement only after its directory entry is durable."""
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
-    except OSError:
-        pass
     finally:
         os.close(descriptor)
 
@@ -149,9 +145,11 @@ def exclusive_lock(path: Path) -> Iterator[None]:
     except FileExistsError as exc:
         raise HostAdapterError(f"host trace lock already exists: {lock_path}") from exc
     try:
-        os.write(descriptor, str(os.getpid()).encode("ascii"))
-        os.fsync(descriptor)
-        os.close(descriptor)
+        try:
+            os.write(descriptor, str(os.getpid()).encode("ascii"))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         yield
     finally:
         lock_path.unlink(missing_ok=True)

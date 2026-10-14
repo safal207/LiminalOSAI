@@ -313,14 +313,10 @@ def _seal_hash(session: dict[str, Any], head_hash: str) -> str:
 
 
 def _fsync_directory(path: Path) -> None:
-    try:
-        descriptor = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
+    """Acknowledge replacement only after its directory entry is durable."""
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
-    except OSError:
-        pass
     finally:
         os.close(descriptor)
 
@@ -355,9 +351,11 @@ def _journal_lock(path: Path) -> Iterator[None]:
     except FileExistsError as exc:
         raise RecorderError(f"journal lock already exists: {lock_path}") from exc
     try:
-        os.write(descriptor, str(os.getpid()).encode("ascii"))
-        os.fsync(descriptor)
-        os.close(descriptor)
+        try:
+            os.write(descriptor, str(os.getpid()).encode("ascii"))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         yield
     finally:
         try:
