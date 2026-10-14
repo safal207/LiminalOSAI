@@ -13,10 +13,11 @@
 typedef enum {
     KERNEL_CLI_FINITE_FLOAT = 0,
     KERNEL_CLI_SIGNED_INTEGER,
+    KERNEL_CLI_SIGNED_INT,
     KERNEL_CLI_UNSIGNED_INTEGER,
     KERNEL_CLI_UNSIGNED_U32,
     KERNEL_CLI_POSITIVE_U32,
-    KERNEL_CLI_UNSIGNED_BASE0
+    KERNEL_CLI_UNSIGNED_U32_BASE0
 } kernel_cli_value_kind;
 
 typedef struct {
@@ -50,6 +51,10 @@ static const kernel_cli_numeric_rule COMMON_NUMERIC_RULES[] = {
     {"--vse-lambda-p=", KERNEL_CLI_FINITE_FLOAT},
     {"--vse-lambda-x=", KERNEL_CLI_FINITE_FLOAT},
     {"--allow-hold=", KERNEL_CLI_FINITE_FLOAT},
+    {"--allow=", KERNEL_CLI_FINITE_FLOAT},
+    {"--empathy-gain=", KERNEL_CLI_FINITE_FLOAT},
+    {"--recognition-threshold=", KERNEL_CLI_FINITE_FLOAT},
+    {"--entangle-ctx=", KERNEL_CLI_UNSIGNED_U32_BASE0},
     {"--amp-min=", KERNEL_CLI_FINITE_FLOAT},
     {"--amp-max=", KERNEL_CLI_FINITE_FLOAT},
     {"--tempo-min=", KERNEL_CLI_FINITE_FLOAT},
@@ -84,25 +89,21 @@ static const kernel_cli_numeric_rule SUBSTRATE_NUMERIC_RULES[] = {
     {"--tune-trials=", KERNEL_CLI_SIGNED_INTEGER},
     {"--tune-refine=", KERNEL_CLI_SIGNED_INTEGER},
     {"--tune-max-runs=", KERNEL_CLI_SIGNED_INTEGER},
-    {"--tune-seed=", KERNEL_CLI_SIGNED_INTEGER},
+    {"--tune-seed=", KERNEL_CLI_SIGNED_INT},
     {"--tune-count=", KERNEL_CLI_SIGNED_INTEGER},
-    {"--entangle-ctx=", KERNEL_CLI_UNSIGNED_BASE0},
     {"--flow-alpha=", KERNEL_CLI_FINITE_FLOAT},
     {"--flow-gamma=", KERNEL_CLI_FINITE_FLOAT},
-    {"--allow=", KERNEL_CLI_FINITE_FLOAT},
     {"--dream-cycles=", KERNEL_CLI_SIGNED_INTEGER},
     {"--dream-rate=", KERNEL_CLI_FINITE_FLOAT},
     {"--dream-decay=", KERNEL_CLI_FINITE_FLOAT},
     {"--bridge-plasticity=", KERNEL_CLI_FINITE_FLOAT},
     {"--bridge-retention=", KERNEL_CLI_FINITE_FLOAT},
     {"--bridge-recovery=", KERNEL_CLI_FINITE_FLOAT},
-    {"--empathy-gain=", KERNEL_CLI_FINITE_FLOAT},
-    {"--recognition-threshold=", KERNEL_CLI_FINITE_FLOAT},
     {"--erb-replay=idx:", KERNEL_CLI_UNSIGNED_U32},
     {"--tune-source=idx:", KERNEL_CLI_UNSIGNED_U32},
 };
 
-static bool unsigned_base0_is_valid(const char *value)
+static bool unsigned_u32_base0_is_valid(const char *value)
 {
     if (!value || !*value) {
         return false;
@@ -117,7 +118,7 @@ static bool unsigned_base0_is_valid(const char *value)
     errno = 0;
     char *end = NULL;
     unsigned long long parsed = strtoull(value, &end, 0);
-    return errno != ERANGE && end != value && *end == '\0' && parsed <= UINT64_MAX;
+    return errno != ERANGE && end != value && *end == '\0' && parsed <= UINT32_MAX;
 }
 
 static bool value_is_valid(const char *value, kernel_cli_value_kind kind)
@@ -146,14 +147,17 @@ static bool value_is_valid(const char *value, kernel_cli_value_kind kind)
             return kernel_parse_finite_float(value, &float_value);
         case KERNEL_CLI_SIGNED_INTEGER:
             return kernel_parse_i64(value, &signed_value);
+        case KERNEL_CLI_SIGNED_INT:
+            return kernel_parse_i64(value, &signed_value) &&
+                   signed_value >= INT_MIN && signed_value <= INT_MAX;
         case KERNEL_CLI_UNSIGNED_INTEGER:
             return kernel_parse_u64(value, &unsigned_value);
         case KERNEL_CLI_UNSIGNED_U32:
             return kernel_parse_u64(value, &unsigned_value) && unsigned_value <= UINT32_MAX;
         case KERNEL_CLI_POSITIVE_U32:
             return kernel_parse_positive_u32(value, &positive_value);
-        case KERNEL_CLI_UNSIGNED_BASE0:
-            return unsigned_base0_is_valid(value);
+        case KERNEL_CLI_UNSIGNED_U32_BASE0:
+            return unsigned_u32_base0_is_valid(value);
     }
     return false;
 }
@@ -296,9 +300,9 @@ bool kernel_cli_validate_argument(const char *argument, kernel_cli_profile profi
                 name, argument);
         return false;
     }
-    /* The substrate's named allowance pulse remains a valid nonnumeric option. */
+    /* Both runtimes retain their case-insensitive named allowance pulse. */
     const char *allow = kernel_match_prefix(argument, "--allow=");
-    if (profile == KERNEL_CLI_SUBSTRATE && allow &&
+    if (allow &&
         (allow[0] == 'n' || allow[0] == 'N') &&
         (allow[1] == 'o' || allow[1] == 'O') &&
         (allow[2] == 'w' || allow[2] == 'W') && allow[3] == '\0') {
