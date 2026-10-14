@@ -43,6 +43,7 @@ REQUEST_SCHEMA = "liminal-external-agent-receiver-request-v1"
 RESPONSE_SCHEMA = "liminal-external-agent-receiver-response-v1"
 REQUEST_DOMAIN = b"liminal-external-agent-receiver-request-v1\x00"
 RESPONSE_DOMAIN = b"liminal-external-agent-receiver-response-v1\x00"
+STOP_CHALLENGE_DOMAIN = b"liminal-external-agent-receiver-stop-challenge-v1\x00"
 MAX_PACKET_BYTES = 65536
 MAX_ROOTS = 128
 MAX_EXECUTIONS = 1024
@@ -528,15 +529,37 @@ def verify_receiver_response(request: dict[str, Any], response: Any, pin: Any) -
 
 
 class HTTPReceiverFenceClient(HTTPNetworkEndpointClient):
-    """G02-compatible endpoint interface with separate operator control keys."""
+    """Separate operator controls with restart-recoverable exact STOP requests.
+
+    STOP uses a context-bound challenge so a lost first ACK can be replayed at
+    the receiver's storage ceiling. Every retry still performs HTTP and checks
+    the receiver's signed response; no local result substitutes for that proof.
+    """
 
     def __init__(self, url: str, request_key: bytes, pin: dict[str, str], *, timeout: float = 3,
                  operator_key: bytes | None = None) -> None:
         super().__init__(url, request_key, pin, timeout=timeout)
         self._call_local = threading.local()
+        self._evidence_lock = threading.RLock()
         self.operator_key = None if operator_key is None else require_key(operator_key)
         if self.operator_key is not None and self.operator_key == self.request_key:
             raise ControlError("RECEIVER_KEYS_MUST_DIFFER")
+
+    @property
+    def evidence(self) -> list[dict[str, Any]]:
+        with self._evidence_lock:
+            return super().evidence
+
+    def _stop_nonce(self, payload: dict[str, Any]) -> str:
+        if type(payload) is not dict or set(payload) != _PAYLOADS["stop"]:
+            raise ControlError("RECEIVER_PAYLOAD_INVALID")
+        validate_id(payload["root_id"], "root_id")
+        context = {"schema": REQUEST_SCHEMA, "role": "operator", "operation": "stop",
+            "endpoint_url": validate_endpoint_base_url(self.url),
+            "endpoint_pin": validate_endpoint_pin(self._pin),
+            "root_id": payload["root_id"], "epoch": _epoch(payload["epoch"])}
+        return hmac.new(require_key(self.operator_key),
+            STOP_CHALLENGE_DOMAIN + canonical_bytes(context), hashlib.sha256).hexdigest()
 
     def _call(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         self._call_local.pair = None
@@ -547,7 +570,8 @@ class HTTPReceiverFenceClient(HTTPNetworkEndpointClient):
         if key is None:
             raise ControlError("RECEIVER_OPERATOR_KEY_REQUIRED")
         body = {"schema": REQUEST_SCHEMA, "role": role, "operation": operation,
-            "nonce": secrets.token_hex(32), "payload": _copy(payload)}
+            "nonce": self._stop_nonce(payload) if operation == "stop" else secrets.token_hex(32),
+            "payload": _copy(payload)}
         packet = {**body, "signature": _request_signature(body, key)}
         wire = canonical_bytes(packet)
         if len(wire) > MAX_PACKET_BYTES:
@@ -565,9 +589,16 @@ class HTTPReceiverFenceClient(HTTPNetworkEndpointClient):
             result = verify_receiver_response(body, response, self._pin)
             pair = {"request": body, "response": response}
             self._call_local.pair = _copy(pair, 2 * MAX_PACKET_BYTES)
-            self._evidence.append(_copy(pair, 2 * MAX_PACKET_BYTES))
-            if len(self._evidence) > 1024:
-                self._evidence.pop(0)
+            with self._evidence_lock:
+                # Exact STOP replay has the same authenticated pair. Keep the
+                # per-call proof above, while preserving unique capture nonces.
+                # Conflicting signed responses remain visible, never collapsed.
+                duplicate = operation == "stop" and any(
+                    canonical_bytes(item) == canonical_bytes(pair) for item in self._evidence)
+                if not duplicate:
+                    self._evidence.append(_copy(pair, 2 * MAX_PACKET_BYTES))
+                    if len(self._evidence) > 1024:
+                        self._evidence.pop(0)
             if result.get("status") == "ERROR":
                 raise ControlError(result.get("reason", "RECEIVER_REFUSED"))
             return result
