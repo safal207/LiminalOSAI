@@ -348,18 +348,23 @@ class ObjectiveBoundEffectCommitBroker:
                     executor=executor,
                 )
             except Exception as exc:
-                inner_sha = self._latest_inner_commit(before_commits)
-                self._append_commit(
-                    lease=lease,
-                    state=state,
-                    committed_at_unix=now,
-                    outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
-                    result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
-                    inner_commit_sha256=inner_sha,
-                    reasons=("outer_lease_consumed", "effect_outcome_unknown", "reconciliation_required")
-                    if isinstance(exc, ExecutionOutcomeUnknown)
-                    else ("outer_lease_consumed", "inner_effect_commit_failed"),
-                )
+                try:
+                    inner_sha = self._latest_inner_commit(before_commits)
+                    self._append_commit(
+                        lease=lease,
+                        state=state,
+                        committed_at_unix=now,
+                        outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
+                        result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
+                        inner_commit_sha256=inner_sha,
+                        reasons=("outer_lease_consumed", "effect_outcome_unknown", "reconciliation_required")
+                        if isinstance(exc, ExecutionOutcomeUnknown)
+                        else ("outer_lease_consumed", "inner_effect_commit_failed"),
+                    )
+                except Exception:
+                    if isinstance(exc, ExecutionOutcomeUnknown):
+                        raise exc from ObjectiveEffectCommitError("effect_commit_evidence_unavailable")
+                    raise
                 if isinstance(exc, (ObjectiveEffectCommitError, ExecutionOutcomeUnknown)):
                     raise
                 raise ObjectiveEffectCommitError("inner_effect_commit_failed") from exc

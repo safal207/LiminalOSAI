@@ -489,17 +489,22 @@ class EffectCommitBroker:
                         raise EffectCommitError("executor_observation_invalid")
                     observation.validate()
                 except Exception as exc:
-                    self._append_commit(
-                        lease=lease,
-                        world=world,
-                        session=session,
-                        committed_at_unix=now,
-                        outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
-                        result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
-                        reasons=("lease_consumed", "effect_outcome_unknown", "reconciliation_required")
-                        if isinstance(exc, ExecutionOutcomeUnknown)
-                        else ("lease_consumed", "effect_callback_failed"),
-                    )
+                    try:
+                        self._append_commit(
+                            lease=lease,
+                            world=world,
+                            session=session,
+                            committed_at_unix=now,
+                            outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
+                            result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
+                            reasons=("lease_consumed", "effect_outcome_unknown", "reconciliation_required")
+                            if isinstance(exc, ExecutionOutcomeUnknown)
+                            else ("lease_consumed", "effect_callback_failed"),
+                        )
+                    except Exception:
+                        if isinstance(exc, ExecutionOutcomeUnknown):
+                            raise exc from EffectCommitError("effect_commit_evidence_unavailable")
+                        raise
                     if isinstance(exc, (EffectCommitError, ExecutionOutcomeUnknown)):
                         raise
                     raise EffectCommitError("effect_callback_failed") from exc

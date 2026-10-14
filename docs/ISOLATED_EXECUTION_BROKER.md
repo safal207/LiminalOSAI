@@ -88,6 +88,28 @@ The caller owns journal permissions, durable storage, restart recovery and reten
 
 `ExecutionOutcomeUnknown` is preserved through Runtime Mediator and the epoch, objective, causal and durable effect wrappers. Receipts report `UNKNOWN`, authority remains consumed, and the durable fence retains its reservation (`EFFECT_UNKNOWN_RESERVATION_STUCK`). Runtime consumers must reconcile the recorded session and effect before authorizing retries or clearing reservations. A verified container removal alone does not reconstruct a lost workload result. Successful receipt bodies and hashes keep their existing format.
 
+For trajectory risk, an admitted `UNKNOWN` retains an `ALLOW` event representing
+a possible dispatched effect, with privilege bounded by `max(before, after)`.
+Its receipt and event metadata keep the `UNKNOWN` outcome. Trajectory analysis
+recommends a risk decision; containment and release remain explicit host actions.
+
+After a validated effect succeeds, failure of its trajectory append or final
+causal receipt raises `CausalEffectEvidenceError`, preserving the known result
+digest and compatibility with `CausalEffectCommitError` handlers. When the
+append-failure receipt can be recorded, it retains
+`EFFECT_SUCCEEDED_EVIDENCE_FAILED`. Runtime mediation reports `UNKNOWN` with
+`effect_succeeded` and the specific `trajectory_append_failed` or
+`causal_commit_receipt_failed` reason, keeping the effect in trajectory risk.
+Outer durable wrappers retain the consumed lease and reservation.
+
+Across epoch, objective, causal and durable wrappers, a secondary diagnostic
+cursor, state-read or receipt failure preserves an existing
+`ExecutionOutcomeUnknown` marker; it cannot convert uncertainty into `FAILED`.
+Known-success causal evidence failures also retain their typed marker when the
+diagnostic failure receipt is unavailable. Secondary causes use bounded error
+codes. A cursor failure before executor dispatch retains the ordinary failure
+contract, and genuine executor failures remain excluded from effect rules.
+
 `tests/test_docker_adapter_lifecycle.py` uses local Python subprocesses as a fake Docker CLI. It checks ownership, bounded output, late creation, client death, same-name replacement and uncertainty propagation, but does not establish Docker/kernel containment. `tests/fixtures/isolated_executor/docker_failure_probe.py` adds six CI scenarios with a real, separately owned daemon: normal completion, lost create response, delayed create delivery, Docker client death, delayed start against a removed ID with a same-name sentinel, and daemon stop/restart. Delays and response loss are explicitly injected at the trusted CLI transport boundary. The fixture only stops its own daemon, loads the locally built immutable image ID, and emits facts checked by an independent verifier; the report is bounded diagnostic evidence, not an attestation against a malicious host.
 
 The [isolation workflow](../.github/workflows/isolated-execution-broker.yml) runs these scenarios and uploads `docker-failure-lifecycle` evidence bound to the tested checkout and image ID. All six owned-daemon scenarios, their standalone fact verifier, isolation probes and governed execution passed in [CI run 38538316272](https://github.com/safal207/LiminalOSAI/actions/runs/38538316272), associated with PR head `5aa119b03eed5189726dceb7b01bdf96ba488a94`. Pull-request CI tests its recorded merge checkout; this source identity is retained in the artifact. Local fake-CLI tests are not a substitute for that run. Earlier probes remain recorded in [CI run 38481395912](https://github.com/safal207/LiminalOSAI/actions/runs/38481395912) for revision `5f4843a975244e4844c6b0c0f77c6b6e1a82635d`.

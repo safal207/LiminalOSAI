@@ -293,13 +293,20 @@ class RuntimeMediator:
                 admission: str, outcome: str, result_sha: str, reasons: tuple[str, ...],
                 capability_id: str | None, scope_sha: str, event_kind_override: str | None = None) -> dict[str, Any]:
         event_kind = event_kind_override or PHASE3_KIND[operation.kind]
-        event_decision = "ALLOW" if admission == "ALLOW" and outcome == "SUCCEEDED" else "BLOCK"
+        # Phase 3 counts ALLOW events. A dispatched UNKNOWN may have effected
+        # its admitted operation, so retain it for conservative risk analysis;
+        # the receipt and metadata still record UNKNOWN rather than success.
+        event_decision = "ALLOW" if admission == "ALLOW" and outcome in {"SUCCEEDED", "UNKNOWN"} else "BLOCK"
+        privilege_after = operation.privilege_level_after if event_decision == "ALLOW" else operation.privilege_level_before
+        if event_decision == "ALLOW" and outcome == "UNKNOWN":
+            # An unverified decrease must not erase possible prior privilege.
+            privilege_after = max(operation.privilege_level_before, operation.privilege_level_after)
         event = TrajectoryEvent.build(
             event_id=f"runtime-event:{len(self._events)+1}", sequence=len(self._events)+1,
             observed_at_unix=operation.at_unix, kind=event_kind, decision=event_decision,
             subject_id=operation.subject_id, capability_id=capability_id,
             privilege_level_before=operation.privilege_level_before,
-            privilege_level_after=operation.privilege_level_after if event_decision == "ALLOW" else operation.privilege_level_before,
+            privilege_level_after=privilege_after,
             metadata={
                 "operation_id": operation.operation_id,
                 "runtime_kind": operation.kind if event_kind_override is None else event_kind_override,
