@@ -4,8 +4,11 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import os
+import signal
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -31,6 +34,89 @@ class OwnedStackValidationTests(unittest.TestCase):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("synthetic source placeholder\n")
+
+    def test_windows_c_recipes_preserve_powershell_arguments_through_posix_shell(self):
+        # This checks shell argument transport, not native PowerShell or Windows.
+        dry_run = subprocess.run(
+            ["make", "-n", "-B", "OS=Windows_NT", "test-c"],
+            cwd=ROOT, text=True, capture_output=True, check=True,
+        )
+        prefix = "powershell -NoProfile -Command "
+        commands = [line for line in dry_run.stdout.splitlines() if line.startswith(prefix)]
+        self.assertEqual(len(commands), 2)
+        spy = self.directory / "powershell"
+        spy.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "with open(os.environ['PS_ARGV_CAPTURE'], 'a') as capture:\n"
+            "    capture.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        )
+        spy.chmod(0o755)
+        capture = self.directory / "powershell-arguments.jsonl"
+        environment = {
+            **os.environ,
+            "PATH": str(self.directory) + os.pathsep + os.environ["PATH"],
+            "PS_ARGV_CAPTURE": str(capture),
+        }
+        for value in ("", "POISONED_CALLER_VALUE"):
+            for command in commands:
+                with self.subTest(value=value, command=command):
+                    subprocess.run(
+                        ["/bin/sh", "-c", command], cwd=self.directory, check=True,
+                        env={**environment, "ErrorActionPreference": value,
+                             "testBinary": value, "LASTEXITCODE": value},
+                    )
+                    actual = json.loads(capture.read_text().splitlines()[-1])
+                    expected_script = command[len(prefix):][1:-1]
+                    self.assertEqual(actual, ["-NoProfile", "-Command", expected_script])
+
+    def test_benchmark_git_deadlines_fail_without_publishing_partial_results(self):
+        # A controlled direct child stalls; this does not execute a Git hook.
+        git = self.directory / "git"
+        git.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys, time\n"
+            "role = 'rev-parse' if 'rev-parse' in sys.argv else 'status'\n"
+            "if role == os.environ['HANG_GIT_ROLE']: time.sleep(10)\n"
+            "if role == 'rev-parse': print('f' * 40)\n"
+        )
+        git.chmod(0o755)
+        wrapper = (
+            "import importlib.util, sys; "
+            "source, repo = sys.argv[1:]; "
+            "spec = importlib.util.spec_from_file_location('benchmark', source); "
+            "module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module); "
+            "module.GIT_METADATA_TIMEOUT_SECONDS = 0.5; "
+            "sys.argv = [source, '--repo', repo, '--samples', '1', '--iterations', '1', '--rows', '1']; "
+            "module.main()"
+        )
+        for role in ("none", "rev-parse", "status"):
+            with self.subTest(role=role):
+                process = subprocess.Popen(
+                    [sys.executable, "-c", wrapper,
+                     str(ROOT / "tools/benchmark_workload_snapshot.py"), str(ROOT)],
+                    cwd=self.directory, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    start_new_session=True,
+                    env={**os.environ, "PATH": str(self.directory) + os.pathsep + os.environ["PATH"],
+                         "HANG_GIT_ROLE": role},
+                )
+                try:
+                    stdout, stderr = process.communicate(timeout=4)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate()
+                    self.fail("benchmark failed to bound the stalled Git child")
+                if role == "none":
+                    self.assertEqual(process.returncode, 0, stderr)
+                    report = json.loads(stdout)
+                    self.assertEqual(report["source"], "f" * 40)
+                    self.assertFalse(report["dirty"])
+                    self.assertEqual(set(report["results"]),
+                                     {"validate_snapshot", "build_workload_evidence", "run_external_workload"})
+                else:
+                    self.assertEqual(process.returncode, 2, stderr)
+                    self.assertEqual(stdout, "")
+                    self.assertIn("Git metadata query timed out", stderr)
 
     def test_checkout_without_owned_sdk_does_not_spawn_or_change_environment(self):
         with patch.object(PREPARE, "command") as command:

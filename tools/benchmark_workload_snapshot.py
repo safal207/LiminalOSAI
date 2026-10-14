@@ -17,6 +17,8 @@ import sys
 import time
 from unittest.mock import patch
 
+GIT_METADATA_TIMEOUT_SECONDS = 10.0
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -67,8 +69,17 @@ def main() -> None:
     with patch.object(sdk, "_json_copy", wraps=sdk._json_copy) as copies:
         sdk._validated_normalized_workload(workload)
         copy_calls = copies.call_count
-    source = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-    dirty = bool(subprocess.check_output(["git", "-C", str(repo), "status", "--porcelain"], text=True))
+    try:
+        source = subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True,
+            timeout=GIT_METADATA_TIMEOUT_SECONDS,
+        ).strip()
+        dirty = bool(subprocess.check_output(
+            ["git", "-C", str(repo), "status", "--porcelain"], text=True,
+            timeout=GIT_METADATA_TIMEOUT_SECONDS,
+        ))
+    except subprocess.TimeoutExpired:
+        parser.error("Git metadata query timed out; no benchmark report was emitted")
     print(json.dumps({"source": source, "dirty": dirty, "sdk_file": str(sdk_file), "python": platform.python_version(), "platform": platform.platform(), "rows": args.rows, "samples": args.samples, "iterations": args.iterations, "json_copy_calls_per_validation": copy_calls, "results": results}, indent=2))
 
 
