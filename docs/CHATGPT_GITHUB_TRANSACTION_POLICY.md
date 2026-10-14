@@ -188,6 +188,11 @@ engine.record_approval(
 
 Execution remains blocked until the entire ledger is ready.
 
+Approval replacement acknowledges success only after synchronizing both file
+data and the parent directory. A synchronization error after replacement leaves
+an uncertain outcome: verify the exact approval ID/head before retrying. See
+[local journal reliability](LOCAL_JOURNAL_RELIABILITY.md) for the writer contracts.
+
 ## Approval-ledger lock recovery
 
 Creation and append acquire an exclusive sibling file named after the ledger
