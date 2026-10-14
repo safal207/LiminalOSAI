@@ -24,8 +24,19 @@ The replacement proceeds in reviewable stages:
 Both this entrypoint and `liminal_substrate.c` now use the profile-aware guard
 in `core/runtime/kernel_cli_guard.c`. Shared scalar options use the same strict
 numeric primitives; substrate-specific scalar options receive equivalent
-validation before initialization. Composite ranges and CSV configuration retain
-their legacy parsers and require a separate migration.
+validation before initialization. The guard also validates the production
+composite forms: affinity configuration, KISS thresholds, substrate tuning
+ranges, pulse vitality thresholds and `--phase-shift=module:degrees`.
+Numeric fields must be finite and completely consumed before the existing
+semantic parser runs. Correct values retain their aliases, endpoint ordering,
+duplicate-field handling and clamping.
+
+Configuration lists longer than their 127-byte parser capacity and phase
+module names longer than 31 bytes fail instead of being truncated. Tuning
+integer ranges and `idx:` selectors must fit their actual destination types.
+Phase degrees use bounded modulo normalization; very large finite inputs no
+longer enter a nonterminating subtraction loop. Malformed fields that previously
+fell back to defaults are now rejected with exit status `2`.
 
 The entry guard:
 

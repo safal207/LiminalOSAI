@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
@@ -17,19 +18,29 @@ class LiminalSubstrateCliCharacterizationTests(unittest.TestCase):
         if not BINARY.is_file():
             raise AssertionError(f"production binary is missing: {BINARY}; run `make` first")
 
-    def run_substrate(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def run_substrate(self, *arguments: str, dry_run: bool = True, timeout: float = 10) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory(prefix="liminal-substrate-cli-") as directory:
             result = subprocess.run(
-                [str(BINARY), "--dry-run", *arguments],
+                [str(BINARY), *(["--dry-run"] if dry_run else []), *arguments],
                 cwd=directory,
                 check=False,
                 text=True,
                 capture_output=True,
-                timeout=10,
+                timeout=timeout,
             )
             if result.returncode == 2:
                 self.assertEqual(list(Path(directory).iterdir()), [])
             return result
+
+    def assert_composite_rejected(self, argument: str) -> None:
+        result = self.run_substrate(
+            "--substrate", "--limit=1", "--qel", "--introspect", "--kiss", "--astro-trace",
+            "--tune-save=should-not-exist.json", argument, dry_run=False, timeout=2,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("liminal_core: invalid numeric value", result.stderr)
+        self.assertIn(argument, result.stderr)
 
     def successful_lines(self, *arguments: str) -> list[str]:
         result = self.run_substrate(*arguments)
@@ -124,6 +135,95 @@ class LiminalSubstrateCliCharacterizationTests(unittest.TestCase):
         ):
             with self.subTest(argument=argument):
                 self.assert_rejected(argument)
+
+    def test_malformed_float_ranges_reject_before_initialization(self) -> None:
+        for option in ("tune-alpha", "tune-align"):
+            for value in ("", ":0.5", "0.5:", "bad:0.5", "0.5:bad", "nan:0.5",
+                          "0.5:inf", "1e999:0.5", "0.5:1e999", "1e-999:0.5",
+                          "0.5:0.8junk", "0.5:0.8:1", "0.5 :0.8"):
+                with self.subTest(option=option, value=value):
+                    self.assert_composite_rejected(f"--{option}={value}")
+
+    def test_integer_range_rejects_suffixes_nonfinite_and_narrowing_overflow(self) -> None:
+        for value in ("", ":1", "1:", "1.5:2", "1:2.5", "1:2junk", "nan:2", "1:inf",
+                      "2147483648:1", "1:-2147483649", "9223372036854775808:2",
+                      "1:9223372036854775808", "1:2:3"):
+            with self.subTest(value=value):
+                self.assert_composite_rejected(f"--tune-warm={value}")
+
+    def test_malformed_keyed_numeric_lists_reject_before_initialization(self) -> None:
+        for option, key in (("affinity-cfg", "care"), ("kiss-thr", "trust")):
+            for value in ("", ",,,", key, f"{key}:", ":0.5", f"{key}:0.5junk",
+                          f"{key}:nan", f"{key}:inf", f"{key}:1e999", f"{key}:1e-999",
+                          f"{key}:0.5:0.7", f"{key}:0.5,malformed"):
+                with self.subTest(option=option, value=value):
+                    self.assert_composite_rejected(f"--{option}={value}")
+
+    def test_keyed_parser_buffer_boundary_is_explicit(self) -> None:
+        for option, key in (("affinity-cfg", "care"), ("kiss-thr", "trust")):
+            valid = key + ":" + "0" * (126 - len(key) - 1) + "1"
+            self.assertEqual(len(valid), 127)
+            with self.subTest(option=option):
+                self.successful_lines(f"--{option}={valid}")
+                self.assert_composite_rejected(f"--{option}={valid},ignored:0.5junk")
+
+    def test_composite_indices_reject_uint32_narrowing_overflow(self) -> None:
+        for option in ("erb-replay", "tune-source"):
+            with self.subTest(option=option):
+                self.assert_composite_rejected(f"--{option}=idx:4294967296")
+        self.successful_lines("--erb-replay=idx:4294967295")
+
+    def test_valid_composite_ranges_lists_and_order_remain_compatible(self) -> None:
+        baseline = self.successful_lines("--strict-order")
+        for argument in (
+            "--tune-alpha=0.6:0.1", "--tune-align=-2:5", "--tune-warm=100:-100",
+            "--tune-alpha=+0.1: 0.6 ", "--tune-align=0.4: 0.8 ",
+            "--tune-warm=-2147483648:2147483647", "--tune-warm=+2: 10 ",
+            "--affinity-cfg=,care:-2,,respect:3,care:0.5,presence:0.25,ignored:0.2,",
+            "--kiss-thr=trust:2,tr:0.25, presence:0.5,harm:0.75,harmony:0.8",
+            "--kiss-thr= tr: +0.25 ,presence:0.5 ,harmony:0.8 ",
+            "--affinity-cfg=care: +0.25 ,respect:0.5,presence:0.75 ",
+        ):
+            with self.subTest(argument=argument):
+                self.assertEqual(self.successful_lines("--strict-order", argument), baseline)
+
+    def test_tuning_range_clamps_and_sorting_preserve_actual_saved_profile(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="substrate-tune-control-") as directory:
+            recorded = subprocess.run(
+                [str(BINARY), "--substrate", "--limit=1", "--erb", "--erb-pre=0",
+                 "--erb-post=0", "--erb-spike=0", "--introspect"],
+                cwd=directory, capture_output=True, text=True, check=False, timeout=5,
+            )
+            self.assertEqual(recorded.returncode, 0, recorded.stderr)
+            self.assertTrue((Path(directory) / "logs" / "erb_index.jsonl").is_file())
+            profiles = []
+            ranges = (
+                ("--tune-alpha=5:-2", "--tune-warm=100:-100", "--tune-align=5:-2"),
+                ("--tune-alpha=0.01:0.95", "--tune-warm=0:10", "--tune-align=0:1"),
+            )
+            for index, arguments in enumerate(ranges):
+                target = Path(directory) / f"owned-profile-{index}.json"
+                result = subprocess.run(
+                    [str(BINARY), "--tune", "--tune-trials=1", "--tune-refine=0", "--tune-max-runs=1",
+                     "--tune-seed=42", *arguments, f"--tune-save={target}"],
+                    cwd=directory, capture_output=True, text=True, check=False, timeout=5,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                profiles.append(target.read_bytes())
+            self.assertEqual(profiles[0], profiles[1])
+            self.assertEqual(json.loads(profiles[0])["trs_warmup"], 6)
+
+    def test_valid_keyed_thresholds_still_commit_one_owned_runtime_event(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="substrate-kiss-control-") as directory:
+            result = subprocess.run(
+                [str(BINARY), "--substrate", "--limit=1", "--introspect", "--kiss", "--kiss-warmup=0",
+                 "--kiss-alpha=1", "--kiss-thr=trust:2,tr:0,presence:-1,harmony:0"],
+                cwd=directory, capture_output=True, text=True, check=False, timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = [json.loads(line) for line in (Path(directory) / "logs" / "kiss.log").read_text().splitlines()]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual((rows[0]["t"], rows[0]["fired"]), (1, True))
 
 
 if __name__ == "__main__":
