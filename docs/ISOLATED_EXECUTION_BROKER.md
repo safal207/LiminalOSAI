@@ -86,7 +86,7 @@ executor = DockerExecutor(session_observer=record_session)
 
 The caller owns journal permissions, durable storage, restart recovery and retention. Without that recorder, an abrupt Python process/host crash can lose the in-memory identity and bypass cleanup. The fixture below kills a Docker client and restarts a dedicated daemon; it does not test a Python adapter process or host crash.
 
-`ExecutionOutcomeUnknown` is preserved through Runtime Mediator and the epoch, objective, causal and durable effect wrappers. Receipts report `UNKNOWN`, authority remains consumed, and the durable fence retains its reservation (`EFFECT_UNKNOWN_RESERVATION_STUCK`). Runtime consumers must reconcile the recorded session and effect before authorizing retries or clearing reservations. A verified container removal alone does not reconstruct a lost workload result. Successful receipt bodies and hashes keep their existing format.
+`ExecutionOutcomeUnknown` is preserved through Runtime Mediator and the epoch, objective, causal and durable effect wrappers. Receipts report `UNKNOWN` and authority remains consumed. An inner unknown effect retains the durable reservation (`EFFECT_UNKNOWN_RESERVATION_STUCK`), with explicit `effect_outcome_unknown` and `reconciliation_required` reasons. A later durable evidence failure reports the observed reservation status or leaves it unconfirmed. Runtime consumers must reconcile the recorded session, effect and durable state before authorizing retries or clearing reservations. A verified container removal alone does not reconstruct a lost workload result. Successful receipt bodies and hashes keep their existing format.
 
 For trajectory risk, an admitted `UNKNOWN` retains an `ALLOW` event representing
 a possible dispatched effect, with privilege bounded by `max(before, after)`.
@@ -119,6 +119,18 @@ append-failure receipt can be recorded, it retains
 Outer durable wrappers retain the known result digest and evidence reason in
 their commit and runtime receipts, together with the consumed lease and
 reservation. Missing optional diagnostic receipts do not erase the typed result.
+
+After the inner effect succeeds, a missing/unavailable inner receipt, world
+observation failure, finalization error or final durable receipt failure raises
+`DurableEffectEvidenceError`. It preserves the known result digest, specific
+evidence reason, reservation status and durable commit confirmation, and remains
+compatible with both `DurableGovernanceError` and `ExecutionOutcomeUnknown`.
+Runtime mediation keeps `UNKNOWN` and the effect in risk analysis. The shared
+ledger is blocked before diagnostics. A lost finalization acknowledgement can
+follow a completed store commit; a final receipt failure can follow an
+acknowledged commit. These paths report a released reservation when observed,
+or `durable_reservation_unconfirmed` when it cannot be established, and never
+re-reserve or roll back. The shared ledger uncertainty gate remains in-process.
 
 Across epoch, objective, causal and durable wrappers, a secondary diagnostic
 cursor, state-read or receipt failure preserves an existing
