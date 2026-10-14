@@ -1910,11 +1910,12 @@ static kernel_options parse_options(int argc, char **argv)
                         char *end = NULL;
                         float degrees = strtof(deg_text, &end);
                         if (end != deg_text) {
-                            while (degrees < 0.0f) {
+                            degrees = fmodf(degrees, 360.0f);
+                            if (degrees < 0.0f) {
                                 degrees += 360.0f;
                             }
-                            while (degrees >= 360.0f) {
-                                degrees -= 360.0f;
+                            if (degrees >= 360.0f) {
+                                degrees = 0.0f;
                             }
                             opts.phase_shift_deg[module_index] = degrees;
                             opts.phase_shift_set[module_index] = true;
