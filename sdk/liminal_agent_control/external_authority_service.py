@@ -320,7 +320,7 @@ def main() -> int:
         parser.add_argument("--" + field, type=Path, required=True)
     parser.add_argument("--initialize", action="store_true")
     parser.add_argument("--port", type=int, default=0)
-    parser.add_argument("--profile", choices=("records", "owned-loopback-network-v1", "owned-docker-command-v1", "owned-docker-agent-v1"), default="records")
+    parser.add_argument("--profile", choices=("records", "owned-loopback-network-v1", "owned-loopback-receiver-fence-v1", "owned-docker-command-v1", "owned-docker-agent-v1"), default="records")
     parser.add_argument("--endpoint-pin-file", type=Path)
     parser.add_argument("--supervisor-pin-file", type=Path)
     args = parser.parse_args()
@@ -334,7 +334,7 @@ def main() -> int:
             if args.endpoint_pin_file is not None or args.supervisor_pin_file is not None:
                 raise ControlError("EXTERNAL_AUTHORITY_PROFILE_CONFIGURATION_INVALID")
             store = ExternalAuthorityStore(args.db, **options)
-        elif args.profile == "owned-loopback-network-v1":
+        elif args.profile in ("owned-loopback-network-v1", "owned-loopback-receiver-fence-v1"):
             from .external_network_authority import ExternalNetworkAuthorityStore
             if args.supervisor_pin_file is not None:
                 raise ControlError("EXTERNAL_AUTHORITY_PROFILE_CONFIGURATION_INVALID")
@@ -348,7 +348,11 @@ def main() -> int:
                 endpoint_pin = json.loads(pin_wire)
             except (ValueError, UnicodeError) as exc:
                 raise ControlError("EXTERNAL_AUTHORITY_ENDPOINT_PIN_INVALID") from exc
-            store = ExternalNetworkAuthorityStore(args.db, endpoint_pin=endpoint_pin, **options)
+            if args.profile == "owned-loopback-receiver-fence-v1":
+                from .external_agent_receiver_authority import ExternalAgentReceiverAuthorityStore
+                store = ExternalAgentReceiverAuthorityStore(args.db, endpoint_pin=endpoint_pin, **options)
+            else:
+                store = ExternalNetworkAuthorityStore(args.db, endpoint_pin=endpoint_pin, **options)
         else:
             from .external_command_authority import ExternalCommandAuthorityStore
             if args.endpoint_pin_file is not None:

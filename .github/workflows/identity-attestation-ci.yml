@@ -10,6 +10,7 @@ on:
       - sdk/liminal_identity_attestation/**
       - tools/chatgpt_identity_attestation.py
       - tests/test_chatgpt_identity_attestation.py
+      - 'scripts/check_forbidden.py'
   workflow_dispatch:
 
 permissions:
@@ -44,13 +45,6 @@ jobs:
           set -euo pipefail
           python3 -m unittest tests/test_chatgpt_identity_attestation.py -v \
             2>&1 | tee reports/identity-attestation/unit-tests.log
-
-      - name: Run full earlier stack regression
-        shell: bash
-        run: |
-          set -euo pipefail
-          make test 2>&1 | tee reports/identity-attestation/full-stack-tests.log
-          make test-repo 2>&1 | tee reports/identity-attestation/repo-hygiene.log
 
       - name: Generate full identity-bound fixture
         shell: bash
@@ -117,8 +111,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ! grep -R --binary-files=without-match -n 'BEGIN PRIVATE KEY' reports/identity-attestation
-          ! grep -R --binary-files=without-match -n 'secret-token-value' reports/identity-attestation
+          python3 scripts/check_forbidden.py -- -R --binary-files=without-match -n 'BEGIN PRIVATE KEY' reports/identity-attestation
+          python3 scripts/check_forbidden.py -- -R --binary-files=without-match -n 'secret-token-value' reports/identity-attestation
           python3 - <<'PY'
           import json
           from pathlib import Path

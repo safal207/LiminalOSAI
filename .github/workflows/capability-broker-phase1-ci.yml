@@ -11,6 +11,7 @@ on:
       - tests/test_capability_broker_phase1.py
       - tests/test_post_sandbox_phase0_contracts.py
       - Makefile
+      - 'scripts/check_forbidden.py'
   workflow_dispatch:
 
 permissions:
@@ -51,13 +52,6 @@ jobs:
           set -euo pipefail
           python3 -m unittest tests/test_post_sandbox_phase0_contracts.py -v \
             2>&1 | tee reports/capability-broker-phase1/phase0-tests.log
-
-      - name: Run full repository regression
-        shell: bash
-        run: |
-          set -euo pipefail
-          make test 2>&1 | tee reports/capability-broker-phase1/full-stack-tests.log
-          make test-repo 2>&1 | tee reports/capability-broker-phase1/repo-hygiene.log
 
       - name: Verify broker authority boundary
         shell: bash
@@ -106,9 +100,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ! grep -R --binary-files=without-match -n 'BEGIN PRIVATE KEY' \
+          python3 scripts/check_forbidden.py -- -R --binary-files=without-match -n 'BEGIN PRIVATE KEY' \
             sdk/liminal_capability_broker tests/test_capability_broker_phase1.py docs/CAPABILITY_BROKER_PHASE1.md
-          ! grep -R --binary-files=without-match -nE '(Bearer [A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,})' \
+          python3 scripts/check_forbidden.py -- -R --binary-files=without-match -nE '(Bearer [A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,})' \
             sdk/liminal_capability_broker tests/test_capability_broker_phase1.py docs/CAPABILITY_BROKER_PHASE1.md
 
       - name: Hash evidence

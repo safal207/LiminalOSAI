@@ -13,13 +13,14 @@ import hmac
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterator, Mapping, Protocol
 
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
 from sdk.liminal_runtime_config import BoundRuntimeConfigBroker
 from sdk.liminal_runtime_mediation import (
     ExecutionObservation,
+    ExecutionOutcomeUnknown,
     MediationError,
     OPERATION_TO_CAPABILITY,
     RuntimeMediator,
@@ -54,6 +55,15 @@ class EffectCommitError(ValueError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+class EffectCommitEvidenceError(EffectCommitError, ExecutionOutcomeUnknown):
+    """A validated effect succeeded, but its epoch commit receipt is incomplete."""
+
+    def __init__(self, *, result_sha256: str) -> None:
+        super().__init__("epoch_commit_receipt_failed_after_effect")
+        self.evidence_code = "epoch_commit_receipt_failed"
+        self.result_sha256 = _sha(result_sha256, "effect_result_sha256")
 
 
 class RuntimeWorldProvider(Protocol):
@@ -201,7 +211,7 @@ class EffectCommitAuthorizationReceipt:
             "host_binding_sha256": self.host_binding_sha256,
             "issued_at_unix": self.issued_at_unix,
             "expires_at_unix": self.expires_at_unix,
-            "authority": AUTHORITY,
+            "authority": dict(AUTHORITY),
         }
 
     def as_document(self) -> dict[str, Any]:
@@ -241,7 +251,7 @@ class EffectCommitReceipt:
             "effect_outcome": self.effect_outcome,
             "result_sha256": self.result_sha256,
             "reason_codes": list(self.reason_codes),
-            "authority": AUTHORITY,
+            "authority": dict(AUTHORITY),
         }
 
     def as_document(self) -> dict[str, Any]:
@@ -312,6 +322,9 @@ class EffectCommitBroker:
         capability_decision: Mapping[str, Any],
     ) -> tuple[str, dict[str, Any]]:
         operation.validate()
+        # A frozen dataclass does not freeze nested scope lists. Bind the lease
+        # to a detached, normalized snapshot before invoking provider callbacks.
+        operation = replace(operation, scope=operation.normalized_scope())
         capability = dict(capability_decision)
         if capability.get("decision") != "ALLOW":
             raise EffectCommitError("capability_decision_not_allow")
@@ -415,6 +428,11 @@ class EffectCommitBroker:
     def commit_receipts(self) -> tuple[dict[str, Any], ...]:
         return tuple(item.as_document() for item in self._commits)
 
+    def commit_cursor(self) -> tuple[int, str]:
+        """Read count and latest digest without exporting historical receipts."""
+        with self._lock:
+            return len(self._commits), self._commits[-1].receipt_sha256 if self._commits else ZERO_SHA256
+
     def state_document(self) -> dict[str, Any]:
         with self._lock:
             body = {
@@ -424,7 +442,7 @@ class EffectCommitBroker:
                 "contained": self._contained,
                 "authorization_count": len(self._authorizations),
                 "commit_count": len(self._commits),
-                "authority": AUTHORITY,
+                "authority": dict(AUTHORITY),
             }
             return {**body, "state_sha256": canonical_sha256(body)}
 
@@ -472,33 +490,50 @@ class EffectCommitBroker:
                 # can never be retried with the same authority token.
                 lease.consumed = True
                 try:
-                    observation = executor(lease.operation)
+                    # The trusted callback receives its own scope document; it
+                    # cannot mutate the operation retained as lease evidence.
+                    callback_operation = replace(lease.operation, scope=lease.operation.normalized_scope())
+                    observation = executor(callback_operation)
                     if not isinstance(observation, ExecutionObservation):
                         raise EffectCommitError("executor_observation_invalid")
                     observation.validate()
                 except Exception as exc:
+                    try:
+                        self._append_commit(
+                            lease=lease,
+                            world=world,
+                            session=session,
+                            committed_at_unix=now,
+                            outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
+                            result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
+                            reasons=("lease_consumed", "effect_outcome_unknown", "reconciliation_required")
+                            if isinstance(exc, ExecutionOutcomeUnknown)
+                            else ("lease_consumed", "effect_callback_failed"),
+                        )
+                    except Exception:
+                        if isinstance(exc, ExecutionOutcomeUnknown):
+                            raise exc from EffectCommitError("effect_commit_evidence_unavailable")
+                        raise
+                    if isinstance(exc, (EffectCommitError, ExecutionOutcomeUnknown)):
+                        raise
+                    raise EffectCommitError("effect_callback_failed") from exc
+
+                try:
                     self._append_commit(
                         lease=lease,
                         world=world,
                         session=session,
                         committed_at_unix=now,
-                        outcome="FAILED",
-                        result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
-                        reasons=("lease_consumed", "effect_callback_failed"),
+                        outcome="SUCCEEDED",
+                        result_sha256=observation.result_sha256,
+                        reasons=("runtime_world_rechecked", "execution_session_rechecked", "source_capability_active", "lease_consumed", "effect_committed_under_fence"),
                     )
-                    if isinstance(exc, EffectCommitError):
-                        raise
-                    raise EffectCommitError("effect_callback_failed") from exc
-
-                self._append_commit(
-                    lease=lease,
-                    world=world,
-                    session=session,
-                    committed_at_unix=now,
-                    outcome="SUCCEEDED",
-                    result_sha256=observation.result_sha256,
-                    reasons=("runtime_world_rechecked", "execution_session_rechecked", "source_capability_active", "lease_consumed", "effect_committed_under_fence"),
-                )
+                except Exception:
+                    # The callback has already returned a validated success. A
+                    # receipt failure cannot erase its result or restore authority.
+                    raise EffectCommitEvidenceError(
+                        result_sha256=observation.result_sha256,
+                    ) from EffectCommitError("effect_commit_evidence_unavailable")
                 return observation
 
     def _append_commit(
@@ -627,9 +662,13 @@ class EpochBoundEffectRuntimeMediator(RuntimeMediator):
                 operation=operation,
                 capability_receipt_sha=capability["receipt_sha256"],
                 admission="ALLOW",
-                outcome="FAILED",
-                result_sha=canonical_sha256({"error_type": type(exc).__name__}),
-                reasons=("effect_commit_failed",),
+                outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
+                result_sha=exc.result_sha256 if isinstance(exc, EffectCommitEvidenceError)
+                else canonical_sha256({"error_type": type(exc).__name__}),
+                reasons=("effect_succeeded", exc.evidence_code, "reconciliation_required")
+                if isinstance(exc, EffectCommitEvidenceError)
+                else ("effect_outcome_unknown", "reconciliation_required")
+                if isinstance(exc, ExecutionOutcomeUnknown) else ("effect_commit_failed",),
                 capability_id=capability.get("capability_id"),
                 scope_sha=scope_sha,
             )
@@ -695,7 +734,7 @@ def _sha(value: Any, name: str) -> str:
 
 __all__ = [
     "AUTHORITY", "COMMIT_SCHEMA", "EffectCommitAuthorizationReceipt", "EffectCommitBroker",
-    "EffectCommitError", "EffectCommitReceipt", "EpochBoundEffectRuntimeMediator",
+    "EffectCommitError", "EffectCommitEvidenceError", "EffectCommitReceipt", "EpochBoundEffectRuntimeMediator",
     "ExecutionSessionProvider", "FencedBoundRuntimeConfigBroker", "LEASE_SCHEMA",
     "MAX_LEASE_TTL_SECONDS", "RuntimeCommitFence", "RuntimeWorldProvider", "SESSION_SCHEMA",
     "TrustedExecutionSession", "TrustedRuntimeWorld", "build_session_document",

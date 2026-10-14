@@ -6,6 +6,7 @@ It never executes the action itself.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from contextlib import contextmanager
 from functools import wraps
@@ -82,7 +83,7 @@ class CapabilityDecisionReceipt:
             "capability_type": self.capability_type,
             "policy_sha256": self.policy_sha256,
             "action_sha256": self.action_sha256,
-            "requested_scope": dict(self.requested_scope),
+            "requested_scope": deepcopy(dict(self.requested_scope)),
             "decision": self.decision,
             "reason_codes": list(self.reason_codes),
             "at_unix": self.at_unix,
@@ -90,7 +91,7 @@ class CapabilityDecisionReceipt:
             "use_count_after": self.use_count_after,
             "causal_event_sha256": self.causal_event_sha256,
             "broker_head_sha256": self.broker_head_sha256,
-            "authority": BROKER_AUTHORITY,
+            "authority": dict(BROKER_AUTHORITY),
         }
 
     def as_document(self) -> dict[str, Any]:
@@ -265,12 +266,12 @@ class CapabilityBroker:
             "event_count": len(self._events),
             "receipt_count": len(self._receipts),
             "capabilities": caps,
-            "authority": BROKER_AUTHORITY,
+            "authority": dict(BROKER_AUTHORITY),
         }
         return {**body, "state_sha256": canonical_sha256(body)}
 
     def events(self) -> tuple[dict[str, Any], ...]:
-        return tuple(event.as_document() for event in self._events)
+        return tuple(deepcopy(event.as_document()) for event in self._events)
 
     def receipts(self) -> tuple[dict[str, Any], ...]:
         return tuple(receipt.as_document() for receipt in self._receipts)
@@ -347,7 +348,7 @@ class CapabilityBroker:
         base = CapabilityDecisionReceipt(
             decision_id=f"broker-decision:{len(self._receipts)+1}", capability_id=capability_id,
             subject_id=subject_id, capability_type=capability_type, policy_sha256=policy_sha,
-            action_sha256=action_sha, requested_scope=dict(scope), decision=decision,
+            action_sha256=action_sha, requested_scope=deepcopy(dict(scope)), decision=decision,
             reason_codes=tuple(sorted(set(reasons))), at_unix=at_unix,
             use_count_before=before, use_count_after=after,
             causal_event_sha256=event.event_sha256, broker_head_sha256=self._head,

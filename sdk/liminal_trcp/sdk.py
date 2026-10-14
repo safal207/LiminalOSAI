@@ -280,7 +280,7 @@ def _string_or_string_list(value: Any, name: str) -> str | list[str]:
     raise WorkloadNormalizationError(f"{name} must be a string or non-empty string list")
 
 
-def normalize_workload(
+def _workload_fields(
     *,
     consumer_type: str,
     requested_operation: str | list[str] | tuple[str, ...],
@@ -288,12 +288,7 @@ def normalize_workload(
     input_data: Mapping[str, Any],
     result: Any,
 ) -> dict[str, Any]:
-    """Build a strict ``generic-workload-evidence-v0.1`` artifact.
-
-    The six fields returned here are the exact workload hash closure.  Extra
-    fields are intentionally rejected when an adapter returns its artifact,
-    so no unbound metadata can look as if it were covered by the receipt.
-    """
+    """Validate field shapes; the caller owns the JSON snapshot boundary."""
     normalized_consumer_type = _consumer_type(consumer_type)
     if not isinstance(input_data, Mapping):
         raise WorkloadNormalizationError("input_data must be a mapping")
@@ -304,9 +299,31 @@ def normalize_workload(
             requested_operation, "requested_operation"
         ),
         "actor": _string_or_string_list(actor, "actor"),
-        "input": _json_copy(dict(input_data), "input_data"),
-        "result": _json_copy(result, "result"),
+        "input": input_data,
+        "result": result,
     }
+    return body
+
+
+def normalize_workload(
+    *,
+    consumer_type: str,
+    requested_operation: str | list[str] | tuple[str, ...],
+    actor: str | list[str] | tuple[str, ...],
+    input_data: Mapping[str, Any],
+    result: Any,
+) -> dict[str, Any]:
+    """Build a detached ``generic-workload-evidence-v0.1`` artifact.
+
+    These six fields form the exact workload hash closure. Adapter artifacts
+    reject extra fields so unbound metadata cannot look receipt-covered.
+    """
+    body = _workload_fields(
+        consumer_type=consumer_type, requested_operation=requested_operation,
+        actor=actor, input_data=input_data, result=result,
+    )
+    body["input"] = _json_copy(dict(input_data), "input_data")
+    body["result"] = _json_copy(result, "result")
     return body
 
 
@@ -344,8 +361,9 @@ def _validated_normalized_workload(
         raise AdapterContractError(
             "normalized workload consumer_type does not match adapter.consumer_type"
         )
-    # Rebuild through the constructor so all field validation stays centralized.
-    return normalize_workload(
+    # The whole artifact is already a bounded, detached JSON snapshot. Reuse
+    # shared field validation without serializing its input/result a second time.
+    return _workload_fields(
         consumer_type=normalized_consumer_type,
         requested_operation=copied["requested_operation"],
         actor=copied["actor"],

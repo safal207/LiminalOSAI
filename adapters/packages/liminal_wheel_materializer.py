@@ -373,13 +373,30 @@ class WheelMaterializer:
         expected_distribution_name: str,
         expected_version: str,
     ) -> WheelAudit:
+        return self._audit_snapshot(
+            wheel_bytes=self._read_regular_file(wheel_path, maximum=MAX_TOTAL_BYTES),
+            wheel_filename=wheel_filename,
+            expected_artifact_sha256=expected_artifact_sha256,
+            expected_distribution_name=expected_distribution_name,
+            expected_version=expected_version,
+        )
+
+    def _audit_snapshot(
+        self,
+        *,
+        wheel_bytes: bytes,
+        wheel_filename: str,
+        expected_artifact_sha256: str,
+        expected_distribution_name: str,
+        expected_version: str,
+    ) -> WheelAudit:
+        """Validate the exact immutable bytes that a caller will materialize."""
         artifact_sha = _sha(expected_artifact_sha256, "artifact_sha256")
         distribution = normalize_distribution_name(expected_distribution_name)
         version = normalize_version(expected_version)
         filename_distribution, filename_version = _wheel_coordinate_from_filename(wheel_filename)
         if filename_distribution != distribution or filename_version != version:
             raise WheelMaterializationError("wheel_filename_coordinate_mismatch")
-        wheel_bytes = self._read_regular_file(wheel_path, maximum=MAX_TOTAL_BYTES)
         if hashlib.sha256(wheel_bytes).hexdigest() != artifact_sha:
             raise WheelMaterializationError("artifact_digest_mismatch")
 
@@ -494,8 +511,11 @@ class WheelMaterializer:
         expected_distribution_name: str,
         expected_version: str,
     ) -> dict[str, Any]:
-        audit = self.audit(
-            wheel_path=wheel_path,
+        # A read-only container mount does not freeze the host's staged file.
+        # Read once so host replacement cannot separate audited and used bytes.
+        wheel_bytes = self._read_regular_file(wheel_path, maximum=MAX_TOTAL_BYTES)
+        audit = self._audit_snapshot(
+            wheel_bytes=wheel_bytes,
             wheel_filename=wheel_filename,
             expected_artifact_sha256=expected_artifact_sha256,
             expected_distribution_name=expected_distribution_name,
@@ -506,7 +526,6 @@ class WheelMaterializer:
             if os.listdir(target_fd):
                 raise WheelMaterializationError("target_dir_must_be_empty")
             manifest: list[dict[str, Any]] = []
-            wheel_bytes = self._read_regular_file(wheel_path, maximum=MAX_TOTAL_BYTES)
             with zipfile.ZipFile(io.BytesIO(wheel_bytes), "r") as archive:
                 for info in archive.infolist():
                     kind = _zip_entry_kind(info)

@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -21,6 +22,8 @@ typedef struct {
     float allowance_pulse;
     VNode *nodes;
     int node_count;
+    int node_capacity;
+    float *workspace;
     unsigned long tick;
     int trace_enabled;
     FILE *trace_stream;
@@ -162,7 +165,10 @@ vse_finalize(void)
         free(g_vse_ctx.nodes);
         g_vse_ctx.nodes = NULL;
     }
+    free(g_vse_ctx.workspace);
+    g_vse_ctx.workspace = NULL;
     g_vse_ctx.node_count = 0;
+    g_vse_ctx.node_capacity = 0;
     g_vse_ctx.enabled = 0;
     g_vse_ctx.cfg.intent = 0.0f;
     g_vse_ctx.cfg.importance = 0.0f;
@@ -179,18 +185,30 @@ vse_finalize(void)
 void
 vse_set_graph(const VNode *nodes, int n)
 {
-    if (g_vse_ctx.nodes) {
-        free(g_vse_ctx.nodes);
-        g_vse_ctx.nodes = NULL;
-        g_vse_ctx.node_count = 0;
-    }
+    g_vse_ctx.node_count = 0;
     if (!nodes || n <= 0) {
         return;
     }
-    VNode *copy = (VNode *)malloc((size_t)n * sizeof(VNode));
-    if (!copy) {
-        return;
+    if (n > g_vse_ctx.node_capacity) {
+        size_t count = (size_t)n;
+        if (count > SIZE_MAX / sizeof(VNode) ||
+            count > SIZE_MAX / (3U * sizeof(float))) {
+            return;
+        }
+        VNode *new_nodes = (VNode *)malloc(count * sizeof(VNode));
+        float *new_workspace = (float *)malloc(count * 3U * sizeof(float));
+        if (!new_nodes || !new_workspace) {
+            free(new_nodes);
+            free(new_workspace);
+            return;
+        }
+        free(g_vse_ctx.nodes);
+        free(g_vse_ctx.workspace);
+        g_vse_ctx.nodes = new_nodes;
+        g_vse_ctx.workspace = new_workspace;
+        g_vse_ctx.node_capacity = n;
     }
+    VNode *copy = g_vse_ctx.nodes;
     for (int i = 0; i < n; ++i) {
         copy[i].p = clamp_unit(sanitize_value(nodes[i].p, 0.0f));
         copy[i].value = sanitize_value(nodes[i].value, 0.0f);
@@ -341,15 +359,9 @@ vse_pick(VSEState *st)
     temp = clamp_range(temp, 0.2f, 1.5f);
 
     int n = g_vse_ctx.node_count;
-    float *scaled = (float *)malloc((size_t)n * sizeof(float));
-    float *weights = (float *)malloc((size_t)n * sizeof(float));
-    float *base_scores = (float *)malloc((size_t)n * sizeof(float));
-    if (!scaled || !weights || !base_scores) {
-        free(scaled);
-        free(weights);
-        free(base_scores);
-        return -1;
-    }
+    float *scaled = g_vse_ctx.workspace;
+    float *weights = scaled + g_vse_ctx.node_capacity;
+    float *base_scores = weights + g_vse_ctx.node_capacity;
 
     float max_scaled = -INFINITY;
     for (int i = 0; i < n; ++i) {
@@ -411,10 +423,6 @@ vse_pick(VSEState *st)
                        effective_allowance);
     }
     ++g_vse_ctx.tick;
-
-    free(scaled);
-    free(weights);
-    free(base_scores);
 
     return choice;
 }

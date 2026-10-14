@@ -228,21 +228,37 @@ class NetworkGateway:
             raise ControlError("NETWORK_GATEWAY_AUTHORITY_BINDING_MISMATCH")
         return validate_id(result.get("reservation_id"), "reservation_id")
 
+    def _bind_endpoint_receipt(self, receipt, action, authorization, reservation_id):
+        return bind_receipt(receipt, self.endpoint_client.pin(), action, authorization, reservation_id)
+
+    def _has_terminal_receipt(self, result):
+        return result.get("status") == "CONSUMED" and result.get("outcome") == "COMMITTED"
+
+    def _terminal_outcome(self, receipt):
+        return "COMMITTED"
+
+    def _terminal_status(self, receipt):
+        return "COMMITTED"
+
+    def _observation_count_valid(self, observation):
+        return type(observation.get("effect_count")) is int and observation["effect_count"] == 1
+
     def _settle(self, action: dict[str, Any], authorization: dict[str, Any], reservation_id: str,
                 receipt: Any, *, dispatch_finished: bool) -> dict[str, Any]:
-        receipt = bind_receipt(receipt, self.endpoint_client.pin(), action, authorization, reservation_id)
-        self._state(action["action_id"], "COMMITTED_PROOF", reservation_id, receipt)
+        receipt = self._bind_endpoint_receipt(receipt, action, authorization, reservation_id)
+        terminal = self._terminal_status(receipt)
+        self._state(action["action_id"], terminal + "_PROOF", reservation_id, receipt)
         try:
             result = self._call("authority", "finish", reservation_id, receipt)
             self._bind_authority_result(result, action)
-            if (result.get("status") != "SETTLED" or result.get("outcome") != "COMMITTED"
+            if (result.get("status") != "SETTLED" or result.get("outcome") != self._terminal_outcome(receipt)
                     or result.get("receipt") != receipt):
                 raise ControlError("NETWORK_GATEWAY_SETTLEMENT_BINDING_MISMATCH")
         except ControlError as exc:
             return self._result(action["action_id"], "UNKNOWN", str(exc), reservation_id, receipt,
                 dispatch_finished=dispatch_finished, settlement_status="UNKNOWN")
-        self._state(action["action_id"], "COMMITTED", reservation_id, receipt)
-        return self._result(action["action_id"], "COMMITTED", "ENDPOINT_COMMITTED_AND_SETTLED", reservation_id,
+        self._state(action["action_id"], terminal, reservation_id, receipt)
+        return self._result(action["action_id"], terminal, "ENDPOINT_" + terminal + "_AND_SETTLED", reservation_id,
             receipt, dispatch_finished=dispatch_finished, settlement_status="SETTLED")
 
     def _before_endpoint_commit(self, action: dict[str, Any], authorization: dict[str, Any],
@@ -274,10 +290,11 @@ class NetworkGateway:
                     return self._result(action["action_id"], "DENIED", result.get("reason", "AUTHORITY_DENIED"), result.get("reservation_id"))
                 reservation_id = self._bind_authority_result(result, action)
                 if result.get("status") != "PERMITTED":
-                    if result.get("outcome") == "COMMITTED" and result.get("status") == "CONSUMED":
-                        receipt = bind_receipt(result.get("receipt"), self.endpoint_client.pin(), action, authorization, reservation_id)
-                        self._state(action["action_id"], "COMMITTED", reservation_id, receipt)
-                        return self._result(action["action_id"], "COMMITTED", "AUTHORITY_TERMINAL_OBSERVED", reservation_id,
+                    if self._has_terminal_receipt(result):
+                        receipt = self._bind_endpoint_receipt(result.get("receipt"), action, authorization, reservation_id)
+                        terminal = self._terminal_status(receipt)
+                        self._state(action["action_id"], terminal, reservation_id, receipt)
+                        return self._result(action["action_id"], terminal, "AUTHORITY_TERMINAL_OBSERVED", reservation_id,
                             receipt, settlement_status="SETTLED")
                     self._state(action["action_id"], "UNKNOWN", reservation_id)
                     return self._result(action["action_id"], "UNKNOWN", "NETWORK_NO_NEW_PERMIT", reservation_id,
@@ -295,8 +312,8 @@ class NetworkGateway:
                     dispatch_finished = True
                 if (set(observation) != {"status", "action_id", "reservation_id", "effect_count", "receipt"}
                         or observation.get("status") != "OBSERVED" or observation.get("action_id") != action["action_id"]
-                        or observation.get("reservation_id") != reservation_id or type(observation.get("effect_count")) is not int
-                        or observation.get("effect_count") != 1):
+                        or observation.get("reservation_id") != reservation_id
+                        or not self._observation_count_valid(observation)):
                     raise ControlError("NETWORK_GATEWAY_ENDPOINT_OBSERVATION_INVALID")
                 return self._settle(action, authorization, reservation_id, observation.get("receipt"), dispatch_finished=True)
             except ControlError as exc:
@@ -325,10 +342,11 @@ class NetworkGateway:
                 if external.get("reason") == "NOT_OBSERVED" and external.get("reservation_id") is None:
                     return self._result(action_id, "UNKNOWN", "NETWORK_NOT_OBSERVED", settlement_status="UNKNOWN")
                 reservation_id = self._bind_authority_result(external, action)
-                if external.get("outcome") == "COMMITTED" and external.get("status") == "CONSUMED":
-                    receipt = bind_receipt(external.get("receipt"), self.endpoint_client.pin(), action, authorization, reservation_id)
-                    self._state(action_id, "COMMITTED", reservation_id, receipt)
-                    return self._result(action_id, "COMMITTED", "AUTHORITY_TERMINAL_OBSERVED", reservation_id,
+                if self._has_terminal_receipt(external):
+                    receipt = self._bind_endpoint_receipt(external.get("receipt"), action, authorization, reservation_id)
+                    terminal = self._terminal_status(receipt)
+                    self._state(action_id, terminal, reservation_id, receipt)
+                    return self._result(action_id, terminal, "AUTHORITY_TERMINAL_OBSERVED", reservation_id,
                         receipt, settlement_status="SETTLED")
                 if external.get("outcome") == "DENIED":
                     return self._result(action_id, "DENIED", external.get("reason", "AUTHORITY_DENIED"), reservation_id)
@@ -338,7 +356,7 @@ class NetworkGateway:
                 if (set(observation) != {"status", "action_id", "reservation_id", "effect_count", "receipt"}
                         or observation.get("status") != "OBSERVED" or observation.get("action_id") != action_id
                         or observation.get("reservation_id") != reservation_id
-                        or type(observation.get("effect_count")) is not int or observation.get("effect_count") != 1):
+                        or not self._observation_count_valid(observation)):
                     return self._result(action_id, "UNKNOWN", "NETWORK_ENDPOINT_OUTCOME_UNKNOWN", reservation_id,
                         settlement_status="UNKNOWN")
                 return self._settle(action, authorization, reservation_id, observation.get("receipt"), dispatch_finished=False)

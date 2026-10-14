@@ -10,6 +10,7 @@ on:
       - "docs/CHATGPT_GITHUB_TRANSACTION_POLICY.md"
       - ".github/workflows/github-transaction-policy-ci.yml"
       - "Makefile"
+      - 'scripts/check_forbidden.py'
   workflow_dispatch:
 
 permissions:
@@ -134,7 +135,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ! grep -F "safe governed fixture" reports/github-policy/self-check/approval-ledger.json
+          python3 scripts/check_forbidden.py -- -F "safe governed fixture" reports/github-policy/self-check/approval-ledger.json
 
       - name: Verify policy approval does not replace write authorization
         shell: bash

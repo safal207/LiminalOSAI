@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping
 from sdk.liminal_effect_commit import (
     EffectCommitBroker,
     EffectCommitError,
+    EffectCommitEvidenceError,
     RuntimeCommitFence,
     ZERO_SHA256,
     verify_authorization_receipt as verify_inner_authorization_receipt,
@@ -26,6 +27,7 @@ from sdk.liminal_objective_integrity import (
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
 from sdk.liminal_runtime_mediation import (
     ExecutionObservation,
+    ExecutionOutcomeUnknown,
     OPERATION_TO_CAPABILITY,
     RuntimeMediator,
     RuntimeOperation,
@@ -59,6 +61,17 @@ class ObjectiveEffectCommitError(ValueError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+class ObjectiveEffectEvidenceError(ObjectiveEffectCommitError, ExecutionOutcomeUnknown):
+    """A validated effect succeeded, but its objective commit evidence is incomplete."""
+
+    def __init__(self, *, result_sha256: str, evidence_code: str) -> None:
+        if evidence_code not in {"epoch_commit_receipt_unavailable", "objective_commit_receipt_failed"}:
+            raise ObjectiveEffectCommitError("invalid_effect_evidence_code")
+        super().__init__(f"{evidence_code}_after_effect")
+        self.evidence_code = evidence_code
+        self.result_sha256 = _sha(result_sha256, "effect_result_sha256")
 
 
 def _sha(value: Any, name: str, *, allow_zero: bool = True) -> str:
@@ -151,7 +164,7 @@ class ObjectiveEffectAuthorizationReceipt:
             "inner_authorization_receipt_sha256": self.inner_authorization_receipt_sha256,
             "issued_at_unix": self.issued_at_unix,
             "expires_at_unix": self.expires_at_unix,
-            "authority": AUTHORITY,
+            "authority": dict(AUTHORITY),
         }
 
     def as_document(self) -> dict[str, Any]:
@@ -191,7 +204,7 @@ class ObjectiveEffectCommitReceipt:
             "effect_outcome": self.effect_outcome,
             "result_sha256": self.result_sha256,
             "reason_codes": list(self.reason_codes),
-            "authority": AUTHORITY,
+            "authority": dict(AUTHORITY),
         }
 
     def as_document(self) -> dict[str, Any]:
@@ -339,7 +352,7 @@ class ObjectiveBoundEffectCommitBroker:
             # Burn the outer objective lease before entering the inner effect
             # callback. Even callback failure cannot restore this authority.
             lease.consumed = True
-            before_commits = len(self.delegate.commit_receipts())
+            before_commits, _ = self.delegate.commit_cursor()
             try:
                 observation = self.delegate.consume_for_trusted_adapter(
                     lease.inner_lease_id,
@@ -347,37 +360,54 @@ class ObjectiveBoundEffectCommitBroker:
                     executor=executor,
                 )
             except Exception as exc:
+                try:
+                    inner_sha = self._latest_inner_commit(before_commits)
+                    self._append_commit(
+                        lease=lease,
+                        state=state,
+                        committed_at_unix=now,
+                        outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
+                        result_sha256=exc.result_sha256 if isinstance(exc, EffectCommitEvidenceError)
+                        else canonical_sha256({"error_type": type(exc).__name__}),
+                        inner_commit_sha256=inner_sha,
+                        reasons=("outer_lease_consumed", "effect_succeeded", exc.evidence_code, "reconciliation_required")
+                        if isinstance(exc, EffectCommitEvidenceError)
+                        else ("outer_lease_consumed", "effect_outcome_unknown", "reconciliation_required")
+                        if isinstance(exc, ExecutionOutcomeUnknown)
+                        else ("outer_lease_consumed", "inner_effect_commit_failed"),
+                    )
+                except Exception:
+                    if isinstance(exc, ExecutionOutcomeUnknown):
+                        raise exc from ObjectiveEffectCommitError("effect_commit_evidence_unavailable")
+                    raise
+                if isinstance(exc, (ObjectiveEffectCommitError, ExecutionOutcomeUnknown)):
+                    raise
+                raise ObjectiveEffectCommitError("inner_effect_commit_failed") from exc
+
+            evidence_code = "epoch_commit_receipt_unavailable"
+            try:
                 inner_sha = self._latest_inner_commit(before_commits)
+                evidence_code = "objective_commit_receipt_failed"
                 self._append_commit(
                     lease=lease,
                     state=state,
                     committed_at_unix=now,
-                    outcome="FAILED",
-                    result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
+                    outcome="SUCCEEDED",
+                    result_sha256=observation.result_sha256,
                     inner_commit_sha256=inner_sha,
-                    reasons=("outer_lease_consumed", "inner_effect_commit_failed"),
+                    reasons=(
+                        "objective_policy_rechecked",
+                        "objective_head_rechecked",
+                        "objective_decision_floor_allow",
+                        "outer_lease_consumed",
+                        "inner_epoch_effect_committed",
+                        "effect_committed_under_shared_fence",
+                    ),
                 )
-                if isinstance(exc, ObjectiveEffectCommitError):
-                    raise
-                raise ObjectiveEffectCommitError("inner_effect_commit_failed") from exc
-
-            inner_sha = self._latest_inner_commit(before_commits)
-            self._append_commit(
-                lease=lease,
-                state=state,
-                committed_at_unix=now,
-                outcome="SUCCEEDED",
-                result_sha256=observation.result_sha256,
-                inner_commit_sha256=inner_sha,
-                reasons=(
-                    "objective_policy_rechecked",
-                    "objective_head_rechecked",
-                    "objective_decision_floor_allow",
-                    "outer_lease_consumed",
-                    "inner_epoch_effect_committed",
-                    "effect_committed_under_shared_fence",
-                ),
-            )
+            except Exception:
+                raise ObjectiveEffectEvidenceError(
+                    result_sha256=observation.result_sha256, evidence_code=evidence_code,
+                ) from ObjectiveEffectCommitError("effect_commit_evidence_unavailable")
             return observation
 
     def commit_authorized_effect(
@@ -406,6 +436,11 @@ class ObjectiveBoundEffectCommitBroker:
     def commit_receipts(self) -> tuple[dict[str, Any], ...]:
         return tuple(item.as_document() for item in self._commits)
 
+    def commit_cursor(self) -> tuple[int, str]:
+        """Read count and latest digest under the shared commit fence."""
+        with self.commit_fence.hold():
+            return len(self._commits), self._commits[-1].receipt_sha256 if self._commits else ZERO_SHA256
+
     def state_document(self) -> dict[str, Any]:
         with self.commit_fence.hold():
             objective_state = self.guard.state_document()
@@ -419,7 +454,7 @@ class ObjectiveBoundEffectCommitBroker:
                 "consumed_count": sum(1 for item in self._leases.values() if item.consumed),
                 "authorization_count": len(self._authorizations),
                 "commit_count": len(self._commits),
-                "authority": AUTHORITY,
+                "authority": dict(AUTHORITY),
             }
             return {**body, "state_sha256": canonical_sha256(body)}
 
@@ -500,10 +535,10 @@ class ObjectiveBoundEffectCommitBroker:
         raise ObjectiveEffectCommitError(reason)
 
     def _latest_inner_commit(self, before_count: int) -> str:
-        commits = self.delegate.commit_receipts()
-        if len(commits) <= before_count:
+        count, digest = self.delegate.commit_cursor()
+        if count <= before_count:
             return ZERO_SHA256
-        return _sha(commits[-1]["receipt_sha256"], "inner_commit_receipt_sha256")
+        return _sha(digest, "inner_commit_receipt_sha256")
 
     def _append_commit(
         self,
@@ -652,9 +687,13 @@ class ObjectiveBoundEffectRuntimeMediator(RuntimeMediator):
                 operation=operation,
                 capability_receipt_sha=capability["receipt_sha256"],
                 admission="ALLOW",
-                outcome="FAILED",
-                result_sha=canonical_sha256({"error_type": type(exc).__name__}),
-                reasons=("objective_bound_effect_commit_failed",),
+                outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
+                result_sha=exc.result_sha256 if isinstance(exc, (EffectCommitEvidenceError, ObjectiveEffectEvidenceError))
+                else canonical_sha256({"error_type": type(exc).__name__}),
+                reasons=("effect_succeeded", exc.evidence_code, "reconciliation_required")
+                if isinstance(exc, (EffectCommitEvidenceError, ObjectiveEffectEvidenceError))
+                else ("effect_outcome_unknown", "reconciliation_required")
+                if isinstance(exc, ExecutionOutcomeUnknown) else ("objective_bound_effect_commit_failed",),
                 capability_id=capability.get("capability_id"),
                 scope_sha=scope_sha,
             )
@@ -693,7 +732,7 @@ def verify_commit_receipt(document: Mapping[str, Any]) -> dict[str, Any]:
     digest = raw.pop("receipt_sha256", None)
     if raw.get("schema") != COMMIT_SCHEMA or raw.get("authority") != AUTHORITY:
         raise ObjectiveEffectCommitError("commit_receipt_schema_mismatch")
-    if raw.get("effect_outcome") not in {"SUCCEEDED", "FAILED", "NOT_EXECUTED"}:
+    if raw.get("effect_outcome") not in {"SUCCEEDED", "FAILED", "UNKNOWN", "NOT_EXECUTED"}:
         raise ObjectiveEffectCommitError("commit_receipt_outcome_invalid")
     if digest != canonical_sha256(raw):
         raise ObjectiveEffectCommitError("commit_receipt_digest_mismatch")
@@ -709,6 +748,7 @@ __all__ = [
     "ObjectiveBoundEffectRuntimeMediator",
     "ObjectiveEffectAuthorizationReceipt",
     "ObjectiveEffectCommitError",
+    "ObjectiveEffectEvidenceError",
     "ObjectiveEffectCommitReceipt",
     "STATE_SCHEMA",
     "verify_authorization_receipt",

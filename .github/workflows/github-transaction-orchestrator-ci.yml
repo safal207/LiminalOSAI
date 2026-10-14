@@ -18,6 +18,7 @@ on:
       - tools/chatgpt_conversation_normalizer.py
       - tools/chatgpt_liminal_adapter.py
       - tests/test_chatgpt_github_transaction_orchestrator.py
+      - 'scripts/check_forbidden.py'
   workflow_dispatch:
 
 permissions:
@@ -174,7 +175,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ! grep -F 'safe fixture' \
+          python3 scripts/check_forbidden.py -- -F 'safe fixture' \
             reports/github-transaction/self-check/transaction-journal.json
           grep -F 'safe fixture' \
             reports/github-transaction/self-check/transaction-plan.json \
