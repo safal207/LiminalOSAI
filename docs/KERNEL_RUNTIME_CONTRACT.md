@@ -33,7 +33,9 @@ duplicate-field handling and clamping.
 
 Configuration lists longer than their 127-byte parser capacity and phase
 module names longer than 31 bytes fail instead of being truncated. Tuning
-integer ranges and `idx:` selectors must fit their actual destination types.
+integer ranges and seeds must fit `int`; `idx:` selectors and base-0 entangle
+contexts must fit `uint32_t`. Both runtime profiles retain `--allow=now` and
+its case variants alongside strictly validated numeric allowances.
 Phase degrees use bounded modulo normalization; very large finite inputs no
 longer enter a nonterminating subtraction loop. Malformed fields that previously
 fell back to defaults are now rejected with exit status `2`.

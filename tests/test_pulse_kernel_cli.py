@@ -169,6 +169,56 @@ class PulseKernelCliCharacterizationTests(unittest.TestCase):
             with self.subTest(argument=argument):
                 self.assert_rejected(self.run_kernel(argument), argument)
 
+    def test_every_recognized_scalar_rejects_numeric_suffix_before_initialization(self) -> None:
+        # Inventory of actual scalar branches, excluding the explicitly
+        # unavailable cm-snapshot option and separately tested composites.
+        options = (
+            "allow-align", "allow-hold", "allow", "amp-max", "amp-min", "ant2-gain",
+            "astro-mem", "astro-rate", "astro-tone", "council-threshold", "dream-threshold",
+            "empathy-gain", "entangle-ctx", "gate-bias", "gate-close", "gate-hyst", "gate-open",
+            "gate-refrac", "gate-warmup", "group-target", "kiss-alpha", "kiss-refrac", "kiss-warmup",
+            "limit", "mirror-soft", "phases", "qel-retro", "recognition-threshold", "resonance-gain",
+            "scan-interval", "target", "tempo-max", "tempo-min", "trs-alpha-max", "trs-alpha-min",
+            "trs-alpha", "trs-kd", "trs-ki", "trs-kp", "trs-target-delta", "trs-warmup", "vse-allow",
+            "vse-importance", "vse-intent", "vse-lambda-p", "vse-lambda-x", "vse-temp",
+        )
+        for option in options:
+            with self.subTest(option=option):
+                self.assert_composite_rejected(f"--{option}=2garbage")
+
+    def test_newly_shared_float_scalars_reject_empty_nonfinite_and_overflow(self) -> None:
+        for option in ("allow", "empathy-gain", "recognition-threshold"):
+            for value in ("", "nan", "inf", "-inf", "1e999", "1e-999", "nowjunk"):
+                with self.subTest(option=option, value=value):
+                    self.assert_composite_rejected(f"--{option}={value}")
+
+    def test_context_rejects_malformed_negative_and_uint32_overflow(self) -> None:
+        for value in ("", "nan", "inf", "1e999", "1.5", "-1", " -1", "0x10tail",
+                      "4294967296", "0x100000000", "040000000000", "18446744073709551616"):
+            with self.subTest(value=value):
+                self.assert_composite_rejected(f"--entangle-ctx={value}")
+
+    def test_named_allowance_and_representable_contexts_remain_valid(self) -> None:
+        baseline = self.assert_success(self.run_kernel("--vse"))
+        for value in ("now", "NOW", "nOw", "0.25", "-2"):
+            with self.subTest(value=value):
+                self.assertEqual(self.assert_success(self.run_kernel(f"--allow={value}")), baseline)
+        for value in ("0", "0x10", "4294967295", "0xffffffff", "037777777777", "+0xffffffff"):
+            with self.subTest(value=value):
+                self.assert_success(self.run_kernel(f"--entangle-ctx={value}"))
+
+    def test_hex_uint32_context_boundary_is_recorded_without_narrowing(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pulse-context-control-") as directory:
+            (Path(directory) / "logs").mkdir()
+            result = subprocess.run(
+                [str(BINARY), "--limit=1", "--qel", "--introspect", "--entangle-ctx=0xffffffff"],
+                cwd=directory, capture_output=True, text=True, check=False, timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = [json.loads(line) for line in (Path(directory) / "logs" / "qel_raw.jsonl").read_text().splitlines()]
+            self.assertTrue(rows)
+            self.assertTrue(all(row["ctx"] == 4294967295 for row in rows))
+
     def test_scan_interval_must_be_positive_u32(self) -> None:
         for argument in ("--scan-interval=0", "--scan-interval=4294967296"):
             with self.subTest(argument=argument):
