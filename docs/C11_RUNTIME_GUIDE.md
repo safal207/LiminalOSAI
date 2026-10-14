@@ -61,7 +61,12 @@ cannot retain a previous build profile.
 - **Symbiosis/empathic:** `--human-bridge[=off]`, `--human-trace`, `--human-source=keyboard|stdin|sine`, `--human-gain=<f>`, `--empathic`, `--empathic-trace`, `--empathy-gain=<f>`, `--emotion-source=audio|stdin`, `--memory`, `--memory-trace`, `--emotion-trace=<path>`, `--recognition-threshold=<0-1>`
 - **Other modules:** `--metabolic`, `--vse`, `--kiss`, `--trs`, `--astro`, `--qel`, `--strict-order`
 
-See [`core/pulse_kernel.c`](../core/pulse_kernel.c) and the runtime sources for option parsing and defaults.
+Option schemas, defaults and semantic parsing live in
+[`pulse_options.c`](../core/runtime/pulse_options.c) and
+[`substrate_options.c`](../core/runtime/substrate_options.c). The process entry
+guard validates arguments before initialization. See
+[C orchestrator boundaries](C_ORCHESTRATOR_BOUNDARIES.md) for state ownership,
+trace rendering and characterization.
 
 ## Diagnostics & reports
 
