@@ -103,7 +103,7 @@ check: $(TARGET) $(SUBSTRATE_TARGET)
 
 build/tests:
 ifeq ($(OS),Windows_NT)
-	@powershell -NoProfile -Command "$$ErrorActionPreference = 'Stop'; if (-not (Test-Path 'build/tests' -PathType Container)) { New-Item -ItemType Directory -Path 'build/tests' | Out-Null }"
+	@powershell -NoProfile -Command "Set-Variable -Name ErrorActionPreference -Value Stop; if (-not (Test-Path 'build/tests' -PathType Container)) { New-Item -ItemType Directory -Path 'build/tests' | Out-Null }"
 else
 	@mkdir -p $@
 endif
@@ -134,7 +134,7 @@ build/tests/test_vse: tests/test_vse.o core/vse.o | build/tests
 
 test-c: $(C_TEST_BINS)
 ifeq ($(OS),Windows_NT)
-	@powershell -NoProfile -Command "$$ErrorActionPreference = 'Stop'; foreach ($$testBinary in ('$(C_TEST_BINS)' -split ' ')) { & ('./' + $$testBinary); if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE } }"
+	@powershell -NoProfile -Command "Set-Variable -Name ErrorActionPreference -Value Stop; $(foreach c_test_binary,$(C_TEST_BINS),& './$(c_test_binary)'; if ((Get-Variable -Name LASTEXITCODE -ValueOnly) -ne 0) { exit (Get-Variable -Name LASTEXITCODE -ValueOnly) };)"
 else
 	@set -e; for test_binary in $(C_TEST_BINS); do "$$test_binary"; done
 endif
