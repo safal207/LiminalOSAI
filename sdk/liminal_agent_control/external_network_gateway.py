@@ -234,6 +234,10 @@ class NetworkGateway:
     def _has_terminal_receipt(self, result):
         return result.get("status") == "CONSUMED" and result.get("outcome") == "COMMITTED"
 
+    def _has_consumed_denial(self, result):
+        """Legacy profiles retain their frozen terminal-result handling."""
+        return False
+
     def _terminal_outcome(self, receipt):
         return "COMMITTED"
 
@@ -290,6 +294,10 @@ class NetworkGateway:
                     return self._result(action["action_id"], "DENIED", result.get("reason", "AUTHORITY_DENIED"), result.get("reservation_id"))
                 reservation_id = self._bind_authority_result(result, action)
                 if result.get("status") != "PERMITTED":
+                    if self._has_consumed_denial(result):
+                        self._state(action["action_id"], "DENIED", reservation_id)
+                        return self._result(action["action_id"], "DENIED",
+                            result.get("reason", "AUTHORITY_DENIED"), reservation_id)
                     if self._has_terminal_receipt(result):
                         receipt = self._bind_endpoint_receipt(result.get("receipt"), action, authorization, reservation_id)
                         terminal = self._terminal_status(receipt)

@@ -53,6 +53,12 @@ class ReceiverFencedEffectGateway(ClosedChannelEffectGateway):
         return (result.get("status") == "CONSUMED" and result.get("outcome") in ("COMMITTED", "DENIED")
                 and result.get("receipt") is not None)
 
+    def _has_consumed_denial(self, result):
+        # An authenticated, subject-bound pre-permit refusal is already known.
+        # It is not a receiver NO_EFFECT proof or a settled dispatched effect.
+        return (result.get("status") == "CONSUMED" and result.get("outcome") == "DENIED"
+                and result.get("receipt") is None)
+
     def _terminal_outcome(self, receipt):
         return "COMMITTED" if receipt["status"] == "COMMITTED" else "DENIED"
 
