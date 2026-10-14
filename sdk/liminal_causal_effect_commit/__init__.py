@@ -27,6 +27,7 @@ from sdk.liminal_objective_effect_commit import (
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
 from sdk.liminal_runtime_mediation import (
     ExecutionObservation,
+    ExecutionOutcomeUnknown,
     OPERATION_TO_CAPABILITY,
     PHASE3_KIND,
     RuntimeMediator,
@@ -514,10 +515,14 @@ class CausalBoundEffectCommitBroker:
                     head_after=state["trajectory_head_sha256"],
                     objective_commit_sha256=self._latest_objective_commit(before_commits),
                     committed_at_unix=now,
-                    outcome="FAILED",
+                    outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
                     result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
-                    reasons=("causal_lease_consumed", "objective_bound_effect_failed"),
+                    reasons=("causal_lease_consumed", "effect_outcome_unknown", "reconciliation_required")
+                    if isinstance(exc, ExecutionOutcomeUnknown)
+                    else ("causal_lease_consumed", "objective_bound_effect_failed"),
                 )
+                if isinstance(exc, ExecutionOutcomeUnknown):
+                    raise
                 raise CausalEffectCommitError("objective_bound_effect_failed") from exc
 
             try:
@@ -834,9 +839,10 @@ class CausalBoundEffectRuntimeMediator(RuntimeMediator):
                 operation=operation,
                 capability_receipt_sha=capability["receipt_sha256"],
                 admission="ALLOW",
-                outcome="FAILED",
+                outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
                 result_sha=canonical_sha256({"error_type": type(exc).__name__}),
-                reasons=("causal_bound_effect_commit_failed",),
+                reasons=("effect_outcome_unknown", "reconciliation_required")
+                if isinstance(exc, ExecutionOutcomeUnknown) else ("causal_bound_effect_commit_failed",),
                 capability_id=capability.get("capability_id"),
                 scope_sha=scope_sha,
             )
@@ -876,7 +882,7 @@ def verify_commit_receipt(document: Mapping[str, Any]) -> dict[str, Any]:
     digest = raw.pop("receipt_sha256", None)
     if raw.get("schema") != COMMIT_SCHEMA or raw.get("authority") != AUTHORITY:
         raise CausalEffectCommitError("commit_receipt_schema_mismatch")
-    if raw.get("effect_outcome") not in {"SUCCEEDED", "FAILED", "NOT_EXECUTED", "EFFECT_SUCCEEDED_EVIDENCE_FAILED"}:
+    if raw.get("effect_outcome") not in {"SUCCEEDED", "FAILED", "UNKNOWN", "NOT_EXECUTED", "EFFECT_SUCCEEDED_EVIDENCE_FAILED"}:
         raise CausalEffectCommitError("commit_receipt_outcome_invalid")
     if digest != canonical_sha256(raw):
         raise CausalEffectCommitError("commit_receipt_digest_mismatch")

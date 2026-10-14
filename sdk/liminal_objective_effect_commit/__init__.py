@@ -26,6 +26,7 @@ from sdk.liminal_objective_integrity import (
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
 from sdk.liminal_runtime_mediation import (
     ExecutionObservation,
+    ExecutionOutcomeUnknown,
     OPERATION_TO_CAPABILITY,
     RuntimeMediator,
     RuntimeOperation,
@@ -352,12 +353,14 @@ class ObjectiveBoundEffectCommitBroker:
                     lease=lease,
                     state=state,
                     committed_at_unix=now,
-                    outcome="FAILED",
+                    outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
                     result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
                     inner_commit_sha256=inner_sha,
-                    reasons=("outer_lease_consumed", "inner_effect_commit_failed"),
+                    reasons=("outer_lease_consumed", "effect_outcome_unknown", "reconciliation_required")
+                    if isinstance(exc, ExecutionOutcomeUnknown)
+                    else ("outer_lease_consumed", "inner_effect_commit_failed"),
                 )
-                if isinstance(exc, ObjectiveEffectCommitError):
+                if isinstance(exc, (ObjectiveEffectCommitError, ExecutionOutcomeUnknown)):
                     raise
                 raise ObjectiveEffectCommitError("inner_effect_commit_failed") from exc
 
@@ -657,9 +660,10 @@ class ObjectiveBoundEffectRuntimeMediator(RuntimeMediator):
                 operation=operation,
                 capability_receipt_sha=capability["receipt_sha256"],
                 admission="ALLOW",
-                outcome="FAILED",
+                outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
                 result_sha=canonical_sha256({"error_type": type(exc).__name__}),
-                reasons=("objective_bound_effect_commit_failed",),
+                reasons=("effect_outcome_unknown", "reconciliation_required")
+                if isinstance(exc, ExecutionOutcomeUnknown) else ("objective_bound_effect_commit_failed",),
                 capability_id=capability.get("capability_id"),
                 scope_sha=scope_sha,
             )
@@ -698,7 +702,7 @@ def verify_commit_receipt(document: Mapping[str, Any]) -> dict[str, Any]:
     digest = raw.pop("receipt_sha256", None)
     if raw.get("schema") != COMMIT_SCHEMA or raw.get("authority") != AUTHORITY:
         raise ObjectiveEffectCommitError("commit_receipt_schema_mismatch")
-    if raw.get("effect_outcome") not in {"SUCCEEDED", "FAILED", "NOT_EXECUTED"}:
+    if raw.get("effect_outcome") not in {"SUCCEEDED", "FAILED", "UNKNOWN", "NOT_EXECUTED"}:
         raise ObjectiveEffectCommitError("commit_receipt_outcome_invalid")
     if digest != canonical_sha256(raw):
         raise ObjectiveEffectCommitError("commit_receipt_digest_mismatch")

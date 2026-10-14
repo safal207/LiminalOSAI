@@ -26,6 +26,7 @@ from sdk.liminal_effect_commit import RuntimeCommitFence, ZERO_SHA256
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
 from sdk.liminal_runtime_mediation import (
     ExecutionObservation,
+    ExecutionOutcomeUnknown,
     OPERATION_TO_CAPABILITY,
     RuntimeMediator,
     RuntimeOperation,
@@ -772,7 +773,14 @@ class DurableGovernanceEffectBroker:
                 )
             except Exception as exc:
                 inner_sha = self._latest_inner_commit(before_inner)
-                current = self.store.read_state(root_id=self.root_id)
+                try:
+                    current = self.store.read_state(root_id=self.root_id)
+                except Exception as evidence_error:
+                    # Losing the diagnostic state read cannot turn an uncertain
+                    # host effect into a known failure or reactivate its lease.
+                    if isinstance(exc, ExecutionOutcomeUnknown):
+                        raise exc from evidence_error
+                    raise
                 self._append_commit(
                     lease=lease,
                     generation_after=current["generation"],
@@ -780,10 +788,13 @@ class DurableGovernanceEffectBroker:
                     causal_commit_receipt_sha256=inner_sha,
                     durable_state_after_sha256=current["state_sha256"],
                     committed_at_unix=now,
-                    outcome="EFFECT_FAILED_RESERVATION_STUCK",
+                    outcome="EFFECT_UNKNOWN_RESERVATION_STUCK" if isinstance(exc, ExecutionOutcomeUnknown)
+                    else "EFFECT_FAILED_RESERVATION_STUCK",
                     result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
                     reasons=("durable_reservation_retained", "inner_effect_failed_or_unknown"),
                 )
+                if isinstance(exc, ExecutionOutcomeUnknown):
+                    raise
                 raise DurableGovernanceError("inner_effect_failed_reservation_stuck") from exc
 
             inner_sha = self._latest_inner_commit(before_inner)
@@ -1065,9 +1076,10 @@ class DurableGovernanceRuntimeMediator(RuntimeMediator):
         except Exception as exc:
             return self._finish(
                 operation=operation, capability_receipt_sha=capability["receipt_sha256"],
-                admission="ALLOW", outcome="FAILED",
+                admission="ALLOW", outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
                 result_sha=canonical_sha256({"error_type": type(exc).__name__}),
-                reasons=("durable_governance_effect_commit_failed",),
+                reasons=("effect_outcome_unknown", "durable_reservation_retained", "reconciliation_required")
+                if isinstance(exc, ExecutionOutcomeUnknown) else ("durable_governance_effect_commit_failed",),
                 capability_id=capability.get("capability_id"), scope_sha=scope_sha,
             )
         return self._finish(
@@ -1117,6 +1129,7 @@ def verify_commit_receipt(document: Mapping[str, Any]) -> dict[str, Any]:
     allowed = {
         "SUCCEEDED",
         "EFFECT_FAILED_RESERVATION_STUCK",
+        "EFFECT_UNKNOWN_RESERVATION_STUCK",
         "EFFECT_SUCCEEDED_DURABLE_COMMIT_FAILED",
     }
     if raw.get("schema") != COMMIT_SCHEMA or raw.get("authority") != AUTHORITY:

@@ -105,6 +105,10 @@ class ExecutionObservation:
         _sha(self.result_sha256, "result_sha256")
 
 
+class ExecutionOutcomeUnknown(RuntimeError):
+    """Trusted executor cannot establish the terminal outcome; authority stays spent."""
+
+
 @dataclass(frozen=True)
 class RuntimeMediationReceipt:
     operation_id: str
@@ -204,6 +208,14 @@ class RuntimeMediator:
             if not isinstance(observation, ExecutionObservation):
                 raise MediationError("executor must return ExecutionObservation")
             observation.validate()
+        except ExecutionOutcomeUnknown as exc:
+            return self._finish(
+                operation=operation, capability_receipt_sha=capability["receipt_sha256"],
+                admission="ALLOW", outcome="UNKNOWN",
+                result_sha=canonical_sha256({"error_type": type(exc).__name__}),
+                reasons=("executor_outcome_unknown", "reconciliation_required"),
+                capability_id=capability.get("capability_id"), scope_sha=scope_sha,
+            )
         except Exception as exc:
             # Error messages are intentionally excluded because they may contain
             # command lines, paths, tokens or other host-sensitive material.
@@ -332,6 +344,6 @@ def _sha(value: str, name: str) -> str:
 
 
 __all__ = [
-    "AUTHORITY", "ExecutionObservation", "MediationError", "OPERATION_TO_CAPABILITY",
+    "AUTHORITY", "ExecutionObservation", "ExecutionOutcomeUnknown", "MediationError", "OPERATION_TO_CAPABILITY",
     "RuntimeMediationReceipt", "RuntimeMediator", "RuntimeOperation", "SCHEMA", "verify_receipt",
 ]
