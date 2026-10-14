@@ -30,6 +30,10 @@ def main() -> None:
     repo = args.repo.resolve()
     sys.path.insert(0, str(repo))
     from sdk.liminal_trcp import sdk
+    sdk_filename = getattr(sdk, "__file__", None)
+    if sdk_filename is None or not Path(sdk_filename).resolve().is_relative_to(repo):
+        parser.error("imported TRCP SDK is outside --repo; use a fresh process for the target checkout")
+    sdk_file = Path(sdk_filename).resolve()
 
     workload = sdk.normalize_workload(
         consumer_type="snapshot-benchmark", requested_operation=["inspect"],
@@ -65,7 +69,7 @@ def main() -> None:
         copy_calls = copies.call_count
     source = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
     dirty = bool(subprocess.check_output(["git", "-C", str(repo), "status", "--porcelain"], text=True))
-    print(json.dumps({"source": source, "dirty": dirty, "python": platform.python_version(), "platform": platform.platform(), "rows": args.rows, "samples": args.samples, "iterations": args.iterations, "json_copy_calls_per_validation": copy_calls, "results": results}, indent=2))
+    print(json.dumps({"source": source, "dirty": dirty, "sdk_file": str(sdk_file), "python": platform.python_version(), "platform": platform.platform(), "rows": args.rows, "samples": args.samples, "iterations": args.iterations, "json_copy_calls_per_validation": copy_calls, "results": results}, indent=2))
 
 
 if __name__ == "__main__":

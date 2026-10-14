@@ -13,6 +13,11 @@ repository validation also uses Git and the OpenSSL executable with Ed25519
 support. CI uses Python 3.12. The build produces the research binaries
 `build/pulse_kernel` and `build/liminal_core`.
 
+Complete validation is tested on Linux. The C allocation/flush probes require
+a GNU-compatible linker with `--wrap` support (GNU ld or ELF lld). Apple's native
+linker cannot link these probes; use a Linux environment for the complete suite.
+The probe requirements are separate from compiling the runtime binaries.
+
 ```bash
 make
 make check

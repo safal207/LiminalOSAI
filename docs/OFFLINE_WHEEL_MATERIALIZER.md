@@ -114,9 +114,12 @@ chain.
 
 The local regression suite replaces the staged wheel after audit and checks that
 only the approved snapshot is materialized. Fake-CLI subprocess tests cover the
-shared timeout, overflow and cleanup paths without a Docker daemon. Real-daemon
-validation of this refactor remains pending the matching offline-wheel CI run;
-the local tests establish adapter behavior rather than container isolation.
+shared timeout, overflow and cleanup paths without a Docker daemon. Separate
+real-daemon installer isolation probes and governed wheel materialization passed
+in [CI run 38481395883](https://github.com/safal207/LiminalOSAI/actions/runs/38481395883)
+for revision `5f4843a975244e4844c6b0c0f77c6b6e1a82635d`. That evidence applies to
+the recorded revision and probe scope; the local tests establish adapter behavior
+rather than container isolation, and later changes require their own verification.
 
 ## Explicit nonclaims
 

@@ -67,6 +67,51 @@ class ForbiddenContentScannerTests(unittest.TestCase):
 
 
 class StrictPythonValidationTests(unittest.TestCase):
+    def run_selected(self, selection: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(RUNNER), selection],
+            capture_output=True, text=True, check=False, timeout=10,
+            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
+        )
+
+    def assert_selected_module_passes(self, selection: str) -> None:
+        result = self.run_selected(selection)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        summary = json.loads(result.stdout)
+        self.assertEqual((summary["status"], summary["tests_run"]), ("PASS", 3))
+
+    def test_repository_relative_file_selections_normalize(self) -> None:
+        for selection in ("tests/test_isolated_execution_workspace_paths.py", "./tests/test_isolated_execution_workspace_paths.py"):
+            with self.subTest(selection=selection):
+                self.assert_selected_module_passes(selection)
+
+    def test_absolute_repository_file_selection_normalizes(self) -> None:
+        self.assert_selected_module_passes(str(ROOT / "tests" / "test_isolated_execution_workspace_paths.py"))
+
+    def test_windows_separators_normalize(self) -> None:
+        for selection in (
+            r".\tests\test_isolated_execution_workspace_paths.py",
+            str(ROOT / "tests" / "test_isolated_execution_workspace_paths.py").replace("/", "\\"),
+        ):
+            with self.subTest(selection=selection):
+                self.assert_selected_module_passes(selection)
+
+    def test_dotted_unittest_method_selection_is_preserved(self) -> None:
+        result = self.run_selected(
+            "tests.test_validation_infrastructure.StrictPythonValidationTests.test_real_assertion_passes_and_reports_count"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["tests_run"], 1)
+
+    def test_paths_outside_repository_fail_with_explicit_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            selections = (str(Path(directory) / "test_outside.py"), "../test_outside.py", r"C:\outside\test_outside.py")
+            for selection in selections:
+                with self.subTest(selection=selection):
+                    result = self.run_selected(selection)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("selected test path is outside the repository", result.stderr)
+
     def run_fixture(self, source: str | None) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
         with tempfile.TemporaryDirectory() as directory:
             if source is not None:

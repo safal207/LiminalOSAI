@@ -68,7 +68,7 @@ Wheel receipts and the isolation self-test capture stdout with a 64 KiB limit en
 
 Every run has a fresh host-assigned container name. Client exit is followed by an inspection of that exact name; a surviving container is forcibly removed and the run is rejected. Timeout, output overflow and execution errors also trigger exact-session removal and an absence check. Cleanup failures propagate instead of producing a successful containment claim.
 
-`tests/test_docker_adapter_lifecycle.py` uses local Python subprocesses as a fake Docker CLI to check ownership, bounded output and failure handling. These tests do not exercise a Docker daemon or establish container/kernel containment. Real-daemon validation of this refactor remains pending the matching CI run.
+`tests/test_docker_adapter_lifecycle.py` uses local Python subprocesses as a fake Docker CLI to check ownership, bounded output and failure handling. These tests do not exercise a Docker daemon or establish container/kernel containment. Separate real-daemon isolation probes and governed execution passed in [CI run 38481395912](https://github.com/safal207/LiminalOSAI/actions/runs/38481395912) for revision `5f4843a975244e4844c6b0c0f77c6b6e1a82635d`. That evidence applies to the recorded revision and probe scope; later changes require their own verification.
 
 ## Runtime configuration probes
 

@@ -32,6 +32,9 @@ jobs:
           echo "event-sha ${GITHUB_SHA}"
           echo "pull-request-head ${{ github.event.pull_request.head.sha }}"
 
+      - name: Record OpenSSL version
+        run: openssl version -a
+
       - name: Complete repository baseline
         run: make validate
 

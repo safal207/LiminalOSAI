@@ -125,6 +125,15 @@ environment cannot perform its process inspection; allocation-wrapper tests
 check cleanup for the changed C buffers. The CI sanitizer profile retains
 `detect_leaks=1`. Clang and real Docker validation require the remote CI jobs.
 
+CodeRabbit's review of `5f4843a975244e4844c6b0c0f77c6b6e1a82635d` reported two
+minor findings and four additional suggestions. Follow-up changes check that
+the imported benchmark SDK belongs to `--repo`, normalize selected test paths,
+record OpenSSL in the baseline gate, document Linux/linker requirements and
+manual approval-lock recovery, and pin successful Docker evidence in the
+profile guides. `make validate` then passed **1,005 Python tests** and the same
+eight C executables without skips. The recorded benchmark samples retain their
+original source fingerprints; the measured TRCP implementation is unchanged.
+
 Local TRCP timings (Python 3.12.14, Linux x86-64, median of 21 samples with
 10 iterations each, 300 synthetic rows) were:
 

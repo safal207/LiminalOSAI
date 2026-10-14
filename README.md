@@ -66,7 +66,9 @@ consumer-owned replay hook. [Integration guide](docs/TRCP_ADAPTER_SDK.md).
 
 ### Run the baseline checks
 
-The complete suite also requires the OpenSSL executable.
+The complete suite also requires the OpenSSL executable and a GNU-compatible
+linker supporting `--wrap` for the C probes. It is validated on Linux; see the
+[runtime guide](docs/C11_RUNTIME_GUIDE.md) for platform requirements.
 
 ```bash
 make validate
