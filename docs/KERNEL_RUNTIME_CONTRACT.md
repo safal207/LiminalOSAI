@@ -1,6 +1,11 @@
 # Kernel Runtime Contract
 
-Status: validated contract primitives are now used by the production process entrypoint; the legacy semantic options parser and pulse loop remain inside `core/pulse_kernel.c`.
+Status: validated contract primitives are used by the production entrypoints.
+Semantic option parsing now lives in the production-wired
+`core/runtime/pulse_options.c` and `core/runtime/substrate_options.c` modules.
+The pulse scheduler, substrate state transitions and selected trace rendering
+also have explicit boundaries. Module interaction and initialization remain in
+the orchestrators; this stage retains existing semantic behavior.
 
 ## Why this exists
 
@@ -21,7 +26,7 @@ The replacement proceeds in reviewable stages:
 
 `core/pulse_kernel.c` is compiled with its entrypoint renamed to `pulse_kernel_core_main`. The actual process `main` lives in `core/runtime/pulse_kernel_entry.c`.
 
-Both this entrypoint and `liminal_substrate.c` now use the profile-aware guard
+Both this entrypoint and `liminal_substrate.c` use the profile-aware guard
 in `core/runtime/kernel_cli_guard.c`. Shared scalar options use the same strict
 numeric primitives; substrate-specific scalar options receive equivalent
 validation before initialization. The guard also validates the production
@@ -46,7 +51,8 @@ The entry guard:
 4. does not construct a second `kernel_options` object;
 5. does not reinterpret valid values or change legacy clamping behavior.
 
-Unknown non-numeric options still follow the characterized legacy behavior until the semantic parser is extracted.
+Unknown non-numeric options still follow the characterized legacy behavior until
+a dedicated semantic CLI migration changes that compatibility contract.
 
 ## Known unavailable options
 
@@ -114,7 +120,16 @@ Validation includes:
 
 ## Deliberate boundary
 
-`core/pulse_kernel.c` remains the active semantic parser and runtime implementation. The next safe migration should:
+The option schemas in `pulse_options.h` and `substrate_options.h` are each defined
+once. The old parser and schema bodies have been removed from the orchestrators;
+their replacements are linked into both production binaries through `Makefile`.
+The actual pulse scheduler invokes bound stage functions in inhale, reflect,
+exhale, delay and optional health-observation order. Substrate state remains
+caller-owned and selected trace writers consume read-only snapshots.
+
+[C orchestrator boundaries](C_ORCHESTRATOR_BOUNDARIES.md) records the exact
+characterization profile and remaining ownership limits. The next semantic
+migration should:
 
 1. move one coherent group of option fields and branches at a time;
 2. use the existing characterization suite as the behavior baseline;

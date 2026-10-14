@@ -1,0 +1,109 @@
+# C orchestrator boundaries
+
+## Purpose and scope
+
+The runtime should coordinate enabled research modules while keeping argument
+interpretation, scalar cycle transitions and output formatting independently
+inspectable. Previously, `pulse_kernel.c` and `liminal_substrate.c` combined all
+of these responsibilities in 3,513 and 3,894 lines respectively after the
+preceding CLI validation fix.
+
+This stage moves live responsibilities behind narrow headers. It retains the
+numeric entry guard and existing configuration semantics. It does not introduce
+a second parser, copy mutable module globals into a new parallel context, or
+change when trace output becomes visible.
+
+| Boundary | Production implementation | Ownership and retained behavior |
+| --- | --- | --- |
+| Pulse options | `core/runtime/pulse_options.*` | One schema and parser; defaults, repeated flags, clamping, module dependencies and environment fallback retain their meaning. Entry validation runs first. |
+| Substrate options | `core/runtime/substrate_options.*` | One schema and parser; replay and tuning selectors remain available to the orchestrator without exposing module state. |
+| Numeric values | `core/runtime/runtime_values.h`, `options_defaults.h` | Shared existing clamp/fallback operations and mirror defaults. Strict input validation remains a separate entry responsibility. |
+| Pulse scheduling | `core/runtime/pulse_loop.*` | Stack-owned descriptor binds live stages once. The scheduler owns only its counter and preserves inhale → reflect → exhale → delay → optional health observation, using one-based observation numbers. Zero limit remains unlimited. |
+| Substrate state | `core/runtime/substrate_state.*` | The caller owns each state object. Initialization, pulse, reflection, rest and memory transitions preserve arithmetic and invocation order; these functions perform no I/O or allocation. |
+| Selected trace output | `core/runtime/runtime_trace.*` | Writers take an explicit output stream and read-only state. Memory Soil output, substrate analysis events and shutdown output retain their byte formats. Streams remain caller-owned. |
+| Module orchestration | `core/pulse_kernel.c`, `core/liminal_substrate.c` | Initialization, interaction order, module globals, LIP/replay/tuning execution and cleanup continue to have one live implementation. |
+
+After extraction, the two orchestrators contain 2,305 and 2,435 lines. The overall
+system has more explicit contracts; line movement is not evidence of a speedup.
+
+## Characterization before and after the move
+
+`tools/characterize_c_runtime.py` executes the actual built binaries. On Linux it
+compiles a temporary `LD_PRELOAD` library that fixes time to epoch 1760000000,
+seeds `rand` and makes sleep calls return immediately. No runtime source or
+binary is replaced with a test implementation.
+
+The comparison covers two binaries, seven scenarios and seeds 42, 1234 and
+98765: **42 exact cases**. Scenarios include default and strict dry runs,
+reversed bounds, default cycles, enabled interacting modules with VSE/QEL, and
+real pulse synchronization traces for phase shifts +390.25 and −390.25. The
+substrate retains its characterized ignored-unknown-option behavior for those
+pulse-only flags. Every case
+compares exit status, stdout, stderr and all generated file hashes. The moved
+parser preserves the bounded `fmodf` phase normalization from the preceding CLI
+fix; both ordinary phase traces match the old implementation.
+
+```bash
+make
+python3 tools/characterize_c_runtime.py --binary-dir build --output before.json
+# Build the candidate with the same compiler and flags, then compare:
+python3 tools/characterize_c_runtime.py --binary-dir build --output after.json --compare before.json
+```
+
+The fixed-clock profile measures reproducible state transitions and formatting.
+It does not exercise actual sleeping, timer progression, network peers, clock
+adjustments, or crash recovery. Ordinary CLI/smoke tests continue to run the
+production binaries without the characterization library.
+
+## Validation and measurement
+
+The additional `runtime_boundaries` C executable exercises the linked production
+scheduler, independent state objects, cycle crossing, saturation, trace format
+and non-mutating trace snapshots. `make validate` includes this executable with
+the existing eight C executables and all discovered Python tests. Two Python
+controls also challenge the characterization controller: a changed trace fails
+comparison, a binary rebuild with identical behavior succeeds, and a candidate
+cannot overwrite its comparison baseline by reusing the output path.
+
+After integrating the CLI validation commit, strict GCC validation and the
+GCC AddressSanitizer/UndefinedBehaviorSanitizer profile each passed **1,022 Python
+tests and nine C executables**, with no skipped tests. Local ASan used
+`detect_leaks=0` because leak inspection is unavailable in this environment;
+CI retains its leak checks. Clang was unavailable locally and requires CI
+verification against the final published revision.
+
+The committed [measurement record](benchmarks/c-orchestrator-boundaries.json)
+contains binary fingerprints, exact characterization hashes and raw local
+resource samples. Both measurement binaries used GCC `-Os` with the same build
+flags. Seven samples per binary execute 1,024 cycles with the enabled-module
+fixture and controlled clocks/sleep. Child-process CPU time and peak resident
+memory are recorded with Linux `wait4`; wall time includes process startup and
+file I/O. These are synthetic local observations, not production throughput or
+latency claims. The observed medians were:
+
+| Binary | CPU seconds before / after | Peak RSS KiB before / after |
+| --- | --- | --- |
+| Pulse | 0.5044 / 0.4610 | 12,032 / 12,032 |
+| Substrate | 0.5495 / 0.5331 | 12,288 / 12,288 |
+
+The sample ranges overlap. These observations support retaining the interfaces
+for this fixture without a speedup claim.
+
+Binary text grew from 126,454 to 127,854 bytes for pulse and from 111,801 to
+112,766 bytes for substrate. Mutable data size stayed the same; substrate BSS
+alignment grew by 32 bytes. The explicit module interfaces therefore have a
+small binary-size cost. The scheduler and state transitions introduce no heap
+allocation of their own.
+
+## Remaining boundaries
+
+The runtime still has process-global module state and is not reentrant. The
+substrate state object alone does not make concurrent whole-runtime invocation
+safe. Astro, collective and several other module-specific log streams remain
+owned by their existing modules; this stage extracts selected formatting only.
+
+The next ownership migration should move one coherent module group through an
+explicit context, with characterization of initialization, shutdown and repeated
+invocation. A semantic CLI migration should separately replace legacy prefix
+handling and unknown-option behavior, rather than combining that behavior
+change with another large relocation.
