@@ -761,6 +761,42 @@ def _services(report: dict[str, Any], pins: dict[str, Any]) -> None:
         "actual host supervisor process/run identity missing")
 
 
+def _receiver_matrix_enrollment(inventory: dict, cases: dict) -> None:
+    """Bind even zero-terminal enrollments to every approved matrix run.
+
+    Signed enrollment packets prove the receiver stored the requested lineage;
+    they do not prove that lineage was the one approved by the case binding.
+    The fixed fixture enrolls one parentless execution for each effect root.
+    """
+    require(type(cases) is dict and set(cases) == set(CASE_IDS), "receiver matrix bindings incomplete")
+    expected_roots, expected_executions = [], []
+    for name in CASE_IDS:
+        case = cases[name]
+        require(type(case) is dict and type(case.get("run_binding")) is dict
+            and type(case["run_binding"].get("effect")) is dict, "receiver matrix effect binding missing")
+        effect = case["run_binding"]["effect"]
+        require(_id(effect.get("root_id")) and _id(effect.get("execution_id")) and _integer(effect.get("epoch"), 1),
+            "receiver matrix effect lineage invalid")
+        expected_roots.append({"root_id": effect["root_id"], "epoch": effect["epoch"], "fenced": 1})
+        expected_executions.append({"root_id": effect["root_id"], "execution_id": effect["execution_id"],
+            "epoch": effect["epoch"], "parent_execution_id": None})
+    require(len({r["root_id"] for r in expected_roots}) == len(CASE_IDS)
+        and len({r["execution_id"] for r in expected_executions}) == len(CASE_IDS),
+        "receiver matrix approved root/execution identity duplicated")
+    roots, executions = inventory.get("roots"), inventory.get("executions")
+    require(type(roots) is list and type(executions) is list and len(roots) == len(executions) == len(CASE_IDS),
+        "receiver root/execution census differs from matrix")
+    require(all(type(r) is dict and set(r) == {"root_id", "epoch", "fenced"} and _id(r["root_id"])
+        and _integer(r["epoch"], 1) and type(r["fenced"]) is int and r["fenced"] == 1 for r in roots)
+        and all(type(r) is dict and set(r) == {"execution_id", "root_id", "epoch", "parent_execution_id"}
+            and _id(r["root_id"]) and _id(r["execution_id"]) and _integer(r["epoch"], 1)
+            and r["parent_execution_id"] is None for r in executions),
+        "receiver matrix enrollment exact fields/types/parent invalid")
+    require(sorted(map(canonical, roots)) == sorted(map(canonical, expected_roots))
+        and sorted(map(canonical, executions)) == sorted(map(canonical, expected_executions)),
+        "receiver root/execution lineage differs from approved matrix bindings")
+
+
 def verify_report(report: Any, *, repo_root: Path = ROOT, expected_source_sha: str | None = None,
                   expected_command_authority_pin: dict[str, str] | None = None,
                   expected_effect_authority_pin: dict[str, str] | None = None,
@@ -1042,9 +1078,7 @@ def verify_report(report: Any, *, repo_root: Path = ROOT, expected_source_sha: s
         and sum(r["status"] == "NO_EFFECT" for r in final_endpoint["receipts"]) == 2
         and effect_dispatch_observation_count == 8
         and canonical(previous_endpoint) == canonical(final_endpoint), "actual matrix effect or lifecycle totals differ from frozen design")
-    require({r["root_id"] for r in final_endpoint["roots"]} == {cases[n]["run_binding"]["effect"]["root_id"] for n in CASE_IDS}
-        and len(final_endpoint["roots"]) == len(final_endpoint["executions"]) == 14
-        and all(r["fenced"] == 1 for r in final_endpoint["roots"]), "receiver root/execution census differs from matrix")
+    _receiver_matrix_enrollment(final_endpoint, cases)
     winning = cases["receiver_commit_wins"]
     require(winning.get("stop_acknowledged_before_release") is False and winning.get("pending_effect_snapshot", {}).get("aggregate") is None,
         "commit-wins fixture lacks held receiver transaction and blocked STOP ACK")

@@ -434,9 +434,18 @@ class ReceiverFenceStore:
                                 raise ControlError("RECEIVER_REQUEST_CACHE_CORRUPT")
                     return _copy(result)
                 count = db.execute("SELECT COUNT(*) FROM receiver_requests").fetchone()[0]
-                # Reserve bounded space for one STOP per possible root.
-                if count >= MAX_REQUESTS + (MAX_ROOTS if operation == "stop" else 0):
-                    raise ControlError("RECEIVER_REQUEST_CAPACITY")
+                # Ordinary requests, including fresh-nonce repetitions of an
+                # existing STOP, cannot spend the first-fence reserve. Exact
+                # cached replay was handled above without allocating a row.
+                # A root can transition to fenced only once, so at most one
+                # reserved request per known root can be added after the pool
+                # fills; total request growth remains bounded.
+                if count >= MAX_REQUESTS:
+                    if operation != "stop":
+                        raise ControlError("RECEIVER_REQUEST_CAPACITY")
+                    root = self._root(db, payload["root_id"], payload["epoch"])
+                    if self._fence(db, root) is not None or count >= MAX_REQUESTS + MAX_ROOTS:
+                        raise ControlError("RECEIVER_REQUEST_CAPACITY")
             key = operation + "_request_count"
             count = int(db.execute("SELECT value FROM receiver_meta WHERE key=?", (key,)).fetchone()[0])
             if count >= 2**63 - 1:

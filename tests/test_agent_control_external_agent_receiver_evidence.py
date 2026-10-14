@@ -89,6 +89,66 @@ class ReceiverPacketEvidenceTests(unittest.TestCase):
     def check_inventory(self, value=None):
         verifier._endpoint_inventory(self.inventory if value is None else value, self.pin, self.authority_pin, self.permits)
 
+    def matrix_enrollment_fixture(self):
+        """Fourteen signed enrollments; thirteen have no terminal to bind them."""
+        inventory = deepcopy(self.inventory)
+        cases = {verifier.CASE_IDS[0]: {"run_binding": {"effect": {
+            "root_id": "root:unit", "execution_id": "worker:unit", "epoch": 1}}}}
+        for index, name in enumerate(verifier.CASE_IDS[1:], 1):
+            root = {"root_id": "root:" + name, "epoch": 1, "fenced": 1}
+            execution = {"root_id": root["root_id"], "execution_id": "worker:" + name,
+                "epoch": 1, "parent_execution_id": None}
+            fence = self.sign({**self.fence, "root_id": root["root_id"], "fence_sequence": 3 + index,
+                "fenced_at": 40 + index}, b"liminal-external-agent-receiver-fence-v1\0")
+            cases[name] = {"run_binding": {"effect": {k: execution[k] for k in ("root_id", "execution_id", "epoch")}}}
+            inventory["roots"].append(root)
+            inventory["executions"].append(execution)
+            inventory["fences"].append(fence)
+            for operation, payload, result in (
+                    ("create_root", {"root_id": root["root_id"], "epoch": 1}, {"status": "ROOT_CREATED", "root_id": root["root_id"], "epoch": 1}),
+                    ("bind_execution", execution, {"status": "BOUND", **execution}),
+                    ("stop", {"root_id": root["root_id"], "epoch": 1}, fence)):
+                request = {"schema": "liminal-external-agent-receiver-request-v1", "role": "operator", "operation": operation,
+                    "nonce": f"{len(inventory['authenticated_requests']) + 1:064x}", "payload": deepcopy(payload)}
+                inventory["authenticated_requests"].append({"request": request, "request_digest": verifier.sha(request), "result": deepcopy(result)})
+        inventory["transition_sequence"] = 3 + len(verifier.CASE_IDS) - 1
+        inventory["independent_sqlite_fence_count"] = len(inventory["fences"])
+        for name in inventory["independent_sqlite_request_counts"]:
+            inventory[name] = inventory["independent_sqlite_request_counts"][name] = sum(
+                row["request"]["operation"] + "_request_count" == name for row in inventory["authenticated_requests"])
+        return inventory, cases
+
+    def resign_enrollment_capture(self, inventory):
+        """Produce valid control packets after a consistent wrong enrollment."""
+        roots = {r["root_id"]: r for r in inventory["roots"]}
+        executions = {r["execution_id"]: r for r in inventory["executions"]}
+        inventory["fences"] = [self.sign({**f, "epoch": roots[f["root_id"]]["epoch"]},
+            b"liminal-external-agent-receiver-fence-v1\0") for f in inventory["fences"]]
+        fences = {f["root_id"]: f for f in inventory["fences"]}
+        report = {"endpoint_evidence": [], "endpoint_operator_evidence": [], "outcomes": {}}
+        for item in inventory["authenticated_requests"]:
+            request = item["request"]
+            operation, payload = request["operation"], request["payload"]
+            if operation == "bind_execution":
+                request["payload"] = deepcopy(executions[payload["execution_id"]])
+                item["result"] = {"status": "BOUND", **request["payload"]}
+            elif operation in {"create_root", "stop"}:
+                request["payload"] = {"root_id": payload["root_id"], "epoch": roots[payload["root_id"]]["epoch"]}
+                item["result"] = ({"status": "ROOT_CREATED", **request["payload"]}
+                    if operation == "create_root" else fences[payload["root_id"]])
+            item["request_digest"] = verifier.sha(request)
+            result = item["result"]
+            if operation == "commit":
+                result = {"status": "OBSERVED", "action_id": result["action_id"], "reservation_id": result["reservation_id"],
+                    "effect_count": result["effect_count"], "receipt": result}
+            response = self.sign({"schema": "liminal-external-agent-receiver-response-v1", "endpoint_id": self.pin["endpoint_id"],
+                "key_id": self.pin["key_id"], "operation": operation, "request_digest": item["request_digest"], "result": result},
+                b"liminal-external-agent-receiver-response-v1\0")
+            pair = {"request": deepcopy(request), "response": response}
+            report["endpoint_evidence" if request["role"] == "gateway" else "endpoint_operator_evidence"].append(pair)
+        encodings = {verifier.canonical(p) for p in report["endpoint_evidence"] + report["endpoint_operator_evidence"]}
+        verifier._receiver_capture_pairs(report, inventory, {"endpoint": self.pin, "effect": self.authority_pin}, encodings)
+
     def test_signed_both_orders_match_actual_sql_rows(self):
         self.check_inventory()
         for receipt in self.receipts:
@@ -164,6 +224,61 @@ class ReceiverPacketEvidenceTests(unittest.TestCase):
             changed = deepcopy(self.inventory); mutate(changed)
             with self.assertRaises(verifier.EvidenceError): self.check_inventory(changed)
 
+    def test_zero_terminal_matrix_enrollment_requires_exact_approved_lineage(self):
+        inventory, cases = self.matrix_enrollment_fixture()
+        self.check_inventory(inventory)
+        self.resign_enrollment_capture(inventory)
+        verifier._receiver_matrix_enrollment(inventory, cases)
+        for mutation in ("wrong_id", "swapped_roots", "epoch", "parent", "duplicate_root_missing_mapping"):
+            with self.subTest(mutation=mutation):
+                changed = deepcopy(inventory)
+                first, second = changed["executions"][1:3]
+                if mutation == "wrong_id":
+                    old_id = first["execution_id"]
+                    first["execution_id"] += ":wrong"
+                    for row in changed["authenticated_requests"]:
+                        if row["request"]["operation"] == "bind_execution" and row["request"]["payload"]["execution_id"] == old_id:
+                            row["request"]["payload"]["execution_id"] = first["execution_id"]
+                elif mutation == "swapped_roots":
+                    first["root_id"], second["root_id"] = second["root_id"], first["root_id"]
+                elif mutation == "epoch":
+                    first["epoch"] = 2
+                    next(r for r in changed["roots"] if r["root_id"] == first["root_id"])["epoch"] = 2
+                else:
+                    second["root_id"] = first["root_id"]
+                    if mutation == "parent":
+                        second["parent_execution_id"] = first["execution_id"]
+                self.resign_enrollment_capture(changed)
+                # All signatures, control-cache mappings, ancestry and counts are
+                # valid, including the old fourteen-root/count-only predicate.
+                self.check_inventory(changed)
+                self.assertEqual({r["root_id"] for r in changed["roots"]},
+                    {c["run_binding"]["effect"]["root_id"] for c in cases.values()})
+                self.assertEqual((len(changed["roots"]), len(changed["executions"])), (14, 14))
+                self.assertTrue(all(r["fenced"] == 1 for r in changed["roots"]))
+                with self.assertRaisesRegex(verifier.EvidenceError, "matrix"):
+                    verifier._receiver_matrix_enrollment(changed, cases)
+
+    def test_matrix_enrollment_preserves_exact_types_and_complete_identity_census(self):
+        inventory, cases = self.matrix_enrollment_fixture()
+        for mutation in ("boolean_execution_epoch", "float_root_epoch", "boolean_fence", "duplicate_execution", "duplicate_binding", "boolean_binding_epoch"):
+            with self.subTest(mutation=mutation):
+                changed, bindings = deepcopy(inventory), deepcopy(cases)
+                if mutation == "boolean_execution_epoch":
+                    changed["executions"][1]["epoch"] = True
+                elif mutation == "float_root_epoch":
+                    changed["roots"][1]["epoch"] = 1.0
+                elif mutation == "boolean_fence":
+                    changed["roots"][1]["fenced"] = True
+                elif mutation == "duplicate_execution":
+                    changed["executions"][-1] = deepcopy(changed["executions"][1])
+                elif mutation == "duplicate_binding":
+                    bindings[verifier.CASE_IDS[-1]]["run_binding"]["effect"] = deepcopy(bindings[verifier.CASE_IDS[1]]["run_binding"]["effect"])
+                else:
+                    bindings[verifier.CASE_IDS[1]]["run_binding"]["effect"]["epoch"] = True
+                with self.assertRaisesRegex(verifier.EvidenceError, "matrix"):
+                    verifier._receiver_matrix_enrollment(changed, bindings)
+
     def test_root_census_handles_delayed_status_signing_and_exact_terminal_denials(self):
         state = {key: None for key in verifier.STATE_FIELDS}
         state.update(root_id="root:unit", receiver_id=self.pin["endpoint_id"], policy_digest="b" * 64,
@@ -228,6 +343,20 @@ class ReceiverCaptureMutationTests(unittest.TestCase):
     def test_actual_fence_effect_and_terminal_census_mutations_fail(self):
         for field in ("fences", "effects", "receipts", "requests", "authenticated_requests"):
             with self.subTest(field=field): self.mutation(lambda r: r["endpoint_final_inventory"][field].pop())
+        # Exercise the complete enrollment predicate on actual matrix bindings
+        # without relying on invalid signatures to reject changed SQL lineage.
+        inventory, cases = self.report["endpoint_final_inventory"], self.report["outcomes"]
+        verifier._receiver_matrix_enrollment(inventory, cases)
+        zero_terminal = next(r for r in inventory["executions"]
+            if not any(t["execution_id"] == r["execution_id"] for t in inventory["terminals"]))
+        for field, value in (("execution_id", zero_terminal["execution_id"] + ":wrong"),
+                ("root_id", next(r["root_id"] for r in inventory["roots"] if r["root_id"] != zero_terminal["root_id"])),
+                ("epoch", zero_terminal["epoch"] + 1), ("epoch", True), ("parent_execution_id", zero_terminal["execution_id"])):
+            with self.subTest(enrollment_field=field, value=value):
+                changed = deepcopy(inventory)
+                next(r for r in changed["executions"] if r["execution_id"] == zero_terminal["execution_id"])[field] = value
+                with self.assertRaisesRegex(verifier.EvidenceError, "matrix"):
+                    verifier._receiver_matrix_enrollment(changed, cases)
 
     def test_actual_no_effect_loss_or_false_zero_claim_fails(self):
         self.mutation(lambda r: r["endpoint_final_inventory"]["independent_sqlite_effect_count"] == 0 or r["endpoint_final_inventory"].update(independent_sqlite_effect_count=0))

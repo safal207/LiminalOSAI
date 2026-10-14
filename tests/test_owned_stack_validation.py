@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -100,6 +101,88 @@ class OwnedStackValidationTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 PREPARE.immutable_image(value)
         self.assertEqual(PREPARE.immutable_image("sha256:" + "a" * 64), "sha256:" + "a" * 64)
+
+    def test_preparation_verifies_preserved_bytes_and_exports_live_capture_for_full_gate(self):
+        self.owned_sources()
+        initial = b'{ "synthetic_capture": "preparation", "nonce": 1 }\n'
+        final = b'{"synthetic_capture":"full-discovery","nonce":2}\n'
+        checked = []
+        def command(argv, **kwargs):
+            args = list(map(str, argv))
+            if args[:3] == ["git", "rev-parse", "HEAD"]:
+                return "a" * 40
+            if args[:2] == ["git", "status"]:
+                return ""
+            if args[:2] == ["docker", "info"]:
+                return "synthetic-daemon"
+            if args[:3] == ["docker", "image", "inspect"]:
+                return "sha256:" + ("c" * 64 if args[-1].startswith("sha256:") else "b" * 64)
+            if args[:2] == ["docker", "build"]:
+                Path(args[args.index("--iidfile") + 1]).write_text("sha256:" + "c" * 64)
+            if "tests/test_agent_control_external_agent_receiver_runtime.py" in args:
+                Path(kwargs["env"]["LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE"]).write_bytes(initial)
+            if len(args) > 1 and args[1].endswith("verify_external_agent_receiver_evidence.py"):
+                snapshot = Path(args[2])
+                self.assertEqual(snapshot.name, "receiver-preparation.json")
+                self.assertEqual(snapshot.read_bytes(), initial)
+                self.assertEqual(args[args.index("--expected-report-sha256") + 1], hashlib.sha256(initial).hexdigest())
+                self.assertEqual(Path(kwargs["output"].name).name, "receiver-preparation-verification.json")
+                # Emulate the later runtime overwriting its live output. Every
+                # preparation consumer must still use the preserved byte copy.
+                (snapshot.parent / "receiver.json").write_bytes(final)
+                checked.append("verifier")
+            if "-c" in args or PREPARE.CAPTURE_CLASS in args:
+                snapshot = Path(kwargs["env"]["LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE"])
+                self.assertEqual(snapshot.name, "receiver-preparation.json")
+                self.assertEqual(snapshot.read_bytes(), initial)
+                checked.append("presence" if "-c" in args else "strict-nine")
+            return None
+        with patch.object(PREPARE, "command", side_effect=command):
+            result = PREPARE.prepare(self.root, self.output)
+        manifest = json.loads((self.output / "preparation.json").read_bytes())
+        snapshot = self.output / manifest["receiver_preparation_capture"]
+        self.assertEqual(snapshot.read_bytes(), initial)
+        self.assertEqual(snapshot.stat().st_mode & 0o222, 0)
+        self.assertEqual(manifest["receiver_preparation_sha256"], hashlib.sha256(initial).hexdigest())
+        live = Path(result["environment"]["LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE"])
+        self.assertEqual(live.name, "receiver.json")
+        self.assertEqual(live.read_bytes(), final)
+        self.assertEqual(checked, ["verifier", "presence", "strict-nine"])
+        self.assertEqual(result["status"], "READY_FOR_VALIDATION")
+
+    def test_capture_snapshot_is_bounded_nonempty_and_never_overwrites_evidence(self):
+        source, destination = self.directory / "live.json", self.directory / "preserved.json"
+        with patch.object(PREPARE, "MAX_RECEIVER_CAPTURE_BYTES", 4):
+            for raw in (b"", b"12345"):
+                source.write_bytes(raw)
+                with self.assertRaisesRegex(ValueError, "empty or oversized"):
+                    PREPARE.snapshot_receiver_capture(source, destination)
+                self.assertFalse(destination.exists())
+            source.write_bytes(b"1234")
+            self.assertEqual(PREPARE.snapshot_receiver_capture(source, destination), hashlib.sha256(b"1234").hexdigest())
+            source.write_bytes(b"5678")
+            with self.assertRaises(FileExistsError):
+                PREPARE.snapshot_receiver_capture(source, destination)
+            self.assertEqual(destination.read_bytes(), b"1234")
+
+    def test_full_gate_verifies_final_capture_before_declaring_scope(self):
+        workflow = (ROOT / ".github/workflows/governance-required-gate.yml").read_text()
+        baseline = workflow.index("run: make validate")
+        postcheck = workflow.index("- name: Verify final owned receiver capture after full discovery")
+        scope = workflow.index("- name: Declared gate scope")
+        self.assertLess(baseline, postcheck)
+        self.assertLess(postcheck, scope)
+        step = workflow[postcheck:scope]
+        self.assertIn("if: hashFiles('sdk/liminal_agent_control/__init__.py') != ''", step)
+        self.assertIn('"$LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE"', step)
+        self.assertIn('--expected-source-sha "$EXPECTED_SOURCE_SHA"', step)
+        self.assertIn("receiver-final-verification.json", step)
+        self.assertIn("exec(CAPTURE_CLASS_CHECK)", step)
+        self.assertIn("scripts/run_python_tests.py", step)
+        self.assertIn(PREPARE.CAPTURE_CLASS, step)
+        self.assertNotIn("receiver-preparation.json", step)
+        self.assertNotIn("continue-on-error", step)
+        self.assertNotIn("||", step)
 
     def test_failed_preparation_never_exports_ci_environment(self):
         env = self.directory / "github-env"

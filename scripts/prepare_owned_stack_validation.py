@@ -7,6 +7,7 @@ not a repository test result. A checkout without the owned SDK is unaffected.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 WORKER_REFERENCE = "python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1"
 CAPTURE_CLASS = "tests.test_agent_control_external_agent_receiver_evidence.ReceiverCaptureMutationTests"
+MAX_RECEIVER_CAPTURE_BYTES = 24 * 1024 * 1024  # Same raw bound as the independent checker.
 REQUIRED_SOURCES = (
     "experiments/agent_control/observer-requirements.txt",
     "experiments/agent_control/observer.Dockerfile",
@@ -53,6 +55,18 @@ def immutable_image(value):
     if not isinstance(value, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
         raise ValueError("Docker did not return a full immutable image ID")
     return value
+
+
+def snapshot_receiver_capture(source: Path, destination: Path):
+    """Preserve the exact preparation bytes before full discovery rewrites source."""
+    with source.open("rb") as stream:
+        raw = stream.read(MAX_RECEIVER_CAPTURE_BYTES + 1)
+    if not raw or len(raw) > MAX_RECEIVER_CAPTURE_BYTES:
+        raise ValueError("receiver preparation capture is empty or oversized")
+    with destination.open("xb") as stream:
+        stream.write(raw)
+    destination.chmod(0o444)
+    return hashlib.sha256(raw).hexdigest()
 
 
 def export_environment(environment, python_bin, *, github_env=None, github_path=None):
@@ -145,16 +159,22 @@ def prepare(root: Path, output_directory: Path):
     capture = Path(environment["LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE"])
     if not capture.is_file() or capture.stat().st_size == 0:
         raise ValueError("receiver runtime did not produce its required actual capture")
-    with (evidence / "receiver-verification.json").open("w", encoding="utf-8") as stream:
-        command([python, root / "scripts/verify_external_agent_receiver_evidence.py", capture,
-                 "--expected-source-sha", revision], root=root, env=child_env, timeout=120, output=stream)
-    command([python, "-c", CAPTURE_CLASS_CHECK], root=root, env=child_env, timeout=60)
+    preparation_capture = evidence / "receiver-preparation.json"
+    preparation_sha256 = snapshot_receiver_capture(capture, preparation_capture)
+    preparation_env = {**child_env, "LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE": str(preparation_capture)}
+    with (evidence / "receiver-preparation-verification.json").open("x", encoding="utf-8") as stream:
+        command([python, root / "scripts/verify_external_agent_receiver_evidence.py", preparation_capture,
+                 "--expected-source-sha", revision, "--expected-report-sha256", preparation_sha256],
+                root=root, env=preparation_env, timeout=120, output=stream)
+    command([python, "-c", CAPTURE_CLASS_CHECK], root=root, env=preparation_env, timeout=60)
     # Run all nine now as well: presence alone cannot certify runnable evidence.
-    command([python, root / "scripts/run_python_tests.py", CAPTURE_CLASS], root=root, env=child_env, timeout=120)
+    command([python, root / "scripts/run_python_tests.py", CAPTURE_CLASS], root=root, env=preparation_env, timeout=120)
     result = {
         "status": "READY_FOR_VALIDATION", "revision": revision, "daemon_id": daemon_id,
         "worker_reference": WORKER_REFERENCE, "worker_image_id": worker_id,
         "observer_image_id": observer_id, "receiver_capture_tests": 9,
+        "receiver_preparation_capture": "evidence/receiver-preparation.json",
+        "receiver_preparation_sha256": preparation_sha256,
         "python_bin": str(venv / "bin"), "environment": environment,
     }
     (output_directory / "preparation.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")

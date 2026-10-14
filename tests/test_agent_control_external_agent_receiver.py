@@ -202,6 +202,78 @@ class ExternalAgentReceiverTests(unittest.TestCase):
         receipt = client.commit(*self.issue())["receipt"]
         self.assertEqual(receipt["status"], "NO_EFFECT")
 
+    def test_repeated_fresh_stop_cannot_spend_another_roots_fence_reserve(self):
+        self.store.create_root("other")
+        self.store.bind_execution("other", "other-worker")
+        client = self.client()
+        with patch("sdk.liminal_agent_control.external_agent_receiver.MAX_REQUESTS", 4), \
+                patch("sdk.liminal_agent_control.external_agent_receiver.MAX_ROOTS", 2):
+            with patch("sdk.liminal_agent_control.external_agent_receiver.secrets.token_hex", return_value="1" * 64):
+                first = client.stop("root")
+                first_pair = client.last_call_evidence()
+            for nonce in ("2", "3", "4"):
+                with patch("sdk.liminal_agent_control.external_agent_receiver.secrets.token_hex", return_value=nonce * 64):
+                    self.assertEqual(client.stop("root"), first)
+                    pair = client.last_call_evidence()
+                    self.assertEqual(verify_receiver_response(pair["request"], pair["response"], self.pin), first)
+                    with self.assertRaisesRegex(ControlError, "BINDING_MISMATCH"):
+                        verify_receiver_response(pair["request"], first_pair["response"], self.pin)
+            full = self.reopen().inventory()
+            self.assertEqual(len(full["authenticated_requests"]), 4)
+            for nonce in ("5", "6", "7", "8"):
+                with patch("sdk.liminal_agent_control.external_agent_receiver.secrets.token_hex", return_value=nonce * 64):
+                    with self.assertRaisesRegex(ControlError, "REQUEST_CAPACITY"):
+                        client.stop("root")
+            self.assertEqual(self.reopen().inventory(), full)
+            # Neither an unknown root nor an unbound epoch can rent a reserve.
+            for root_id, epoch in (("never-enrolled", 1), ("other", 2)):
+                with self.assertRaisesRegex(ControlError, "ROOT_BINDING_MISMATCH"):
+                    client.stop(root_id, epoch)
+            self.assertEqual(self.reopen().inventory(), full)
+            with patch("sdk.liminal_agent_control.external_agent_receiver.secrets.token_hex", return_value="1" * 64):
+                self.assertEqual(client.stop("root"), first)
+            self.assertEqual(self.reopen().inventory(), full)
+            second = client.stop("other")
+            self.assertTrue(verify_receiver_fence(second, self.pin))
+            self.assertNotEqual(second["root_id"], first["root_id"])
+            restarted = self.reopen().inventory()
+            self.assertEqual(len(restarted["authenticated_requests"]), 5)
+            self.assertEqual(sorted(restarted["fences"], key=lambda value: value["fence_sequence"]), [first, second])
+            self.assertEqual(restarted["stop_request_count"], 5)
+
+    def test_fence_reserve_survives_restart_and_exact_replay_at_total_capacity(self):
+        self.store.create_root("other")
+        self.store.bind_execution("other", "other-worker")
+        client = self.client()
+        with patch("sdk.liminal_agent_control.external_agent_receiver.MAX_REQUESTS", 4), \
+                patch("sdk.liminal_agent_control.external_agent_receiver.MAX_ROOTS", 2):
+            for nonce in ("1", "2", "3", "4"):
+                with patch("sdk.liminal_agent_control.external_agent_receiver.secrets.token_hex", return_value=nonce * 64):
+                    self.assertEqual(client.query("not-issued", "not-issued")["status"], "UNKNOWN")
+            with patch("sdk.liminal_agent_control.external_agent_receiver.secrets.token_hex", return_value="5" * 64):
+                first = client.stop("root")
+                first_request = client.last_call_evidence()["request"]
+            restarted = self.reopen()
+            second_request = {**first_request, "nonce": "6" * 64, "payload": {"root_id": "other", "epoch": 1}}
+            second = restarted.handle_authenticated_request(second_request)
+            self.assertTrue(verify_receiver_fence(second, self.pin))
+            final = self.reopen().inventory()
+            self.assertEqual(len(final["authenticated_requests"]), 6)
+            self.assertEqual(final["transition_sequence"], 2)
+            self.assertEqual(sorted(final["fences"], key=lambda value: value["fence_sequence"]), [first, second])
+            # Same nonce/body remains observable at the total storage ceiling.
+            with patch("sdk.liminal_agent_control.external_agent_receiver.secrets.token_hex", return_value="5" * 64):
+                self.assertEqual(client.stop("root"), first)
+                with self.assertRaisesRegex(ControlError, "REQUEST_NONCE_REUSED"):
+                    client.stop("other")
+            self.assertEqual(self.reopen().handle_authenticated_request(second_request), second)
+            for root_id in ("root", "other"):
+                with self.assertRaisesRegex(ControlError, "REQUEST_CAPACITY"):
+                    client.stop(root_id)
+            with self.assertRaisesRegex(ControlError, "REQUEST_CAPACITY"):
+                client.query("not-issued", "not-issued")
+            self.assertEqual(self.reopen().inventory(), final)
+
     def test_absent_query_and_query_outage_remain_unknown(self):
         inputs = self.issue()
         reservation = inputs[3]["result"]["reservation_id"]

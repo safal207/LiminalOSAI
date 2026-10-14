@@ -43,12 +43,24 @@ jobs:
       - name: Complete repository baseline
         run: make validate
 
+      - name: Verify final owned receiver capture after full discovery
+        if: hashFiles('sdk/liminal_agent_control/__init__.py') != ''
+        run: |
+          "$PYTHON" scripts/verify_external_agent_receiver_evidence.py \
+            "$LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE" \
+            --expected-source-sha "$EXPECTED_SOURCE_SHA" \
+            > "$RUNNER_TEMP/owned-stack-validation/evidence/receiver-final-verification.json"
+          "$PYTHON" -c 'from scripts.prepare_owned_stack_validation import CAPTURE_CLASS_CHECK; exec(CAPTURE_CLASS_CHECK)'
+          "$PYTHON" scripts/run_python_tests.py \
+            tests.test_agent_control_external_agent_receiver_evidence.ReceiverCaptureMutationTests
+
       - name: Declared gate scope
         run: |
           echo "This gate always runs for pull requests targeting main or stacked agent/** branches."
           echo "It builds both binaries, runs smoke checks, every C test and discovered Python regressions without skips."
           echo "Owned-stack prerequisites include actual Docker images and receiver capture before discovery."
           echo "Preparation readiness is not a test PASS; this unchanged make validate gate must complete."
+          echo "Final receiver capture is independently verified and all nine capture tests rerun after full discovery."
           echo "Specialized compiler, sanitizer, Docker and evidence workflows retain their own checks."
           echo "Path-filtered workflows remain gated by their own paths filters and are intentionally not required checks."
 
