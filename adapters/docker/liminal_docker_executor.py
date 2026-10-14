@@ -529,12 +529,13 @@ def _container_exists(session_id: str, *, docker_binary: str = "docker") -> bool
     return _inspect_object(_validate_container_name(session_id), docker_binary) is not None
 
 
-def _remove_container_verified(session_id: str, *, docker_binary: str = "docker") -> None:
-    reference = _validate_container_name(session_id)
-    proc = run_cli([docker_binary, "rm", "-f", reference], timeout=15)
+def _remove_container_verified(container_id: str, *, docker_binary: str = "docker") -> None:
+    if not isinstance(container_id, str) or not _CONTAINER_ID.fullmatch(container_id):
+        raise DockerExecutionError("verified removal requires a full container ID")
+    proc = run_cli([docker_binary, "rm", "-f", container_id], timeout=15)
     if proc.returncode != 0 and not _is_not_found(proc.stderr.decode("utf-8", errors="replace")):
         raise DockerExecutionError("failed to terminate governed execution session")
-    if _container_exists(reference, docker_binary=docker_binary):
+    if _container_exists(container_id, docker_binary=docker_binary):
         raise DockerExecutionError("governed execution session survived forced removal")
 
 

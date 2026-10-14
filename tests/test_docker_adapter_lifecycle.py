@@ -17,6 +17,7 @@ from adapters.docker.liminal_docker_executor import (
     DockerReconciliationRequired,
     DockerSessionIdentity,
     DockerProcessTreeBackend,
+    _remove_container_verified,
     reconcile_docker_session,
     run_docker_plan,
 )
@@ -342,6 +343,17 @@ class DockerAdapterLifecycleTests(unittest.TestCase):
         actions = [call for call in self.calls() if call[0] in {"pause", "rm", "top"}]
         self.assertTrue(actions)
         self.assertTrue(all(call[-1] == identity.container_id for call in actions))
+
+    def test_verified_removal_rejects_mutable_names_and_short_ids_before_cli(self):
+        identity, _ = self.owned_object()
+        (self.root / "objects" / identity.container_id).unlink()
+        for reference in (identity.session_id, identity.container_id[:12]):
+            with self.subTest(reference=reference):
+                replacement, _ = self.owned_object(identity.session_id, "c" * 64)
+                with self.assertRaisesRegex(DockerExecutionError, "full container ID"):
+                    _remove_container_verified(reference, docker_binary=str(self.binary))
+                self.assertFalse((self.root / "calls.jsonl").exists())
+                self.assertTrue((self.root / "objects" / replacement.container_id).exists())
 
     def test_uncertain_backend_receipt_consumes_single_use_authority(self):
         from sdk.liminal_capability_broker import CapabilityBroker
