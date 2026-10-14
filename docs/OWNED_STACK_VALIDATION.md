@@ -1,6 +1,6 @@
 # Owned-stack validation prerequisites
 
-`make validate` remains full discovery: zero skips, expected failures, import failures or missing tests are accepted. A checkout containing `sdk/liminal_agent_control` additionally needs Linux/POSIX, a reachable Docker daemon, the pinned signing dependency, immutable worker and observer images, and a fresh real G03 receiver capture.
+`make validate` remains full discovery: no skips, expected failures, import failures or missing tests are accepted. A checkout containing `sdk/liminal_agent_control` additionally needs Linux/POSIX, a reachable Docker daemon, the pinned signing dependency, immutable worker and observer images, and a fresh real G03 receiver capture.
 
 The required governance workflow runs for PRs targeting `main` and stacked `agent/**` branches, including `agent/effect-dispatch-gate-20261013`. Push validation remains enabled for `main`; a stacked G03 PR does not need a temporary retarget to trigger the full gate.
 
