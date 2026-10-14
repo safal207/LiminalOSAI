@@ -176,6 +176,7 @@ class FencedTrajectoryRiskLedger:
         self._verify_event = verify_event
         self._events: list[TrajectoryEvent] = []
         self._event_ids: set[str] = set()
+        self._effect_uncertain = False
 
     @property
     def head_sha256(self) -> str:
@@ -202,13 +203,16 @@ class FencedTrajectoryRiskLedger:
             return {
                 "event_sha256": event.event_sha256,
                 "trajectory_head_sha256": event.event_sha256,
-                "trajectory_decision": decision["decision"],
+                "trajectory_decision": "BLOCK" if self._effect_uncertain else decision["decision"],
                 "trajectory_decision_receipt_sha256": decision["receipt_sha256"],
                 "risk_score": decision["risk_score"],
+                **self._uncertainty_fields(decision, event.event_sha256),
             }
 
     def project_verified_event(self, document: Mapping[str, Any]) -> dict[str, Any]:
         with self.commit_fence.hold():
+            if self._effect_uncertain:
+                raise CausalEffectCommitError("trajectory_effect_uncertain")
             event = self._verified_event(document)
             if event.event_id in self._event_ids:
                 raise CausalEffectCommitError("trajectory_event_replay")
@@ -236,13 +240,39 @@ class FencedTrajectoryRiskLedger:
                 "trajectory_head_sha256": head,
                 "graph_sha256": decision["graph_sha256"],
                 "decision_receipt_sha256": decision["receipt_sha256"],
-                "decision": decision["decision"],
+                "decision": "BLOCK" if self._effect_uncertain else decision["decision"],
                 "risk_score": decision["risk_score"],
                 "matched_rules": list(decision["matched_rules"]),
                 "causal_authority_sha256": canonical_sha256(CAUSAL_AUTHORITY),
                 "authority": dict(AUTHORITY),
+                **self._uncertainty_fields(decision, head),
             }
             return {**body, "state_sha256": canonical_sha256(body)}
+
+    def _mark_effect_uncertain(self) -> None:
+        """Fail closed across all brokers sharing this ledger until trusted reconciliation."""
+        with self.commit_fence.hold():
+            self._effect_uncertain = True
+
+    def _uncertainty_fields(self, decision: Mapping[str, Any], head: str) -> dict[str, Any]:
+        if not self._effect_uncertain:
+            return {}
+        # Preserve the actual Phase-3 evidence; this is a separate authority gate.
+        gate = {
+            "schema": "liminal-trajectory-uncertainty-gate-v0.1",
+            "decision": "BLOCK",
+            "reason_codes": ["effect_outcome_unreconciled"],
+            "event_count": len(self._events),
+            "trajectory_head_sha256": head,
+            "graph_sha256": decision["graph_sha256"],
+            "decision_receipt_sha256": decision["receipt_sha256"],
+        }
+        return {
+            "effect_uncertain": True,
+            "verified_trajectory_decision": decision["decision"],
+            "uncertainty_gate": gate,
+            "uncertainty_gate_sha256": canonical_sha256(gate),
+        }
 
     def _verified_event(self, document: Mapping[str, Any]) -> TrajectoryEvent:
         event = _parse_event(document)
@@ -525,6 +555,8 @@ class CausalBoundEffectCommitBroker:
                     executor=executor,
                 )
             except Exception as exc:
+                if isinstance(exc, ExecutionOutcomeUnknown):
+                    self.ledger._mark_effect_uncertain()
                 try:
                     self._append_commit(
                         lease=lease,
@@ -549,6 +581,7 @@ class CausalBoundEffectCommitBroker:
             try:
                 appended = self.ledger.append_verified_event(lease.proposal)
             except Exception as exc:
+                self.ledger._mark_effect_uncertain()
                 evidence_error = CausalEffectEvidenceError(result_sha256=observation.result_sha256)
                 try:
                     self._append_commit(
@@ -583,6 +616,7 @@ class CausalBoundEffectCommitBroker:
                     ),
                 )
             except Exception:
+                self.ledger._mark_effect_uncertain()
                 raise CausalEffectEvidenceError(
                     result_sha256=observation.result_sha256,
                     evidence_code="causal_commit_receipt_failed",

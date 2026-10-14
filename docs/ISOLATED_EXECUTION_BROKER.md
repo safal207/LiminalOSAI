@@ -90,8 +90,24 @@ The caller owns journal permissions, durable storage, restart recovery and reten
 
 For trajectory risk, an admitted `UNKNOWN` retains an `ALLOW` event representing
 a possible dispatched effect, with privilege bounded by `max(before, after)`.
-Its receipt and event metadata keep the `UNKNOWN` outcome. Trajectory analysis
-recommends a risk decision; containment and release remain explicit host actions.
+Its receipt and event metadata keep the `UNKNOWN` outcome. Each mediator retains
+the highest unresolved bound in all later event privilege levels. This is a
+conservative in-process risk bound, not an observation of actual privileges;
+later outcomes and containment release cannot lower it without a separate
+trusted reconciliation contract, and this patch exposes no reset API.
+Trajectory analysis recommends a risk decision; containment and release remain
+explicit host actions.
+
+The shared `FencedTrajectoryRiskLedger` also retains an in-process uncertainty
+flag before post-dispatch diagnostics. An unknown effect or known-success causal
+evidence failure makes its authoritative decision `BLOCK`. Its separate
+uncertainty gate and digest bind the actual verified head, graph and detector
+receipt; `verified_trajectory_decision` preserves the detector's decision, and
+no committed event is fabricated. All brokers sharing that ledger reject new
+issuance and projections, and consume previously issued leases without dispatch
+when they are presented. Verified fact appends and containment release do not
+clear this flag. Trusted reconciliation requires a separate contract; there is
+no reset API. This in-process gate complements the durable retained reservation.
 
 After a validated effect succeeds, failure of its trajectory append or final
 causal receipt raises `CausalEffectEvidenceError`, preserving the known result
@@ -100,7 +116,9 @@ append-failure receipt can be recorded, it retains
 `EFFECT_SUCCEEDED_EVIDENCE_FAILED`. Runtime mediation reports `UNKNOWN` with
 `effect_succeeded` and the specific `trajectory_append_failed` or
 `causal_commit_receipt_failed` reason, keeping the effect in trajectory risk.
-Outer durable wrappers retain the consumed lease and reservation.
+Outer durable wrappers retain the known result digest and evidence reason in
+their commit and runtime receipts, together with the consumed lease and
+reservation. Missing optional diagnostic receipts do not erase the typed result.
 
 Across epoch, objective, causal and durable wrappers, a secondary diagnostic
 cursor, state-read or receipt failure preserves an existing

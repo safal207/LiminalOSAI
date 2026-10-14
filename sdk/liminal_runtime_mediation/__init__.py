@@ -161,6 +161,9 @@ class RuntimeMediator:
         self._receipts: list[RuntimeMediationReceipt] = []
         self._events: list[TrajectoryEvent] = []
         self._event_head = ZERO_SHA256
+        # Conservative in-process risk state, not an observation or authority
+        # grant. Only a separate trusted reconciliation contract could clear it.
+        self._unresolved_privilege_floor: int | None = None
 
     def enter_containment(self, *, incident_receipt_sha256: str) -> None:
         self._containment_evidence_sha256 = _sha(incident_receipt_sha256, "incident_receipt_sha256")
@@ -297,15 +300,24 @@ class RuntimeMediator:
         # its admitted operation, so retain it for conservative risk analysis;
         # the receipt and metadata still record UNKNOWN rather than success.
         event_decision = "ALLOW" if admission == "ALLOW" and outcome in {"SUCCEEDED", "UNKNOWN"} else "BLOCK"
+        privilege_before = operation.privilege_level_before
+        if self._unresolved_privilege_floor is not None:
+            privilege_before = max(privilege_before, self._unresolved_privilege_floor)
         privilege_after = operation.privilege_level_after if event_decision == "ALLOW" else operation.privilege_level_before
         if event_decision == "ALLOW" and outcome == "UNKNOWN":
-            # An unverified decrease must not erase possible prior privilege.
-            privilege_after = max(operation.privilege_level_before, operation.privilege_level_after)
+            # Retain the possible effect across later events. Preserve this
+            # event's prior bound so the first uncertain escalation remains
+            # measurable; denied requested escalations cannot raise the floor.
+            self._unresolved_privilege_floor = max(privilege_before, privilege_after)
+        if self._unresolved_privilege_floor is not None:
+            # Success, failure, denial and containment release do not reconcile
+            # the earlier uncertainty, including a successful requested decrease.
+            privilege_after = max(privilege_after, self._unresolved_privilege_floor)
         event = TrajectoryEvent.build(
             event_id=f"runtime-event:{len(self._events)+1}", sequence=len(self._events)+1,
             observed_at_unix=operation.at_unix, kind=event_kind, decision=event_decision,
             subject_id=operation.subject_id, capability_id=capability_id,
-            privilege_level_before=operation.privilege_level_before,
+            privilege_level_before=privilege_before,
             privilege_level_after=privilege_after,
             metadata={
                 "operation_id": operation.operation_id,
