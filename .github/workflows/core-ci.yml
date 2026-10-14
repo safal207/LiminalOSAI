@@ -2,7 +2,7 @@ name: LiminalOSAI Core CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'agent/**']
     paths:
       - .github/workflows/core-ci.yml
       - .gitignore

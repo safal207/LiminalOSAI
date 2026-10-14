@@ -2,7 +2,7 @@ name: Kernel Runtime Contract
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'agent/**']
     paths:
       - .github/workflows/kernel-runtime-contract-ci.yml
       - .gitignore
