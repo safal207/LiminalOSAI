@@ -5,9 +5,11 @@
 #include <string.h>
 
 #include "pulse_loop.h"
+#include "pulse_options.h"
 #include "runtime_trace.h"
 #include "soil.h"
 #include "substrate_state.h"
+#include "substrate_options.h"
 
 typedef struct {
     char calls[64];
@@ -131,11 +133,55 @@ static void test_trace_retains_format_and_does_not_mutate_state(void)
     assert(fclose(stream) == 0);
 }
 
+static void test_value_option_prefixes(void)
+{
+    char *pulse_argv[] = {"pulse_kernel", "--cm-snapshot-interval=37",
+        "--council-threshold=0.6", "--trs-target-delta=0.125", "--emotional-source=text"};
+    kernel_options pulse = pulse_options_parse(5, pulse_argv);
+    char *substrate_argv[] = {"liminal_core", "--erb-replay-speed=2.5",
+        "--trs-target-delta=0.25", "--bridge-plasticity=0.4",
+        "--bridge-retention=0.35", "--bridge-recovery=0.12", "--emotional-source=sensor"};
+    substrate_config substrate = substrate_options_parse(7, substrate_argv);
+    unsigned int incorrect = 0;
+    incorrect += pulse.cm_snapshot_interval != 37;
+    incorrect += fabsf(pulse.council_threshold - 0.6f) > 0.000001f;
+    incorrect += fabsf(pulse.trs_target_delta - 0.125f) > 0.000001f;
+    incorrect += pulse.emotional_source != EMPATHIC_SOURCE_TEXT;
+    incorrect += fabsf(substrate.erb_replay_speed - 2.5f) > 0.000001f;
+    incorrect += fabsf(substrate.trs_target_delta - 0.25f) > 0.000001f;
+    incorrect += fabsf(substrate.bridge_plasticity - 0.4f) > 0.000001f;
+    incorrect += fabsf(substrate.bridge_retention - 0.35f) > 0.000001f;
+    incorrect += fabsf(substrate.bridge_recovery - 0.12f) > 0.000001f;
+    incorrect += substrate.emotional_source != EMPATHIC_SOURCE_SENSOR;
+    if (incorrect) {
+        fprintf(stderr, "%u value options did not reach their configuration fields\n", incorrect);
+    }
+    assert(incorrect == 0);
+    assert(pulse.trs_enabled && pulse.trs_adapt_enabled);
+    assert(substrate.trs_enabled && substrate.trs_adapt_enabled);
+}
+
+static void test_emotional_source_empty_and_fallback(void)
+{
+    char empty[] = "--emotional-source=";
+    char *argv[] = {"runtime", empty};
+    assert(pulse_options_parse(2, argv).emotional_source == EMPATHIC_SOURCE_AUDIO);
+    assert(substrate_options_parse(2, argv).emotional_source == EMPATHIC_SOURCE_AUDIO);
+    char *repeated[] = {"runtime", "--emotional-source=text", "--emotional-source=sensor",
+        "--emotional-source=unrecognized"};
+    assert(pulse_options_parse(3, repeated).emotional_source == EMPATHIC_SOURCE_SENSOR);
+    assert(substrate_options_parse(3, repeated).emotional_source == EMPATHIC_SOURCE_SENSOR);
+    assert(pulse_options_parse(4, repeated).emotional_source == EMPATHIC_SOURCE_AUDIO);
+    assert(substrate_options_parse(4, repeated).emotional_source == EMPATHIC_SOURCE_AUDIO);
+}
+
 int main(void)
 {
     test_pulse_stage_and_observation_order();
     test_state_is_caller_owned_and_retains_cycle_boundary();
     test_trace_retains_format_and_does_not_mutate_state();
+    test_value_option_prefixes();
+    test_emotional_source_empty_and_fallback();
     puts("runtime boundary tests passed");
     return 0;
 }

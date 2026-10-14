@@ -244,8 +244,8 @@ kernel_options pulse_options_parse(int argc, char **argv)
                 strncpy(opts.cm_path, value, sizeof(opts.cm_path) - 1);
                 opts.cm_path[sizeof(opts.cm_path) - 1] = '\0';
             }
-        } else if (strncmp(arg, "--cm-snapshot-interval=", 24) == 0) {
-            const char *value = arg + 24;
+        } else if (strncmp(arg, "--cm-snapshot-interval=", sizeof("--cm-snapshot-interval=") - 1) == 0) {
+            const char *value = arg + (sizeof("--cm-snapshot-interval=") - 1);
             if (*value) {
                 char *end = NULL;
                 long parsed = strtol(value, &end, 10);
@@ -322,8 +322,8 @@ kernel_options pulse_options_parse(int argc, char **argv)
                     opts.ensemble_mode = ENSEMBLE_STRATEGY_LEADER;
                 }
             }
-        } else if (strncmp(arg, "--council-threshold=", 21) == 0) {
-            const char *value = arg + 21;
+        } else if (strncmp(arg, "--council-threshold=", sizeof("--council-threshold=") - 1) == 0) {
+            const char *value = arg + (sizeof("--council-threshold=") - 1);
             if (*value) {
                 char *end = NULL;
                 float parsed = strtof(value, &end);
@@ -802,8 +802,8 @@ kernel_options pulse_options_parse(int argc, char **argv)
                     opts.trs_enabled = true;
                 }
             }
-        } else if (strncmp(arg, "--trs-target-delta=", 20) == 0) {
-            const char *value = arg + 20;
+        } else if (strncmp(arg, "--trs-target-delta=", sizeof("--trs-target-delta=") - 1) == 0) {
+            const char *value = arg + (sizeof("--trs-target-delta=") - 1);
             if (*value) {
                 char *end = NULL;
                 float parsed = strtof(value, &end);
@@ -900,8 +900,8 @@ kernel_options pulse_options_parse(int argc, char **argv)
             opts.strict_order = true;
         } else if (strcmp(arg, "--dry-run") == 0) {
             opts.dry_run = true;
-        } else if (strncmp(arg, "--emotional-source=", 20) == 0) {
-            const char *value = arg + 20;
+        } else if (strncmp(arg, "--emotional-source=", sizeof("--emotional-source=") - 1) == 0) {
+            const char *value = arg + (sizeof("--emotional-source=") - 1);
             if (strcmp(value, "text") == 0) {
                 opts.emotional_source = EMPATHIC_SOURCE_TEXT;
             } else if (strcmp(value, "sensor") == 0) {

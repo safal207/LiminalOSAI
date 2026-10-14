@@ -13,11 +13,16 @@ import argparse
 import hashlib
 import json
 import os
+import resource
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+PROCESS_TIMEOUT_SECONDS = 20.0
+PROCESS_REAP_TIMEOUT_SECONDS = 1.0
 
 SHIM = r"""
 #define _POSIX_C_SOURCE 200809L
@@ -99,6 +104,52 @@ def digest(data: bytes) -> dict[str, int | str]:
     return {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
+def _kill_and_reap(process: subprocess.Popen[bytes]) -> None:
+    # The compiler and measured child each own a new session. Kill the group
+    # so compiler helpers and descendants cannot keep inherited pipes alive.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None:
+            stream.close()
+    # Avoid Popen's context manager and an unbounded communicate after timeout.
+    process.wait(timeout=PROCESS_REAP_TIMEOUT_SECONDS)
+
+
+def _compile_shim(command: list[str]) -> None:
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=PROCESS_TIMEOUT_SECONDS)
+    except BaseException:
+        _kill_and_reap(process)
+        raise
+    if process.returncode != 0:
+        raise subprocess.CalledProcessError(process.returncode, command, stdout, stderr)
+
+
+def _wait4_bounded(process: subprocess.Popen[bytes]) -> resource.struct_rusage:
+    deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
+    try:
+        while True:
+            # wait4 retains CPU and peak RSS for this child only; polling adds
+            # a wall-clock deadline without reaping it through Popen.poll().
+            pid, status, usage = os.wait4(process.pid, os.WNOHANG)
+            if pid:
+                process.returncode = os.waitstatus_to_exitcode(status)
+                return usage
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(process.args, PROCESS_TIMEOUT_SECONDS)
+            time.sleep(min(0.001, remaining))
+    except BaseException:
+        _kill_and_reap(process)
+        raise
+
+
 def capture(binary_directory: Path, compiler: str, repetitions: int = 0,
             measure_cycles: int = 1024) -> dict[str, object]:
     if sys.platform != "linux":
@@ -112,9 +163,8 @@ def capture(binary_directory: Path, compiler: str, repetitions: int = 0,
         source = temporary_root / "clock.c"
         library = temporary_root / "clock.so"
         source.write_text(SHIM, encoding="utf-8")
-        subprocess.run(
+        _compile_shim(
             [compiler, "-std=c11", "-shared", "-fPIC", str(source), "-o", str(library)],
-            check=True, capture_output=True,
         )
         records = []
         measurements = []
@@ -170,14 +220,12 @@ def capture(binary_directory: Path, compiler: str, repetitions: int = 0,
                     profile = ("--substrate",) if name == "liminal_core" else ()
                     arguments = (f"--limit={measure_cycles}", *CASES["cycle-modules"][1:])
                     start = time.perf_counter()
-                    with subprocess.Popen(
+                    process = subprocess.Popen(
                         [str(binary), *profile, *arguments], cwd=run_root, env=env,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    ) as process:
-                        # wait4 attributes CPU and peak RSS to this process only,
-                        # rather than reporting the parent's cumulative maximum.
-                        _, status, usage = os.wait4(process.pid, 0)
-                        process.returncode = os.waitstatus_to_exitcode(status)
+                        start_new_session=True,
+                    )
+                    usage = _wait4_bounded(process)
                     wall_seconds = time.perf_counter() - start
                     if process.returncode != 0:
                         raise RuntimeError(f"measurement {name}/{sample} exited {process.returncode}")

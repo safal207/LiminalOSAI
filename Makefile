@@ -132,7 +132,7 @@ build/tests/test_qel: tests/test_qel.o core/qel.o | build/tests
 build/tests/test_vse: tests/test_vse.o core/vse.o | build/tests
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -Wl,--wrap=malloc,--wrap=free,--wrap=rand
 
-build/tests/test_runtime_boundaries: tests/test_runtime_boundaries.o core/runtime/pulse_loop.o core/runtime/substrate_state.o core/runtime/runtime_trace.o memory/soil.o | build/tests
+build/tests/test_runtime_boundaries: tests/test_runtime_boundaries.o core/runtime/pulse_loop.o core/runtime/substrate_state.o core/runtime/runtime_trace.o core/runtime/pulse_options.o core/runtime/substrate_options.o synchrony/weave.o affinity/core.o core/erb.o memory/soil.o | build/tests
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 test-c: $(C_TEST_BINS)

@@ -9,7 +9,8 @@ of these responsibilities in 3,513 and 3,894 lines respectively after the
 preceding CLI validation fix.
 
 This stage moves live responsibilities behind narrow headers. It retains the
-numeric entry guard and existing configuration semantics. It does not introduce
+numeric entry guard, defaults, clamping and feature dependencies. The subsequent
+review corrections to ten value-option prefixes are described below. It does not introduce
 a second parser, copy mutable module globals into a new parallel context, or
 change when trace output becomes visible.
 
@@ -59,11 +60,16 @@ production binaries without the characterization library.
 
 The additional `runtime_boundaries` C executable exercises the linked production
 scheduler, independent state objects, cycle crossing, saturation, trace format
-and non-mutating trace snapshots. `make validate` includes this executable with
-the existing eight C executables and all discovered Python tests. Two Python
-controls also challenge the characterization controller: a changed trace fails
+and non-mutating trace snapshots. It also calls the production option parsers
+to check all ten repaired value options and emotional-source fallback behavior.
+`make validate` includes this executable with the existing eight C executables
+and all discovered Python tests. Two original Python
+tests also challenge the characterization controller: a changed trace fails
 comparison, a binary rebuild with identical behavior succeeds, and a candidate
-cannot overwrite its comparison baseline by reusing the output path.
+cannot overwrite its comparison baseline by reusing the output path. Two further
+controls run genuinely blocked compiler/measurement processes with descendants
+and verify bounded failure, termination of owned process groups and direct-child
+reaping.
 
 After integrating the CLI validation commit, strict GCC validation and the
 GCC AddressSanitizer/UndefinedBehaviorSanitizer profile each passed **1,031 Python
@@ -77,8 +83,9 @@ compares baseline `724ff8cf6ec238adeb110ae1c0632c314d727a1c` with the frozen
 candidate C source at `4c410e6f02ca166f37dec28433666bf48dfa9660`. It contains
 binary fingerprints, fingerprints for all tracked C sources and headers,
 exact characterization hashes and raw local resource samples. The candidate
-core tree is `dfb85e3a2ae0a7fd6a91a519dfc0cb9c87e827d6`; subsequent evidence and
-documentation changes do not alter that measured source. Both measurement
+core tree is `dfb85e3a2ae0a7fd6a91a519dfc0cb9c87e827d6`. This record is frozen
+historical evidence for the extraction, not a fingerprint or measurement of
+the subsequent review-fix source. Both historical measurement
 binaries used clean GCC `-Os` builds with the same build
 flags. Seven samples per binary execute 1,024 cycles with the enabled-module
 fixture and controlled clocks/sleep. Child-process CPU time and peak resident
@@ -100,6 +107,41 @@ Binary text grew from 126,494 to 127,894 bytes for pulse and from 111,829 to
 alignment grew by 32 bytes. The explicit module interfaces therefore have a
 small binary-size cost. The scheduler and state transitions introduce no heap
 allocation of their own.
+
+## Full-review corrections
+
+Full review of `a6a7f9301b6d66e9580ab513fb73c64e53d425c1` identified
+two independently confirmed defects. Ten legacy comparisons counted beyond the
+end of a value-option prefix, causing valid nonempty values to miss their parser
+branches. Those comparisons and value offsets now use `sizeof("--option=") - 1`.
+The existing numeric validation, defaults, clamps, feature dependencies and
+handling of unknown options remain in their original paths. The public numeric
+entry guard still rejects the unavailable pulse snapshot option; the direct
+parser repair does not make it a new public feature.
+
+The characterization shim compiler and resource-measurement child previously
+had no deadline. Both now have a 20-second parent-clock deadline. Each starts
+in its own session; failure kills its owned process group and gives direct-child
+reaping a separate one-second deadline. Successful measurement still reads CPU
+and peak RSS from `wait4` for that child. The polling interval is at most one
+millisecond, so wall-time granularity differs from the historical controller.
+The existing 20-second trace-case timeout is unchanged.
+
+The [review-fix record](benchmarks/c-orchestrator-review-fixes.json) binds the new
+controller, all 108 tracked C/build inputs, the new core tree and both real
+binaries to a fresh capture. Both the unchanged baseline binaries and the
+candidate were captured by this same updated controller. All 42 existing cases
+match exactly; these fixtures do not exercise the ten newly repaired flags,
+which have separate production-parser regression assertions. Seven fresh
+resource samples per binary and revision are retained as descriptive local
+observations, without a speedup claim.
+
+The old source fails the ten-value regression and both bounded-process controls;
+the corrected source passes them. Ordinary GCC `make validate` and the strict
+ASan/UBSan build each pass **1,033 Python tests and nine C executables**, with
+zero skips. Local ASan still uses `detect_leaks=0`; the unchanged CI sanitizer
+job retains `detect_leaks=1`. Final published-head GCC, Clang and sanitizer CI
+results belong in the PR evidence and are not inferred from these local runs.
 
 ## Remaining boundaries
 

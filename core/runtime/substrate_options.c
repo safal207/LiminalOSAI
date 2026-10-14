@@ -348,8 +348,8 @@ substrate_config substrate_options_parse(int argc, char **argv)
                     }
                 }
             }
-        } else if (strncmp(arg, "--erb-replay-speed=", 20) == 0) {
-            const char *value = arg + 20;
+        } else if (strncmp(arg, "--erb-replay-speed=", sizeof("--erb-replay-speed=") - 1) == 0) {
+            const char *value = arg + (sizeof("--erb-replay-speed=") - 1);
             if (*value) {
                 char *end = NULL;
                 float parsed = strtof(value, &end);
@@ -939,8 +939,8 @@ substrate_config substrate_options_parse(int argc, char **argv)
                     cfg.trs_enabled = true;
                 }
             }
-        } else if (strncmp(arg, "--trs-target-delta=", 20) == 0) {
-            const char *value = arg + 20;
+        } else if (strncmp(arg, "--trs-target-delta=", sizeof("--trs-target-delta=") - 1) == 0) {
+            const char *value = arg + (sizeof("--trs-target-delta=") - 1);
             if (*value) {
                 char *end = NULL;
                 float parsed = strtof(value, &end);
@@ -1030,8 +1030,8 @@ substrate_config substrate_options_parse(int argc, char **argv)
             cfg.dream_replay_enabled = true;
         } else if (strcmp(arg, "--bridge") == 0) {
             cfg.bridge_enabled = true;
-        } else if (strncmp(arg, "--bridge-plasticity=", 21) == 0) {
-            const char *value = arg + 21;
+        } else if (strncmp(arg, "--bridge-plasticity=", sizeof("--bridge-plasticity=") - 1) == 0) {
+            const char *value = arg + (sizeof("--bridge-plasticity=") - 1);
             if (*value) {
                 char *end = NULL;
                 float parsed = strtof(value, &end);
@@ -1040,8 +1040,8 @@ substrate_config substrate_options_parse(int argc, char **argv)
                     cfg.bridge_enabled = true;
                 }
             }
-        } else if (strncmp(arg, "--bridge-retention=", 20) == 0) {
-            const char *value = arg + 20;
+        } else if (strncmp(arg, "--bridge-retention=", sizeof("--bridge-retention=") - 1) == 0) {
+            const char *value = arg + (sizeof("--bridge-retention=") - 1);
             if (*value) {
                 char *end = NULL;
                 float parsed = strtof(value, &end);
@@ -1050,8 +1050,8 @@ substrate_config substrate_options_parse(int argc, char **argv)
                     cfg.bridge_enabled = true;
                 }
             }
-        } else if (strncmp(arg, "--bridge-recovery=", 19) == 0) {
-            const char *value = arg + 19;
+        } else if (strncmp(arg, "--bridge-recovery=", sizeof("--bridge-recovery=") - 1) == 0) {
+            const char *value = arg + (sizeof("--bridge-recovery=") - 1);
             if (*value) {
                 char *end = NULL;
                 float parsed = strtof(value, &end);
@@ -1071,8 +1071,8 @@ substrate_config substrate_options_parse(int argc, char **argv)
             cfg.dry_run = true;
         } else if (strcmp(arg, "--bond-trace") == 0) {
             cfg.bond_trace = true;
-        } else if (strncmp(arg, "--emotional-source=", 20) == 0) {
-            const char *value = arg + 20;
+        } else if (strncmp(arg, "--emotional-source=", sizeof("--emotional-source=") - 1) == 0) {
+            const char *value = arg + (sizeof("--emotional-source=") - 1);
             if (strcmp(value, "text") == 0) {
                 cfg.emotional_source = EMPATHIC_SOURCE_TEXT;
             } else if (strcmp(value, "sensor") == 0) {
