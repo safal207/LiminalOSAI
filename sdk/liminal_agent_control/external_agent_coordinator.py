@@ -169,10 +169,14 @@ class ExternalAgentCoordinator:
         if (canonical_bytes(bridge_binding) != canonical_bytes(expected)
                 or canonical_bytes(self.bridge.configuration().get("actions")) != canonical_bytes(binding["effect_actions"])):
             raise ControlError("AGENT_COORDINATOR_BRIDGE_BINDING_MISMATCH")
+        gateway_configuration = json.loads(self.effect_gateway._configuration())
+        if (gateway_configuration.get("receiver_fence", {}).get("required") is True
+                and self.receiver_fence_client is None):
+            raise ControlError("AGENT_COORDINATOR_RECEIVER_CLIENT_REQUIRED")
         configuration = {"schema": "liminal-agent-coordinator-store-v1", "profile": AGENT_PROFILE,
             "run_binding": binding, "run_binding_digest": digest(binding),
             "bridge_configuration_digest": digest(self.bridge.configuration()),
-            "effect_gateway_configuration": json.loads(self.effect_gateway._configuration()),
+            "effect_gateway_configuration": gateway_configuration,
             "command_authority_url": clients[0].url, "effect_authority_url": clients[1].url,
             "command_admin_key_digest": hashlib.sha256(clients[0].request_key).hexdigest(),
             "effect_admin_key_digest": hashlib.sha256(clients[1].request_key).hexdigest()}

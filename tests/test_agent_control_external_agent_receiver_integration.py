@@ -148,6 +148,57 @@ class ExternalAgentReceiverIntegrationTests(unittest.TestCase):
         self.assertEqual(result["status"], "PERMITTED")
         return result, self.effect_receiver.evidence[-1]
 
+    def test_receiver_gateway_requires_matching_coordinator_stop_client_before_creation(self):
+        path = self.directory / "missing-receiver-client.sqlite"
+        with self.assertRaisesRegex(ControlError, "AGENT_COORDINATOR_RECEIVER_CLIENT_REQUIRED"):
+            ExternalAgentCoordinator(
+                path, run_binding=self.binding, supervisor=self.supervisor,
+                command_admin_client=self.command_admin, effect_admin_client=self.effect_admin,
+                effect_gateway=self.gateway, bridge=self.bridge, start_watcher=False,
+            )
+        self.assertFalse(path.exists())
+        self.assertEqual(self.receiver.inventory()["fences"], [])
+        self.assertEqual(self.coordinator.stop()["status"], "STOPPED")
+        self.assertEqual(len(self.receiver.inventory()["fences"]), 1)
+
+    def test_consumed_pre_permit_denial_stays_denied_on_execute_and_reconcile(self):
+        self.effect_admin.stop("effect-root")
+        # Isolate authority result propagation at a healthy admission boundary.
+        # The authority and receiver HTTP/signatures/SQLite are real; there is
+        # no permit, endpoint callback or Docker measurement in this control.
+        with patch.object(self.gateway, "_assert_gate_ready", return_value=None):
+            first = self.gateway.execute(self.action)
+            authority = self.effect_receiver.query(self.action["action_id"])
+            self.assertEqual((authority["status"], authority["outcome"]), ("CONSUMED", "DENIED"))
+            self.assertIsNone(authority["receipt"])
+            retry = self.gateway.execute(self.action)
+        reconciled = self.gateway.reconcile(self.action["action_id"])
+        for result in (first, retry, reconciled):
+            self.assertEqual(result["status"], "DENIED")
+            self.assertEqual(result["reservation_id"], authority["reservation_id"])
+            self.assertIsNone(result["receipt"])
+            self.assertIsNone(result["effect_count"])
+            self.assertIsNone(result["remote_outcome"])
+            self.assertFalse(result["dispatch_finished"])
+            self.assertFalse(result["execution_authorized"])
+        self.assertEqual(self.gateway.inventory()["actions"][0]["status"], "DENIED")
+        self.assertEqual(self.effect_store.status("effect-root")["issued_count"], 0)
+        self.assertEqual(self.receiver.inventory()["commit_request_count"], 0)
+
+    def test_consumed_commit_without_receiver_proof_remains_unknown(self):
+        self.effect_admin.stop("effect-root")
+        self.effect_receiver.begin(self.action, self.authorization)
+        with sqlite3.connect(self.effect_store.db_path) as database:
+            database.execute("UPDATE external_actions SET status='COMMITTED' WHERE action_id=?",
+                             (self.action["action_id"],))
+        with patch.object(self.gateway, "_assert_gate_ready", return_value=None):
+            result = self.gateway.execute(self.action)
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertIsNone(result["receipt"])
+        self.assertIsNone(result["effect_count"])
+        self.assertFalse(result["dispatch_finished"])
+        self.assertEqual(self.receiver.inventory()["commit_request_count"], 0)
+
     def terminal(self, *, stop=False):
         result, pair = self.begin()
         fence = self.endpoint.stop("effect-root") if stop else None

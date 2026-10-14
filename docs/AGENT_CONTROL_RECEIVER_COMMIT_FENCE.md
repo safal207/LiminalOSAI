@@ -145,6 +145,20 @@ signatures alone do not establish an independently enrolled latest authority tip
 
 ## Full repository profile requirements
 
+The receiver-required gateway profile also requires its exact matching receiver
+operator client when constructing the coordinator. Omitting that client is
+rejected before creating coordinator state; a local STOP cannot substitute for
+the signed receiver fence. Legacy G02 coordinator construction remains unchanged.
+
+An authenticated, subject-bound authority refusal before issuing a permit remains
+DENIED on exact execute retries and reconciliation, even without an endpoint
+receipt. This does not manufacture a receiver NO_EFFECT receipt, a known effect
+count, or a settled dispatched effect. COMMITTED without receiver proof remains
+UNKNOWN, and dispatched COMMITTED/NO_EFFECT outcomes still require valid signed
+receiver receipts. Signed loopback/SQLite regressions cover both contracts;
+readiness is supplied as an explicit unit-test snapshot for the denial control,
+so those regressions do not claim Docker containment measurements.
+
 The updated main test runner discovers all repository tests and fails on skips.
 Running the focused G03 commands above is not a passing `make validate` result.
 The inherited draft stack also contains separate required Docker profiles:
