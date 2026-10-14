@@ -23,7 +23,8 @@ from sdk.liminal_causal_effect_commit import (
     build_effect_trajectory_event,
     verify_authorization_receipt as verify_causal_authorization_receipt,
 )
-from sdk.liminal_effect_commit import RuntimeCommitFence, ZERO_SHA256
+from sdk.liminal_effect_commit import EffectCommitEvidenceError, RuntimeCommitFence, ZERO_SHA256
+from sdk.liminal_objective_effect_commit import ObjectiveEffectEvidenceError
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
 from sdk.liminal_runtime_mediation import (
     ExecutionObservation,
@@ -815,10 +816,10 @@ class DurableGovernanceEffectBroker:
                         committed_at_unix=now,
                         outcome="EFFECT_UNKNOWN_RESERVATION_STUCK" if isinstance(exc, ExecutionOutcomeUnknown)
                         else "EFFECT_FAILED_RESERVATION_STUCK",
-                        result_sha256=exc.result_sha256 if isinstance(exc, CausalEffectEvidenceError)
+                        result_sha256=exc.result_sha256 if isinstance(exc, (EffectCommitEvidenceError, ObjectiveEffectEvidenceError, CausalEffectEvidenceError))
                         else canonical_sha256({"error_type": type(exc).__name__}),
                         reasons=("effect_succeeded", exc.evidence_code, "durable_reservation_retained", "reconciliation_required")
-                        if isinstance(exc, CausalEffectEvidenceError)
+                        if isinstance(exc, (EffectCommitEvidenceError, ObjectiveEffectEvidenceError, CausalEffectEvidenceError))
                         else ("durable_reservation_retained", "inner_effect_failed_or_unknown", "effect_outcome_unknown", "reconciliation_required")
                         if isinstance(exc, ExecutionOutcomeUnknown)
                         else ("durable_reservation_retained", "inner_effect_failed_or_unknown"),
@@ -1130,11 +1131,11 @@ class DurableGovernanceRuntimeMediator(RuntimeMediator):
             return self._finish(
                 operation=operation, capability_receipt_sha=capability["receipt_sha256"],
                 admission="ALLOW", outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
-                result_sha=exc.result_sha256 if isinstance(exc, (CausalEffectEvidenceError, DurableEffectEvidenceError))
+                result_sha=exc.result_sha256 if isinstance(exc, (EffectCommitEvidenceError, ObjectiveEffectEvidenceError, CausalEffectEvidenceError, DurableEffectEvidenceError))
                 else canonical_sha256({"error_type": type(exc).__name__}),
                 reasons=exc.reason_codes if isinstance(exc, DurableEffectEvidenceError)
                 else ("effect_succeeded", exc.evidence_code, "durable_reservation_retained", "reconciliation_required")
-                if isinstance(exc, CausalEffectEvidenceError)
+                if isinstance(exc, (EffectCommitEvidenceError, ObjectiveEffectEvidenceError, CausalEffectEvidenceError))
                 else ("effect_outcome_unknown", "durable_reservation_retained", "reconciliation_required")
                 if isinstance(exc, ExecutionOutcomeUnknown) else ("durable_governance_effect_commit_failed",),
                 capability_id=capability.get("capability_id"), scope_sha=scope_sha,

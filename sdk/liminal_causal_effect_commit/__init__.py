@@ -18,10 +18,11 @@ from sdk.liminal_causal_escalation import (
     TrajectoryEvent,
     analyze_trajectory,
 )
-from sdk.liminal_effect_commit import RuntimeCommitFence, ZERO_SHA256
+from sdk.liminal_effect_commit import EffectCommitEvidenceError, RuntimeCommitFence, ZERO_SHA256
 from sdk.liminal_objective_effect_commit import (
     ObjectiveBoundEffectCommitBroker,
     ObjectiveEffectCommitError,
+    ObjectiveEffectEvidenceError,
     verify_authorization_receipt as verify_objective_authorization_receipt,
 )
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
@@ -564,8 +565,11 @@ class CausalBoundEffectCommitBroker:
                         objective_commit_sha256=self._latest_objective_commit(before_commits),
                         committed_at_unix=now,
                         outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
-                        result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
-                        reasons=("causal_lease_consumed", "effect_outcome_unknown", "reconciliation_required")
+                        result_sha256=exc.result_sha256 if isinstance(exc, (EffectCommitEvidenceError, ObjectiveEffectEvidenceError))
+                        else canonical_sha256({"error_type": type(exc).__name__}),
+                        reasons=("causal_lease_consumed", "effect_succeeded", exc.evidence_code, "reconciliation_required")
+                        if isinstance(exc, (EffectCommitEvidenceError, ObjectiveEffectEvidenceError))
+                        else ("causal_lease_consumed", "effect_outcome_unknown", "reconciliation_required")
                         if isinstance(exc, ExecutionOutcomeUnknown)
                         else ("causal_lease_consumed", "objective_bound_effect_failed"),
                     )
@@ -905,10 +909,10 @@ class CausalBoundEffectRuntimeMediator(RuntimeMediator):
                 capability_receipt_sha=capability["receipt_sha256"],
                 admission="ALLOW",
                 outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
-                result_sha=exc.result_sha256 if isinstance(exc, CausalEffectEvidenceError)
+                result_sha=exc.result_sha256 if isinstance(exc, (EffectCommitEvidenceError, ObjectiveEffectEvidenceError, CausalEffectEvidenceError))
                 else canonical_sha256({"error_type": type(exc).__name__}),
                 reasons=("effect_succeeded", exc.evidence_code, "reconciliation_required")
-                if isinstance(exc, CausalEffectEvidenceError)
+                if isinstance(exc, (EffectCommitEvidenceError, ObjectiveEffectEvidenceError, CausalEffectEvidenceError))
                 else ("effect_outcome_unknown", "reconciliation_required")
                 if isinstance(exc, ExecutionOutcomeUnknown) else ("causal_bound_effect_commit_failed",),
                 capability_id=capability.get("capability_id"),

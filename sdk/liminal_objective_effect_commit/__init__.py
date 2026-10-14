@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping
 from sdk.liminal_effect_commit import (
     EffectCommitBroker,
     EffectCommitError,
+    EffectCommitEvidenceError,
     RuntimeCommitFence,
     ZERO_SHA256,
     verify_authorization_receipt as verify_inner_authorization_receipt,
@@ -60,6 +61,17 @@ class ObjectiveEffectCommitError(ValueError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+class ObjectiveEffectEvidenceError(ObjectiveEffectCommitError, ExecutionOutcomeUnknown):
+    """A validated effect succeeded, but its objective commit evidence is incomplete."""
+
+    def __init__(self, *, result_sha256: str, evidence_code: str) -> None:
+        if evidence_code not in {"epoch_commit_receipt_unavailable", "objective_commit_receipt_failed"}:
+            raise ObjectiveEffectCommitError("invalid_effect_evidence_code")
+        super().__init__(f"{evidence_code}_after_effect")
+        self.evidence_code = evidence_code
+        self.result_sha256 = _sha(result_sha256, "effect_result_sha256")
 
 
 def _sha(value: Any, name: str, *, allow_zero: bool = True) -> str:
@@ -355,9 +367,12 @@ class ObjectiveBoundEffectCommitBroker:
                         state=state,
                         committed_at_unix=now,
                         outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
-                        result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
+                        result_sha256=exc.result_sha256 if isinstance(exc, EffectCommitEvidenceError)
+                        else canonical_sha256({"error_type": type(exc).__name__}),
                         inner_commit_sha256=inner_sha,
-                        reasons=("outer_lease_consumed", "effect_outcome_unknown", "reconciliation_required")
+                        reasons=("outer_lease_consumed", "effect_succeeded", exc.evidence_code, "reconciliation_required")
+                        if isinstance(exc, EffectCommitEvidenceError)
+                        else ("outer_lease_consumed", "effect_outcome_unknown", "reconciliation_required")
                         if isinstance(exc, ExecutionOutcomeUnknown)
                         else ("outer_lease_consumed", "inner_effect_commit_failed"),
                     )
@@ -369,23 +384,30 @@ class ObjectiveBoundEffectCommitBroker:
                     raise
                 raise ObjectiveEffectCommitError("inner_effect_commit_failed") from exc
 
-            inner_sha = self._latest_inner_commit(before_commits)
-            self._append_commit(
-                lease=lease,
-                state=state,
-                committed_at_unix=now,
-                outcome="SUCCEEDED",
-                result_sha256=observation.result_sha256,
-                inner_commit_sha256=inner_sha,
-                reasons=(
-                    "objective_policy_rechecked",
-                    "objective_head_rechecked",
-                    "objective_decision_floor_allow",
-                    "outer_lease_consumed",
-                    "inner_epoch_effect_committed",
-                    "effect_committed_under_shared_fence",
-                ),
-            )
+            evidence_code = "epoch_commit_receipt_unavailable"
+            try:
+                inner_sha = self._latest_inner_commit(before_commits)
+                evidence_code = "objective_commit_receipt_failed"
+                self._append_commit(
+                    lease=lease,
+                    state=state,
+                    committed_at_unix=now,
+                    outcome="SUCCEEDED",
+                    result_sha256=observation.result_sha256,
+                    inner_commit_sha256=inner_sha,
+                    reasons=(
+                        "objective_policy_rechecked",
+                        "objective_head_rechecked",
+                        "objective_decision_floor_allow",
+                        "outer_lease_consumed",
+                        "inner_epoch_effect_committed",
+                        "effect_committed_under_shared_fence",
+                    ),
+                )
+            except Exception:
+                raise ObjectiveEffectEvidenceError(
+                    result_sha256=observation.result_sha256, evidence_code=evidence_code,
+                ) from ObjectiveEffectCommitError("effect_commit_evidence_unavailable")
             return observation
 
     def commit_authorized_effect(
@@ -666,8 +688,11 @@ class ObjectiveBoundEffectRuntimeMediator(RuntimeMediator):
                 capability_receipt_sha=capability["receipt_sha256"],
                 admission="ALLOW",
                 outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
-                result_sha=canonical_sha256({"error_type": type(exc).__name__}),
-                reasons=("effect_outcome_unknown", "reconciliation_required")
+                result_sha=exc.result_sha256 if isinstance(exc, (EffectCommitEvidenceError, ObjectiveEffectEvidenceError))
+                else canonical_sha256({"error_type": type(exc).__name__}),
+                reasons=("effect_succeeded", exc.evidence_code, "reconciliation_required")
+                if isinstance(exc, (EffectCommitEvidenceError, ObjectiveEffectEvidenceError))
+                else ("effect_outcome_unknown", "reconciliation_required")
                 if isinstance(exc, ExecutionOutcomeUnknown) else ("objective_bound_effect_commit_failed",),
                 capability_id=capability.get("capability_id"),
                 scope_sha=scope_sha,
@@ -723,6 +748,7 @@ __all__ = [
     "ObjectiveBoundEffectRuntimeMediator",
     "ObjectiveEffectAuthorizationReceipt",
     "ObjectiveEffectCommitError",
+    "ObjectiveEffectEvidenceError",
     "ObjectiveEffectCommitReceipt",
     "STATE_SCHEMA",
     "verify_authorization_receipt",

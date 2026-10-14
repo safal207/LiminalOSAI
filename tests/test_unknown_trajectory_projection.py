@@ -23,6 +23,8 @@ from sdk.liminal_durable_governance_fence import (
 )
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
 from sdk.liminal_effect_commit import ZERO_SHA256
+from sdk.liminal_effect_commit import EpochBoundEffectRuntimeMediator
+from sdk.liminal_objective_effect_commit import ObjectiveBoundEffectRuntimeMediator
 from sdk.liminal_runtime_mediation import (
     ExecutionObservation,
     ExecutionOutcomeUnknown,
@@ -831,6 +833,93 @@ class UnknownTrajectoryProjectionTests(unittest.TestCase):
                 self.assertEqual(ledger.event_count, 0)
                 self.assertNotIn("effect_uncertain", ledger.state_document())
                 self.assertEqual(mediator.trajectory_events()[0].decision, "BLOCK")
+
+    def test_inner_success_evidence_failures_keep_known_result_at_every_outer_interface(self):
+        boundaries = (
+            ("effect", "_append_commit", "epoch_commit_receipt_failed"),
+            ("objective", "_latest_inner_commit", "epoch_commit_receipt_unavailable"),
+            ("objective", "_append_commit", "objective_commit_receipt_failed"),
+        )
+        for layer, method, code in boundaries:
+            for outer in ("epoch", "objective", "causal", "durable"):
+                if layer == "objective" and outer == "epoch":
+                    continue
+                for interface in ("broker", "mediator"):
+                    for cascades in (False, True):
+                        with self.subTest(layer=layer, method=method, outer=outer, interface=interface, cascades=cascades), tempfile.TemporaryDirectory() as directory:
+                            stack = setup_durable_stack(str(Path(directory) / "governance.db"))
+                            _, _, _, _, epoch, effect, guard, objective, ledger, causal, store, _, durable, _ = stack
+                            selected = {"epoch": effect, "objective": objective, "causal": causal, "durable": durable}[outer]
+                            operation = replace(durable_operation(), privilege_level_after=3)
+                            observed = ExecutionObservation.success({"completed_inner_effect": True})
+                            calls = []
+
+                            def execute(_):
+                                calls.append("completed")
+                                return observed
+
+                            with ExitStack() as faults:
+                                target = effect if layer == "effect" else objective
+                                faults.enter_context(patch.object(target, method, side_effect=OSError("private primary evidence")))
+                                if cascades:
+                                    for broker, diagnostic in ((objective, "_latest_inner_commit"), (causal, "_latest_objective_commit"), (durable, "_latest_inner_commit")):
+                                        if broker is not target:
+                                            faults.enter_context(patch.object(broker, diagnostic, side_effect=OSError("private secondary evidence")))
+                                if interface == "broker":
+                                    capability = durable_authorize(epoch, operation)
+                                    kwargs = {"operation": operation, "capability_decision": capability}
+                                    if outer != "epoch":
+                                        kwargs["objective_decision"] = guard.evaluate_operation(operation)
+                                    if outer in ("causal", "durable"):
+                                        kwargs["proposed_event"] = durable_proposal(ledger, operation, capability)
+                                    lease, _ = selected.issue_for_trusted_adapter(**kwargs)
+                                    with self.assertRaises(ExecutionOutcomeUnknown) as caught:
+                                        selected.consume_for_trusted_adapter(lease, adapter_token=DURABLE_ADAPTER_TOKEN, executor=execute)
+                                    self.assertEqual(caught.exception.result_sha256, observed.result_sha256)
+                                    self.assertEqual(caught.exception.evidence_code, code)
+                                    self.assertNotIn("private", str(caught.exception))
+                                else:
+                                    options = {"broker": epoch, "adapter_token": DURABLE_ADAPTER_TOKEN}
+                                    if outer == "epoch":
+                                        mediator = EpochBoundEffectRuntimeMediator(effect_commit_broker=effect, broker=epoch)
+                                    elif outer == "objective":
+                                        mediator = ObjectiveBoundEffectRuntimeMediator(objective_effect_broker=objective, **options)
+                                    else:
+                                        options["proposal_factory"] = lambda op, cap, journal: durable_proposal(journal, op, cap)
+                                        mediator = (CausalBoundEffectRuntimeMediator(causal_effect_broker=causal, **options)
+                                                    if outer == "causal" else DurableGovernanceRuntimeMediator(durable_effect_broker=durable, **options))
+                                    result = mediator.mediate(operation, execute)
+                                    self.assertEqual(result["execution_outcome"], "UNKNOWN")
+                                    self.assertEqual(result["result_sha256"], observed.result_sha256)
+                                    self.assertIn(code, result["reason_codes"])
+                                    self.assertIn("reconciliation_required", result["reason_codes"])
+                                    self.assertEqual(verify_receipt(result), result)
+                                    self.assertEqual(mediator.trajectory_events()[0].decision, "ALLOW")
+                                    self.assertEqual(analyze_trajectory(mediator.trajectory_events())["risk_score"], 15)
+                            self.assertEqual(calls, ["completed"])
+                            consumed = sum(lease.consumed for lease in selected._leases.values())
+                            self.assertEqual(consumed, 1)
+                            if interface == "broker":
+                                with self.assertRaisesRegex(ValueError, "replayed"):
+                                    selected.consume_for_trusted_adapter(
+                                        lease, adapter_token=DURABLE_ADAPTER_TOKEN, executor=execute,
+                                    )
+                                self.assertEqual(calls, ["completed"])
+                            for broker in (effect, objective, causal, durable):
+                                for receipt in broker.commit_receipts():
+                                    self.assertEqual(receipt["result_sha256"], observed.result_sha256)
+                                    self.assertNotIn("private", repr(receipt))
+                            if outer == "durable":
+                                self.assertTrue(store.read_state(root_id=DURABLE_ROOT)["reservation_active"])
+                            if outer in ("causal", "durable"):
+                                self.assertEqual(ledger.event_count, 0)
+                                self.assert_uncertain_ledger(ledger)
+                                peer = CausalBoundEffectRuntimeMediator(
+                                    broker=epoch, causal_effect_broker=causal, adapter_token=DURABLE_ADAPTER_TOKEN,
+                                    proposal_factory=lambda op, cap, journal: durable_proposal(journal, op, cap),
+                                )
+                                peer.mediate(durable_operation("op:after-inner-evidence-failure"), execute)
+                                self.assertEqual(calls, ["completed"])
 
     def test_durable_ordinary_success_and_failure_keep_published_hashes(self):
         goldens = {
