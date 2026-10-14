@@ -1,0 +1,78 @@
+{
+  "schema": "liminal-c-setup-deadline-v1",
+  "reviewed_parent_revision": "8ceab27524fde17a03af74d1d417c8a295154461",
+  "validation_code_tree_before_evidence": "1355bdace110e6fa4abd57bcb9de9f0248edee65",
+  "candidate_core_tree_sha": "82a9c2584d58010fa6c60b4da219d3f25215df99",
+  "controller_sha256": "1c6b31c0de3277ebcf887f3b9c4924e830cb8498b510d6b9d0cb17343a3a01b5",
+  "controller_test_sha256": "f5621e98e11624323e1f79b4acd6e7465a859d9b067e0b5dae114893692b43ea",
+  "production_code_unchanged_from_parent": true,
+  "prior_42_case_record": {
+    "path": "docs/benchmarks/c-orchestrator-baseline-alias.json",
+    "bytes": 3216,
+    "sha256": "753ad79ba93dc0af9d448d5ce0e7b1fd10a16053422efd5b24a9817ab46c65e4"
+  },
+  "failed_parent_ci": {
+    "head": "8ceab27524fde17a03af74d1d417c8a295154461",
+    "tree": "a1647feade2421e35c8ecea738727830d471185b",
+    "merge": "81cd21321ebd6b231164a1ab6bdf99f50dd380cf",
+    "run_id": 38607009206,
+    "clang_job_id": 116000369716,
+    "python_tests_run": 1035,
+    "failures": 1,
+    "skipped": 0,
+    "reason": "The test-only 0.5-second fixture deadline expired during normal shim compilation, before the blocked exact-case target ran.",
+    "raw_log": {
+      "bytes": 246153,
+      "sha256": "b28e874f84c096802751139b4cbeae665487432d759d931ed097985e334c8c40"
+    }
+  },
+  "regression_evidence": {
+    "c-setup-deadline-red.log": {
+      "bytes": 2911,
+      "sha256": "a1711777cb85b6c8a68ad2bbba0c5e8cb5fba2439f360c4e8a0b6ebed9fc02dc"
+    },
+    "c-setup-deadline-green.log": {
+      "bytes": 1481,
+      "sha256": "f65a57f08c1efa577d61387e300077f2db399798cc354d1986c54633ef975d7c"
+    }
+  },
+  "controls": {
+    "controller_tests_passed": 7,
+    "slow_setup_compiler_delay_seconds": 0.75,
+    "normal_production_deadline_seconds": 20,
+    "target_fixture_deadline_seconds": 0.5,
+    "outer_harness_deadline_seconds": 5,
+    "assert_timeout_target_and_deadline": true,
+    "owned_process_group_cleanup_and_direct_child_reaping": true,
+    "pidfd_exit_checks": true
+  },
+  "validation": {
+    "command": [
+      "make",
+      "validate",
+      "CC=gcc"
+    ],
+    "python_summary": {
+      "discovered": 1036,
+      "errors": 0,
+      "expected_failures": 0,
+      "failures": 0,
+      "schema": "liminal-python-validation-v1",
+      "skipped": 0,
+      "status": "PASS",
+      "tests_run": 1036,
+      "unexpected_successes": 0
+    },
+    "c_executables": 9,
+    "log": {
+      "bytes": 161785,
+      "sha256": "495109a68987324f6e9690c53590c3731adc1203a8d74a61e53d63a861837c9a"
+    }
+  },
+  "limits": [
+    "Only the tests and evidence change; production controller, C/build inputs and binaries remain unchanged from the parent.",
+    "The prior 42-case record remains immutable; reuse is explicitly tied to the identical controller and production inputs, not presented as a new capture.",
+    "The delayed wrapper invokes real gcc; blocked fixtures launch real processes and descendants. No Docker simulation or skipped strict check is introduced.",
+    "Failed parent CI remains FAIL. Published-head CI must be separately verified on the new immutable head."
+  ]
+}

@@ -24,8 +24,9 @@ SPEC.loader.exec_module(CHARACTERIZATION)
 
 
 class CharacterizationEvidenceTests(unittest.TestCase):
-    def _assert_real_hang_is_bounded(self, *, stage: str) -> None:
+    def _assert_real_hang_is_bounded(self, *, stage: str, slow_compile: bool = False) -> None:
         self.assertIn(stage, ("compiler", "measurement", "exact-case"))
+        self.assertFalse(slow_compile and stage == "compiler")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             pids = root / "pids.json"
@@ -43,6 +44,17 @@ os.read(read_fd, 1)
             compiler = root / "hanging-compiler"
             compiler.write_text(f"#!{sys.executable}\n{hanging_program}", encoding="utf-8")
             compiler.chmod(0o700)
+            setup_compiler = "gcc"
+            if slow_compile:
+                delayed = root / "delayed-setup-compiler"
+                delayed.write_text(
+                    f"#!{sys.executable}\nimport subprocess, sys, time\n"
+                    "time.sleep(0.75)\n"
+                    "raise SystemExit(subprocess.call(['gcc', *sys.argv[1:]]))\n",
+                    encoding="utf-8",
+                )
+                delayed.chmod(0o700)
+                setup_compiler = str(delayed)
             for name in ("pulse_kernel", "liminal_core"):
                 binary = root / name
                 binary.write_text(
@@ -56,8 +68,16 @@ os.read(read_fd, 1)
                 "import importlib.util, os, pathlib, select, subprocess, sys\n"
                 f"spec = importlib.util.spec_from_file_location('characterization', {str(TOOL)!r})\n"
                 "module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)\n"
-                "module.PROCESS_TIMEOUT_SECONDS = 0.5\n"
                 "module.CASES = {'cycle-modules': ('--limit=4', '--trace')}\n"
+                + (
+                    "module.PROCESS_TIMEOUT_SECONDS = 0.5\n"
+                    if stage == "compiler" else
+                    "original_compile = module._compile_shim\n"
+                    "def compile_then_arm_fixture_deadline(command):\n"
+                    "    original_compile(command)\n"
+                    "    module.PROCESS_TIMEOUT_SECONDS = 0.5\n"
+                    "module._compile_shim = compile_then_arm_fixture_deadline\n"
+                )
                 + (
                     # Also shorten the old hard-coded run timeout so the
                     # negative control reaches its actual descendant cleanup.
@@ -70,9 +90,11 @@ os.read(read_fd, 1)
                 )
                 + "try:\n"
                 f"    module.capture(pathlib.Path({str(root)!r}), "
-                f"{str(compiler) if stage == 'compiler' else 'gcc'!r}, "
+                f"{str(compiler) if stage == 'compiler' else setup_compiler!r}, "
                 f"repetitions={1 if stage == 'measurement' else 0}, measure_cycles=73)\n"
-                "except subprocess.TimeoutExpired:\n"
+                "except subprocess.TimeoutExpired as timeout:\n"
+                "    assert timeout.timeout == 0.5, 'fixture deadline was not armed'\n"
+                f"    assert timeout.cmd[0] == {str(compiler) if stage == 'compiler' else str(root / 'pulse_kernel')!r}, 'deadline expired in the wrong phase'\n"
                 "    import json\n"
                 f"    child_pids = json.loads(pathlib.Path({str(pids)!r}).read_text())\n"
                 "    try:\n"
@@ -149,6 +171,9 @@ os.read(read_fd, 1)
 
     def test_hanging_exact_case_and_descendant_are_terminated(self) -> None:
         self._assert_real_hang_is_bounded(stage="exact-case")
+
+    def test_exact_case_deadline_does_not_include_slow_compiler_setup(self) -> None:
+        self._assert_real_hang_is_bounded(stage="exact-case", slow_compile=True)
 
     def test_same_output_path_is_rejected_without_overwriting_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

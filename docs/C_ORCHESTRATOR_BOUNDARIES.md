@@ -183,6 +183,25 @@ zero skips. C/build inputs, core tree and historical records remain unchanged.
 The nonblocking suggestion to share duplicated parser helpers is deferred:
 this review-follow-up changes only confirmed defects, not C architecture.
 
+Clang CI for the alias-fix snapshot `8ceab275` exposed a test setup error:
+the shortened 0.5-second fixture deadline also applied to ordinary shim
+compilation, so compilation could time out before the target scenario began.
+The lifecycle harness now gives normal compiler preparation its unchanged
+production budget and arms the short deadline only after preparation completes.
+The compiler-hang control still tests the compiler itself at 0.5 seconds.
+Each control verifies the timeout's target command and short deadline, while
+the outer five-second harness limit, process-group cleanup, direct-child reaping
+and PID-descriptor exit checks remain enforced.
+
+A compiler wrapper delayed by 0.75 seconds deterministically reproduces the
+old wrong-phase failure and now reaches the intended blocked exact-case fixture.
+The [setup-deadline record](benchmarks/c-orchestrator-setup-deadline.json)
+preserves the failed CI identity and negative/positive controls. All seven
+controller tests and full local `make validate` pass: **1,036 Python tests and
+nine C executables**, with zero skips. This correction changes tests and evidence
+only; production code, C/build inputs, binaries and the last 42-case comparison
+remain unchanged. The failed parent CI is not reported as a successful run.
+
 ## Remaining boundaries
 
 The runtime still has process-global module state and is not reentrant. The
