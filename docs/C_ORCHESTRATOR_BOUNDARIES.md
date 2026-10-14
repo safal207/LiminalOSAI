@@ -66,8 +66,8 @@ to check all ten repaired value options and emotional-source fallback behavior.
 and all discovered Python tests. Two original Python
 tests also challenge the characterization controller: a changed trace fails
 comparison, a binary rebuild with identical behavior succeeds, and a candidate
-cannot overwrite its comparison baseline by reusing the output path. Two further
-controls run genuinely blocked compiler/measurement processes with descendants
+cannot overwrite its comparison baseline by reusing the output path. Three additional
+controls run genuinely blocked compiler/measurement/exact-case processes with descendants
 and verify bounded failure, termination of owned process groups and direct-child
 reaping.
 
@@ -125,10 +125,11 @@ in its own session; failure kills its owned process group and gives direct-child
 reaping a separate one-second deadline. Successful measurement still reads CPU
 and peak RSS from `wait4` for that child. The polling interval is at most one
 millisecond, so wall-time granularity differs from the historical controller.
-The existing 20-second trace-case timeout is unchanged.
+At this first review-fix snapshot, the existing 20-second trace-case timeout
+was unchanged; the next correction below extends its cleanup.
 
-The [review-fix record](benchmarks/c-orchestrator-review-fixes.json) binds the new
-controller, all 108 tracked C/build inputs, the new core tree and both real
+The [first review-fix record](benchmarks/c-orchestrator-review-fixes.json) freezes
+the controller at `bb323f97`, all 108 tracked C/build inputs, the core tree and both real
 binaries to a fresh capture. Both the unchanged baseline binaries and the
 candidate were captured by this same updated controller. All 42 existing cases
 match exactly; these fixtures do not exercise the ten newly repaired flags,
@@ -142,6 +143,29 @@ ASan/UBSan build each pass **1,033 Python tests and nine C executables**, with
 zero skips. Local ASan still uses `detect_leaks=0`; the unchanged CI sanitizer
 job retains `detect_leaks=1`. Final published-head GCC, Clang and sanitizer CI
 results belong in the PR evidence and are not inferred from these local runs.
+
+Full review of `bb323f97eb0cfd48459c6d38f8dc525c60b188f2` found that the
+trace-case timeout killed only the direct child, allowing a blocked descendant
+to remain running. Exact-case execution now shares the compiler's captured
+process helper: its own session, a 20-second parent-clock deadline, termination
+of the owned process group on failure and bounded direct-child reaping. It still
+returns the same exit status, stdout and stderr; the measurement path is unchanged.
+
+The three blocked-process controls now synchronize with a descendant that has
+reached its blocking fixture. They check exit using Linux PID descriptors and
+direct-child reaping through kernel process-existence checks before the outer
+harness exits. This avoids a false PASS when the mounted `/proc` view differs
+from the caller's PID namespace. The exact-case control observes a live
+descendant after the old implementation's shortened test timeout, and passes
+after the repair. These Linux controls require PID-descriptor support (Linux 5.3+).
+
+The [exact-case cleanup record](benchmarks/c-orchestrator-case-cleanup.json)
+binds the latest controller and tests to fresh captures of both actual revisions.
+All 42 cases still match. C sources, build inputs and the core tree are unchanged
+from the first review-fix snapshot; both prior measurement records remain frozen.
+The new full local `make validate` census is **1,034 Python tests and nine C
+executables**, with zero skips. Published-head CI results are recorded separately
+in the PR evidence.
 
 ## Remaining boundaries
 

@@ -118,17 +118,23 @@ def _kill_and_reap(process: subprocess.Popen[bytes]) -> None:
     process.wait(timeout=PROCESS_REAP_TIMEOUT_SECONDS)
 
 
-def _compile_shim(command: list[str]) -> None:
+def _run_captured(command: list[str], *, cwd: Path | None = None,
+                  env: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
     process = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+        cwd=cwd, env=env,
     )
     try:
         stdout, stderr = process.communicate(timeout=PROCESS_TIMEOUT_SECONDS)
     except BaseException:
         _kill_and_reap(process)
         raise
-    if process.returncode != 0:
-        raise subprocess.CalledProcessError(process.returncode, command, stdout, stderr)
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _compile_shim(command: list[str]) -> None:
+    result = _run_captured(command)
+    result.check_returncode()
 
 
 def _wait4_bounded(process: subprocess.Popen[bytes]) -> resource.struct_rusage:
@@ -186,9 +192,8 @@ def capture(binary_directory: Path, compiler: str, repetitions: int = 0,
                             LIMINAL_CHARACTERIZATION_SEED=str(seed),
                             TZ="UTC", LC_ALL="C",
                         )
-                        result = subprocess.run(
+                        result = _run_captured(
                             [str(binary), *profile, *arguments], cwd=run_root, env=env,
-                            check=False, capture_output=True, timeout=20,
                         )
                         if result.returncode != 0:
                             raise RuntimeError(
