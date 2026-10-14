@@ -262,7 +262,11 @@ def main() -> int:
         parser.error("--measure-repetitions must be nonnegative")
     if args.measure_cycles < 1:
         parser.error("--measure-cycles must be positive")
-    if args.compare and args.output.resolve() == args.compare.resolve():
+    if args.compare and (
+        args.output.resolve() == args.compare.resolve()
+        or (args.output.exists() and args.compare.exists()
+            and args.output.samefile(args.compare))
+    ):
         parser.error("--output must differ from --compare to preserve the baseline")
     # Read the baseline before executing or writing the candidate. A caller
     # cannot turn a changed result into a match by overwriting its evidence.

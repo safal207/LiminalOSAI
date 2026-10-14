@@ -163,6 +163,29 @@ os.read(read_fd, 1)
             self.assertIn("preserve the baseline", result.stderr)
             self.assertEqual(baseline.read_text(encoding="utf-8"), "preserved baseline\n")
 
+    def test_hard_link_alias_is_rejected_without_overwriting_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = root / "before.json"
+            alias = root / "after.json"
+            original = {"profile": "test-profile", "cases": []}
+            baseline.write_text(json.dumps(original), encoding="utf-8")
+            original_bytes = baseline.read_bytes()
+            os.link(baseline, alias)
+            self.assertNotEqual(baseline.resolve(), alias.resolve())
+            self.assertTrue(baseline.samefile(alias))
+            arguments = [str(TOOL), "--binary-dir", directory,
+                         "--output", str(alias), "--compare", str(baseline)]
+            candidate = {"profile": "test-profile", "cases": [{"stdout": "changed"}]}
+            with patch.object(CHARACTERIZATION, "capture", return_value=candidate) as capture, \
+                    patch.object(sys, "argv", arguments), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as rejected:
+                    CHARACTERIZATION.main()
+                self.assertEqual(rejected.exception.code, 2)
+                capture.assert_not_called()
+            self.assertEqual(baseline.read_bytes(), original_bytes)
+            self.assertEqual(alias.read_bytes(), original_bytes)
+
     def test_changed_trace_is_rejected_while_binary_rebuild_alone_is_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

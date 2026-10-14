@@ -167,6 +167,22 @@ The new full local `make validate` census is **1,034 Python tests and nine C
 executables**, with zero skips. Published-head CI results are recorded separately
 in the PR evidence.
 
+Full review of `bc7cea17d06b527f9af3040f0b042d700d10f9e5` additionally
+found a baseline-preservation defect: different hard-link paths resolve to
+different names while identifying the same existing file. The comparison guard
+now retains its resolved-path check and also rejects existing same-file aliases
+before capture or output writes. A real hard-link regression confirms that the
+old implementation overwrites the baseline and that the corrected guard rejects
+the alias with exit code 2, leaves both file views byte-for-byte intact and never
+calls capture.
+
+The [baseline-alias record](benchmarks/c-orchestrator-baseline-alias.json)
+binds this guard and its regression to a fresh 42-case real-binary comparison
+and a full local census of **1,035 Python tests and nine C executables**, with
+zero skips. C/build inputs, core tree and historical records remain unchanged.
+The nonblocking suggestion to share duplicated parser helpers is deferred:
+this review-follow-up changes only confirmed defects, not C architecture.
+
 ## Remaining boundaries
 
 The runtime still has process-global module state and is not reentrant. The
