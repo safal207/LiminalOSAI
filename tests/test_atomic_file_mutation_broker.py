@@ -7,6 +7,7 @@ import stat
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 from adapters.filesystem.liminal_atomic_file_replacer import (
     AtomicFileReplaceError,
@@ -217,6 +218,54 @@ class FileMutationBrokerTests(unittest.TestCase):
             broker.consume_for_trusted_adapter(auth["lease_id"], adapter_token=ADAPTER_TOKEN)
         with open(self.target, "rb") as fh:
             self.assertEqual(fh.read(), b"before")
+
+    def test_lease_expiry_is_exclusive_at_exact_deadline(self):
+        _, broker, adapter = self._stack()
+        auth = broker.authorize(self._request())
+        self.clock.value = auth["lease_expires_at_unix"]
+        with self.assertRaisesRegex(FileMutationError, "lease_expired"):
+            adapter.replace(lease_id=auth["lease_id"], content=b"after")
+        with open(self.target, "rb") as fh:
+            self.assertEqual(fh.read(), b"before")
+
+    def test_lease_is_valid_immediately_before_deadline(self):
+        _, broker, adapter = self._stack()
+        auth = broker.authorize(self._request())
+        self.clock.value = auth["lease_expires_at_unix"] - 1
+        self.assertEqual(adapter.replace(lease_id=auth["lease_id"], content=b"after")["outcome"], "SUCCEEDED")
+
+    def test_fsync_failure_before_replace_reports_failed_without_effect(self):
+        _, broker, adapter = self._stack()
+        auth = broker.authorize(self._request())
+        with patch("adapters.filesystem.liminal_atomic_file_replacer.os.fsync", side_effect=OSError("synthetic")):
+            receipt = adapter.replace(lease_id=auth["lease_id"], content=b"after")
+        self.assertEqual(receipt["outcome"], "FAILED")
+        verify_execution_receipt(receipt)
+        with open(self.target, "rb") as fh:
+            self.assertEqual(fh.read(), b"before")
+        self.assertEqual(os.listdir(os.path.dirname(self.target)), ["file.txt"])
+
+    def test_fsync_failure_after_replace_reports_unknown_and_consumes_lease(self):
+        _, broker, adapter = self._stack()
+        auth = broker.authorize(self._request())
+        with patch("adapters.filesystem.liminal_atomic_file_replacer.os.fsync", side_effect=[None, OSError("synthetic")]):
+            receipt = adapter.replace(lease_id=auth["lease_id"], content=b"after")
+        self.assertEqual(receipt["outcome"], "UNKNOWN")
+        verify_execution_receipt(receipt)
+        with open(self.target, "rb") as fh:
+            self.assertEqual(fh.read(), b"after")
+        with self.assertRaisesRegex(FileMutationError, "lease_replayed"):
+            adapter.replace(lease_id=auth["lease_id"], content=b"after")
+
+    def test_post_replace_verification_failure_reports_unknown(self):
+        _, broker, adapter = self._stack()
+        auth = broker.authorize(self._request())
+        with patch("adapters.filesystem.liminal_atomic_file_replacer._read_digest", side_effect=[sha(b"before"), sha(b"before"), sha(b"unexpected")]):
+            receipt = adapter.replace(lease_id=auth["lease_id"], content=b"after")
+        self.assertEqual(receipt["outcome"], "UNKNOWN")
+        verify_execution_receipt(receipt)
+        with open(self.target, "rb") as fh:
+            self.assertEqual(fh.read(), b"after")
 
     def test_containment_blocks_authorization_and_consumption(self):
         _, broker, _ = self._stack()

@@ -127,8 +127,8 @@ The target filesystem is not accessed through the adapter in these cases.
 
 ### After trusted lease consumption
 
-The lease is permanently consumed. Failures return a `FAILED` digest-only
-execution receipt and never reactivate the lease:
+The lease is permanently consumed. Failures before attempting `os.replace`
+return a `FAILED` digest-only execution receipt and never reactivate the lease:
 
 - desired content hash/length mismatch — filesystem remains unchanged;
 - host root mapping missing — filesystem remains unchanged;
@@ -136,8 +136,18 @@ execution receipt and never reactivate the lease:
 - stale before digest — target remains unchanged;
 - symlink/non-regular/missing target or parent — target remains unchanged;
 - inability to preserve uid/gid before replacement — target remains unchanged;
-- write/fsync/second-check failures — target remains unchanged when failure occurs before `os.replace`;
-- post-write digest, ownership or privileged-mode verification failure — the atomic replacement already occurred and the operator should treat this as an integrity incident.
+- write/fsync/second-check failures — target remains unchanged when failure occurs before `os.replace`.
+
+An exception during replacement or its subsequent directory fsync, digest,
+ownership or mode verification returns `UNKNOWN`. Replacement may already have
+occurred. Reconcile the target and durability state before considering a new
+operation; the original lease cannot be retried. `after_sha256` records the
+authorized desired digest, not an assertion that it was observed on failure.
+Successful receipts remain `SUCCEEDED`; the receipt fields and digest profile
+are unchanged. Consumers must recognize `UNKNOWN` as an unresolved outcome.
+
+Lease validity uses an exclusive deadline: consumption at or after
+`lease_expires_at_unix` is rejected before filesystem access.
 
 Authorization-stage failures such as bad logical paths, missing/scope-mismatched
 capabilities, unknown root bindings, replayed call IDs, or containment return a

@@ -9,6 +9,7 @@ on:
       - sdk/liminal_post_sandbox_contracts/**
       - tests/test_post_sandbox_phase0_contracts.py
       - Makefile
+      - 'scripts/check_forbidden.py'
   workflow_dispatch:
 
 permissions:
@@ -42,13 +43,6 @@ jobs:
           set -euo pipefail
           python3 -m unittest tests/test_post_sandbox_phase0_contracts.py -v \
             2>&1 | tee reports/post-sandbox-phase0/contract-tests.log
-
-      - name: Run full repository regression
-        shell: bash
-        run: |
-          set -euo pipefail
-          make test 2>&1 | tee reports/post-sandbox-phase0/full-stack-tests.log
-          make test-repo 2>&1 | tee reports/post-sandbox-phase0/repo-hygiene.log
 
       - name: Verify Phase 0 authority remains non-executing
         shell: bash
@@ -85,10 +79,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ! grep -R --binary-files=without-match -n 'BEGIN PRIVATE KEY' \
+          python3 scripts/check_forbidden.py -- -R --binary-files=without-match -n 'BEGIN PRIVATE KEY' \
             sdk/liminal_post_sandbox_contracts tests/test_post_sandbox_phase0_contracts.py \
             docs/POST_SANDBOX_PHASE0_THREAT_MODEL.md
-          ! grep -R --binary-files=without-match -nE '(Bearer [A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,})' \
+          python3 scripts/check_forbidden.py -- -R --binary-files=without-match -nE '(Bearer [A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,})' \
             sdk/liminal_post_sandbox_contracts tests/test_post_sandbox_phase0_contracts.py \
             docs/POST_SANDBOX_PHASE0_THREAT_MODEL.md
 

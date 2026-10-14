@@ -15,6 +15,7 @@ on:
       - 'tests/fixtures/isolated_executor/**'
       - 'docs/ISOLATED_EXECUTION_BROKER.md'
       - '.github/workflows/isolated-execution-broker.yml'
+      - 'scripts/check_forbidden.py'
 
 permissions:
   contents: read
@@ -50,7 +51,7 @@ jobs:
 
       - name: Verify model-facing SDK has no host execution authority
         run: |
-          ! grep -R -nE '(^|[[:space:]])(import|from)[[:space:]]+(subprocess|socket|os)([[:space:].]|$)' sdk/liminal_isolated_execution sdk/liminal_process_tree_containment
+          python3 scripts/check_forbidden.py -- -R -nE '(^|[[:space:]])(import|from)[[:space:]]+(subprocess|socket|os)([[:space:].]|$)' sdk/liminal_isolated_execution sdk/liminal_process_tree_containment
           grep -q 'shell=False' adapters/docker/liminal_docker_executor.py
 
       - name: Build immutable local fixture image
@@ -108,12 +109,6 @@ jobs:
           assert os.environ['GITHUB_WORKSPACE'] not in str(receipt)
           print('governed-container-execution', receipt['receipt_sha256'], 'PASS')
           PY
-
-      - name: Build production kernel fixture
-        run: make
-
-      - name: Run full repository regression
-        run: python3 -m unittest discover -s tests -p 'test_*.py'
 
       - name: Verify explicit authority boundary
         run: |

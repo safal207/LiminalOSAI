@@ -6,13 +6,34 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct {
-    RGraph *graph;
-    int node_capacity;
-    int edge_capacity;
-} RGraphRegistry;
+static void graph_bound_counts(RGraph *g)
+{
+    if (!g) {
+        return;
+    }
+    int nodes = g->nodes && g->node_capacity > 0 ? g->node_capacity : 0;
+    int edges = g->edges && g->edge_capacity > 0 ? g->edge_capacity : 0;
+    if (g->n_nodes < 0) {
+        g->n_nodes = 0;
+    } else if (g->n_nodes > nodes) {
+        g->n_nodes = nodes;
+    }
+    if (g->n_edges < 0) {
+        g->n_edges = 0;
+    } else if (g->n_edges > edges) {
+        g->n_edges = edges;
+    }
+}
 
-static RGraphRegistry registry = { NULL, 0, 0 };
+void rgraph_destroy(RGraph *g)
+{
+    if (!g) {
+        return;
+    }
+    free(g->nodes);
+    free(g->edges);
+    memset(g, 0, sizeof(*g));
+}
 
 static float clamp01(float value)
 {
@@ -42,41 +63,26 @@ void rgraph_init(RGraph *g, int nmax_nodes, int nmax_edges)
 
     if (nmax_nodes > 0) {
         g->nodes = (RNode *)calloc((size_t)nmax_nodes, sizeof(RNode));
-    } else {
-        g->nodes = NULL;
+        if (!g->nodes) {
+            return;
+        }
+        g->node_capacity = nmax_nodes;
     }
-
     if (nmax_edges > 0) {
         g->edges = (REdge *)calloc((size_t)nmax_edges, sizeof(REdge));
-    } else {
-        g->edges = NULL;
+        if (!g->edges) {
+            rgraph_destroy(g);
+            return;
+        }
+        g->edge_capacity = nmax_edges;
     }
-
-    g->n_nodes = 0;
-    g->n_edges = 0;
-    g->group_coh = 0.0f;
-    g->pulse_adjust = 0.0f;
-    g->integral = 0.0f;
-    g->last_adjust = 0.0f;
-
-    registry.graph = g;
-    registry.node_capacity = nmax_nodes;
-    registry.edge_capacity = nmax_edges;
 }
 
 void rgraph_update_edges(RGraph *g)
 {
+    graph_bound_counts(g);
     if (!g || !g->edges || !g->nodes) {
         return;
-    }
-
-    if (registry.graph == g) {
-        if (g->n_nodes > registry.node_capacity) {
-            g->n_nodes = registry.node_capacity;
-        }
-        if (g->n_edges > registry.edge_capacity) {
-            g->n_edges = registry.edge_capacity;
-        }
     }
 
     for (int i = 0; i < g->n_edges; ++i) {
@@ -115,6 +121,7 @@ void rgraph_update_edges(RGraph *g)
 
 float rgraph_compute_coh(RGraph *g)
 {
+    graph_bound_counts(g);
     if (!g || !g->edges) {
         if (g) {
             g->group_coh = 0.0f;
@@ -162,6 +169,7 @@ static float graph_total_flux(const RGraph *g)
 
 float rgraph_ensemble_adjust(RGraph *g, float target)
 {
+    graph_bound_counts(g);
     if (!g) {
         return 0.0f;
     }

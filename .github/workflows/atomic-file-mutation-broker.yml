@@ -11,6 +11,7 @@ on:
       - 'sdk/liminal_post_sandbox_contracts/**'
       - 'sdk/liminal_runtime_mediation/**'
       - '.github/workflows/atomic-file-mutation-broker.yml'
+      - 'scripts/check_forbidden.py'
 
 permissions:
   contents: read
@@ -51,8 +52,8 @@ jobs:
         run: |
           set -euo pipefail
           test -d sdk/liminal_file_mutation_broker
-          ! grep -R -nE '(^|[[:space:]])(import|from)[[:space:]]+(os|pathlib|shutil|tempfile)([[:space:].]|$)' sdk/liminal_file_mutation_broker
-          ! grep -R -nE '(__import__|importlib\.import_module)' sdk/liminal_file_mutation_broker
+          python3 scripts/check_forbidden.py -- -R -nE '(^|[[:space:]])(import|from)[[:space:]]+(os|pathlib|shutil|tempfile)([[:space:].]|$)' sdk/liminal_file_mutation_broker
+          python3 scripts/check_forbidden.py -- -R -nE '(__import__|importlib\.import_module)' sdk/liminal_file_mutation_broker
 
       - name: Verify explicit authority boundary
         run: |
@@ -75,9 +76,3 @@ jobs:
           assert ADAPTER_AUTHORITY['acl_preserved'] is False
           assert ADAPTER_AUTHORITY['extended_attributes_preserved'] is False
           PY
-
-      - name: Build production kernel fixture
-        run: make
-
-      - name: Run full repository regression
-        run: python3 -m unittest discover -s tests -p 'test_*.py'

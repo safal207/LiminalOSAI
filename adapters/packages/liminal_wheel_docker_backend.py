@@ -8,10 +8,14 @@ verifies it, and returns only digest evidence to RuntimeMediator.
 from __future__ import annotations
 
 import json
-import subprocess
 from typing import Any
 
-from adapters.docker.liminal_docker_executor import build_docker_argv
+from adapters.docker.liminal_docker_executor import (
+    DockerExecutionError,
+    DockerExecutionTimeout,
+    DockerOutputLimitError,
+    run_docker_plan,
+)
 from adapters.packages.liminal_wheel_materializer import (
     TARGET,
     canonical_sha256,
@@ -76,23 +80,16 @@ class WheelMaterializingDockerExecutor:
 
     def __call__(self, plan: IsolatedExecutionPlan) -> ExecutionObservation:
         contract = _validate_plan_contract(plan)
-        argv = build_docker_argv(plan, docker_binary=self.docker_binary)
         try:
-            proc = subprocess.run(
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                timeout=plan.timeout_seconds,
-                check=False,
-                shell=False,
-            )
-        except subprocess.TimeoutExpired as exc:
+            proc = run_docker_plan(plan, docker_binary=self.docker_binary, stdout_limit=MAX_RECEIPT_STDOUT_BYTES)
+        except DockerExecutionTimeout as exc:
             raise WheelDockerBackendError("wheel_materialization_container_timeout") from exc
+        except DockerOutputLimitError as exc:
+            raise WheelDockerBackendError("wheel_materialization_receipt_too_large") from exc
+        except DockerExecutionError as exc:
+            raise WheelDockerBackendError("wheel_materialization_container_lifecycle_failed") from exc
         if proc.returncode != 0:
             raise WheelDockerBackendError("wheel_materialization_container_failed")
-        if len(proc.stdout) > MAX_RECEIPT_STDOUT_BYTES:
-            raise WheelDockerBackendError("wheel_materialization_receipt_too_large")
         try:
             text = proc.stdout.decode("utf-8")
         except UnicodeDecodeError as exc:

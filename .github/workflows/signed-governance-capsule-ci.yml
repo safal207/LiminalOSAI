@@ -13,6 +13,7 @@ on:
       - sdk/liminal_github_transaction/**
       - tools/chatgpt_governance_capsule.py
       - tests/test_chatgpt_signed_governance_capsule.py
+      - 'scripts/check_forbidden.py'
   workflow_dispatch:
 
 permissions:
@@ -154,8 +155,8 @@ jobs:
           code=$?
           set -e
           test "$code" -eq 2
-          ! grep -R -F -- "BEGIN PRIVATE KEY" reports/signed-governance
-          ! grep -R -F -- "signed governed fixture" \
+          python3 scripts/check_forbidden.py -- -R -F -- "BEGIN PRIVATE KEY" reports/signed-governance
+          python3 scripts/check_forbidden.py -- -R -F -- "signed governed fixture" \
             reports/signed-governance/self-check/governance-capsule.json \
             reports/signed-governance/self-check/governance-trust-store.json
 

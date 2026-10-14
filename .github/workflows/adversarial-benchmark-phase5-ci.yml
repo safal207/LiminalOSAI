@@ -24,8 +24,6 @@ jobs:
         run: python3 -m unittest tests/test_causal_escalation_phase3.py -v
       - name: Re-run Phase 4 containment tests
         run: python3 -m unittest tests/test_containment_phase4.py -v
-      - name: Run full repository regression
-        run: make test
       - name: Verify benchmark acceptance metrics
         run: |
           python3 - <<'PY'

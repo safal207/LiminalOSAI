@@ -94,7 +94,7 @@ def build_evidence_bundle(
     *,
     consumer_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    source_report_sha256 = report.get("report_sha256", "")
+    source_report_sha256 = copy.deepcopy(report.get("report_sha256", ""))
 
     authorization = copy.deepcopy(report.get("authorization") or {})
     initial_scope = copy.deepcopy(report.get("initial_scope") or {})
@@ -130,9 +130,10 @@ def build_evidence_bundle(
         bundle_body["consumer_evidence"] = copy.deepcopy(dict(consumer_evidence))
     bundle_body["causal_lineage"] = _build_causal_lineage(bundle_body)
 
-    bundle = copy.deepcopy(bundle_body)
-    bundle["bundle_sha256"] = canonical_sha256(bundle_body)
-    return bundle
+    # Every input-owned field above was detached before constructing this body;
+    # lineage is newly allocated. A second whole-bundle copy adds no isolation.
+    bundle_body["bundle_sha256"] = canonical_sha256(bundle_body)
+    return bundle_body
 
 
 __all__ = [

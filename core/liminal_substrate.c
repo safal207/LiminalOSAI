@@ -4,6 +4,7 @@
 #endif
 #endif
 
+#include "runtime/kernel_cli_guard.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -3618,6 +3619,9 @@ static void finalize_substrate_runtime(const substrate_config *cfg, const limina
 
 int main(int argc, char **argv)
 {
+    if (!kernel_cli_validate_arguments(argc, argv, KERNEL_CLI_SUBSTRATE)) {
+        return 2;
+    }
     substrate_config cfg = parse_args(argc, argv);
 
     bool exit_after_tune = false;

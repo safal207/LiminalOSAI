@@ -3,12 +3,15 @@ name: LiminalOSAI Governance Required Gate
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: liminalos-governance-gate-${{ github.event.pull_request.number }}
+  group: liminalos-governance-gate-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -23,14 +26,21 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Record verified pull request head
-        run: echo "governance-gate-head ${GITHUB_SHA}"
+      - name: Record validation subject
+        run: |
+          git rev-parse HEAD
+          echo "event-sha ${GITHUB_SHA}"
+          echo "pull-request-head ${{ github.event.pull_request.head.sha }}"
 
-      - name: Repository hygiene
-        run: python3 -m unittest tests/test_repo_hygiene.py -v
+      - name: Record OpenSSL version
+        run: openssl version -a
+
+      - name: Complete repository baseline
+        run: make validate
 
       - name: Declared gate scope
         run: |
           echo "This gate always runs for every pull request targeting main."
-          echo "It is an honest always-run branch protection gate, not a substitute for path-specific security CI."
+          echo "It builds both binaries, runs smoke checks, every C test and discovered Python regressions without skips."
+          echo "Specialized compiler, sanitizer, Docker and evidence workflows retain their own checks."
           echo "Path-filtered workflows remain gated by their own paths filters and are intentionally not required checks."
