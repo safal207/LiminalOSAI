@@ -133,6 +133,8 @@ class UncertainPrivilegeContinuityTests(unittest.TestCase):
             broker=self.broker, resolver=lambda _: ["93.184.216.34"],
             transport=lambda request: calls.append(request.url) or TransportResponse(204, {}, "e" * 64),
         )
+        # Owned-stack gateways use trusted time, independent of request metadata.
+        self.mediator.egress_gateway.clock = lambda: 23
         def request(index):
             return GatewayRequest(f"net:{index}", "agent:a", P, "GET", "https://api.example.com/x", {}, "e" * 64, {}, 20 + index)
         denied = self.mediator.mediate_network(request(1))
