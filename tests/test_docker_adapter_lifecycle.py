@@ -1,22 +1,29 @@
 """Exercise trusted CLI ownership with local subprocesses, without a Docker daemon."""
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from adapters.docker.liminal_docker_executor import (
     DockerExecutionError,
     DockerExecutionTimeout,
     DockerExecutor,
     DockerOutputLimitError,
+    DockerReconciliationRequired,
+    DockerSessionIdentity,
+    DockerProcessTreeBackend,
+    reconcile_docker_session,
     run_docker_plan,
 )
 from adapters.packages.liminal_wheel_docker_backend import (
     MAX_RECEIPT_STDOUT_BYTES,
     WheelDockerBackendError,
+    WheelDockerOutcomeUnknown,
     WheelMaterializingDockerExecutor,
 )
 from adapters.packages.liminal_wheel_materializer import (
@@ -31,8 +38,11 @@ from sdk.liminal_package_install_broker import (
 
 
 FAKE_CLI = r'''
+import hashlib
 import json
 from pathlib import Path
+import signal
+import os
 import sys
 import time
 
@@ -41,10 +51,62 @@ args = sys.argv[1:]
 behavior = json.loads((root / "behavior.json").read_text())
 with (root / "calls.jsonl").open("a") as log:
     log.write(json.dumps(args) + "\n")
-if args[0] == "run":
+objects = root / "objects"
+objects.mkdir(exist_ok=True)
+if args[0] == "info":
+    if behavior.get("daemon_unavailable"):
+        sys.exit(1)
+    print(behavior.get("daemon_id", "owned-daemon-1"))
+    sys.exit(0)
+if args[0] == "create":
     name = args[args.index("--name") + 1]
-    marker = root / name
-    marker.touch()
+    image = next(arg for arg in args if arg.startswith("sha256:"))
+    plan = next(arg.split("=", 1)[1] for arg in args if arg.startswith("org.liminal.plan="))
+    cid = hashlib.sha256(name.encode()).hexdigest()
+    obj = {"id": cid, "name": "/" + name, "image": image, "session": name, "plan": plan,
+           "status": "created", "running": False, "exit_code": 0}
+    (objects / cid).write_text(json.dumps(obj))
+    time.sleep(behavior.get("create_delay", 0))
+    print(cid)
+    sys.exit(0)
+reference = args[-1]
+path = objects / reference
+if not path.exists():
+    path = next((p for p in objects.iterdir() if json.loads(p.read_text())["name"] == "/" + reference), path)
+if args[0] == "inspect":
+    if behavior.get("inspect_fails"):
+        sys.stderr.write("synthetic daemon unavailable")
+        sys.exit(1)
+    if not path.exists():
+        sys.stderr.write("Error: No such container: " + reference)
+        sys.exit(1)
+    obj = json.loads(path.read_text())
+    if "{{.State.Pid}}" in " ".join(args):
+        print("123 true false")
+    else:
+        print(json.dumps(obj))
+    sys.exit(0)
+if args[0] == "rm":
+    if behavior.get("removal_fails"):
+        sys.stderr.write("synthetic daemon removal failure")
+        sys.exit(1)
+    path.unlink(missing_ok=True)
+    sys.exit(0)
+if args[0] == "top":
+    print("UID PID PPID CMD\nroot 123 1 fixture")
+    sys.exit(0)
+if args[0] == "pause":
+    sys.exit(0)
+if args[0] == "start":
+    if not path.exists():
+        sys.exit(125)
+    obj = json.loads(path.read_text())
+    if behavior.get("start_rejected"):
+        sys.exit(125)
+    obj.update(status="running", running=True)
+    path.write_text(json.dumps(obj))
+    if behavior.get("client_crash"):
+        os.kill(os.getpid(), signal.SIGKILL)
     if behavior.get("stderr_bytes"):
         sys.stderr.buffer.write(b"e" * behavior["stderr_bytes"])
         sys.stderr.buffer.flush()
@@ -54,24 +116,9 @@ if args[0] == "run":
     sys.stdout.buffer.flush()
     time.sleep(behavior.get("delay", 0))
     if not behavior.get("survivor"):
-        marker.unlink(missing_ok=True)
+        obj.update(status="exited", running=False, exit_code=behavior.get("exit_code", 0))
+        path.write_text(json.dumps(obj))
     sys.exit(behavior.get("exit_code", 0))
-name = args[-1]
-marker = root / name
-if args[0] == "rm":
-    if behavior.get("removal_fails"):
-        sys.stderr.write("synthetic daemon removal failure")
-        sys.exit(1)
-    marker.unlink(missing_ok=True)
-    sys.exit(0)
-if args[0] == "inspect":
-    if behavior.get("inspect_fails"):
-        sys.stderr.write("synthetic daemon unavailable")
-        sys.exit(1)
-    if marker.exists():
-        sys.exit(0)
-    sys.stderr.write("Error: No such container: " + name)
-    sys.exit(1)
 sys.exit(2)
 '''
 
@@ -103,11 +150,14 @@ class DockerAdapterLifecycleTests(unittest.TestCase):
 
     def assert_named_cleanup(self):
         calls = self.calls()
-        run = next(call for call in calls if call[0] == "run")
-        name = run[run.index("--name") + 1]
-        self.assertIn(["rm", "-f", name], calls)
-        self.assertEqual(calls[-1], ["inspect", name])
-        self.assertFalse((self.root / name).exists())
+        create = next(call for call in calls if call[0] == "create")
+        name = create[create.index("--name") + 1]
+        import hashlib
+        cid = hashlib.sha256(name.encode()).hexdigest()
+        self.assertIn(["rm", "-f", cid], calls)
+        self.assertEqual(calls[-2][0], "inspect")
+        self.assertEqual(calls[-2][-1], cid)
+        self.assertFalse((self.root / "objects" / cid).exists())
 
     def wheel_plan(self, *, timeout=2):
         binding = PackageWorkspaceBinding.build(
@@ -135,8 +185,8 @@ class DockerAdapterLifecycleTests(unittest.TestCase):
         result = run_docker_plan(self.plan(), docker_binary=str(self.binary), stdout_limit=65536)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, b"x" * 65536)
-        self.assertFalse((self.root / result.session_id).exists())
-        self.assertEqual(self.calls()[-1], ["inspect", result.session_id])
+        self.assertFalse((self.root / "objects" / result.container_id).exists())
+        self.assertEqual(self.calls()[-2][-1], result.container_id)
 
     def test_stdout_overflow_aborts_and_removes_exact_session(self):
         self.configure(stdout_bytes=65537, delay=10)
@@ -155,27 +205,27 @@ class DockerAdapterLifecycleTests(unittest.TestCase):
 
     def test_completed_client_with_surviving_session_is_not_success(self):
         self.configure(survivor=True)
-        with self.assertRaisesRegex(DockerExecutionError, "surviving execution session"):
+        with self.assertRaises(DockerReconciliationRequired):
             run_docker_plan(self.plan(), docker_binary=str(self.binary))
         self.assert_named_cleanup()
 
     def test_failed_removal_is_not_reported_as_verified_cleanup(self):
         self.configure(survivor=True, removal_fails=True)
-        with self.assertRaisesRegex(DockerExecutionError, "failed to terminate"):
+        with self.assertRaises(DockerReconciliationRequired):
             run_docker_plan(self.plan(), docker_binary=str(self.binary))
         self.assertEqual(self.calls()[-1][0], "rm")
 
     def test_unavailable_inspection_does_not_attest_absence(self):
         self.configure(inspect_fails=True)
-        with self.assertRaisesRegex(DockerExecutionError, "survivor verification"):
+        with self.assertRaises(DockerReconciliationRequired):
             run_docker_plan(self.plan(), docker_binary=str(self.binary))
-        self.assertTrue(any(call[0] == "rm" for call in self.calls()))
+        self.assertFalse(any(call[0] == "start" for call in self.calls()))
 
     def test_discarded_workload_output_preserves_executor_observation(self):
         self.configure(stdout_bytes=1024 * 1024, stderr_bytes=1024 * 1024, exit_code=7)
         result = DockerExecutor(docker_binary=str(self.binary))(self.plan())
         self.assertEqual(result.outcome, "SUCCEEDED")
-        self.assertEqual(self.calls()[-1][0], "inspect")
+        self.assertEqual(self.calls()[-2][0], "inspect")
 
     def test_wheel_timeout_uses_the_same_verified_cleanup(self):
         self.configure(delay=10)
@@ -206,7 +256,160 @@ class DockerAdapterLifecycleTests(unittest.TestCase):
         (self.root / "receipt.bin").write_text(json.dumps({**body, "receipt_sha256": canonical_sha256(body)}) + "\n")
         result = WheelMaterializingDockerExecutor(str(self.binary))(self.wheel_plan())
         self.assertEqual(result.outcome, "SUCCEEDED")
-        self.assertEqual(self.calls()[-1][0], "inspect")
+        self.assertEqual(self.calls()[-2][0], "inspect")
+
+    def owned_object(self, name="owned-session", cid="b" * 64):
+        identity = DockerSessionIdentity(name, self.plan().plan_sha256, self.plan().image_id, "owned-daemon-1", cid)
+        obj = {"id": cid, "name": "/" + name, "image": identity.image_id,
+               "session": name, "plan": identity.plan_sha256, "status": "running",
+               "running": True, "exit_code": 0}
+        (self.root / "objects").mkdir(exist_ok=True)
+        (self.root / "objects" / cid).write_text(json.dumps(obj))
+        return identity, obj
+
+    def test_lost_create_response_remains_unknown_and_never_starts(self):
+        self.configure(create_delay=10)
+        with self.assertRaises(DockerReconciliationRequired) as raised:
+            run_docker_plan(self.plan(timeout=1), docker_binary=str(self.binary))
+        error = raised.exception
+        self.assertEqual(error.phase, "CREATE")
+        self.assertEqual(error.cleanup_state, "UNKNOWN")
+        self.assertIsNone(error.session.container_id)
+        self.assertFalse(any(call[0] == "start" for call in self.calls()))
+        self.assertEqual(list((self.root / "objects").iterdir()), [])
+        # A daemon may complete an unacknowledged request after initial absence.
+        identity, obj = self.owned_object(error.session.session_id)
+        obj.update(status="created", running=False, plan=error.session.plan_sha256)
+        (self.root / "objects" / identity.container_id).write_text(json.dumps(obj))
+        recovery = reconcile_docker_session(error.session, docker_binary=str(self.binary))
+        self.assertEqual(recovery["cleanup_state"], "UNKNOWN")
+        self.assertEqual(recovery["observed_container_id"], identity.container_id)
+        self.assertFalse(any(call[0] == "start" for call in self.calls()))
+        self.assertEqual(list((self.root / "objects").iterdir()), [])
+
+    def test_client_crash_and_start_rejection_are_not_workload_success(self):
+        for behavior in ({"client_crash": True}, {"start_rejected": True}):
+            with self.subTest(behavior=behavior):
+                self.configure(**behavior)
+                with self.assertRaises(DockerReconciliationRequired) as raised:
+                    run_docker_plan(self.plan(), docker_binary=str(self.binary))
+                self.assertIsNotNone(raised.exception.session.container_id)
+                self.assertEqual(raised.exception.cleanup_state, "VERIFIED_ABSENT")
+
+    def test_recovery_keeps_identity_across_daemon_outage_and_rejects_replacement(self):
+        identity, _ = self.owned_object()
+        for behavior in ({"daemon_unavailable": True}, {"daemon_id": "replacement-daemon"}):
+            with self.subTest(behavior=behavior):
+                self.configure(**behavior)
+                with self.assertRaises(DockerReconciliationRequired) as raised:
+                    reconcile_docker_session(identity, docker_binary=str(self.binary))
+                self.assertEqual(raised.exception.session, identity)
+                self.assertEqual(raised.exception.cleanup_state, "UNKNOWN")
+                self.assertTrue((self.root / "objects" / identity.container_id).exists())
+        self.configure()
+        recovery = reconcile_docker_session(identity, docker_binary=str(self.binary))
+        self.assertEqual(recovery["cleanup_state"], "VERIFIED_ABSENT")
+
+    def test_known_id_cleanup_does_not_remove_same_name_replacement(self):
+        identity, _ = self.owned_object()
+        (self.root / "objects" / identity.container_id).unlink()
+        replacement, _ = self.owned_object(identity.session_id, "c" * 64)
+        recovery = reconcile_docker_session(identity, docker_binary=str(self.binary))
+        self.assertEqual(recovery["cleanup_state"], "VERIFIED_ABSENT")
+        self.assertTrue((self.root / "objects" / replacement.container_id).exists())
+        self.assertFalse(any(call[0] == "rm" for call in self.calls()))
+
+    def test_unacknowledged_identity_cannot_remove_unowned_name(self):
+        identity, obj = self.owned_object()
+        obj["plan"] = "f" * 64
+        (self.root / "objects" / identity.container_id).write_text(json.dumps(obj))
+        unacknowledged = DockerSessionIdentity(identity.session_id, identity.plan_sha256,
+                                              identity.image_id, identity.daemon_id)
+        with self.assertRaises(DockerReconciliationRequired):
+            reconcile_docker_session(unacknowledged, docker_binary=str(self.binary))
+        self.assertTrue((self.root / "objects" / identity.container_id).exists())
+        self.assertFalse(any(call[0] == "rm" for call in self.calls()))
+
+    def test_process_tree_operations_pin_original_container_id(self):
+        identity, _ = self.owned_object()
+        backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+        backend.snapshot(identity.session_id)
+        backend.freeze(identity.session_id)
+        (self.root / "objects" / identity.container_id).unlink()
+        replacement, _ = self.owned_object(identity.session_id, "c" * 64)
+        backend.terminate(identity.session_id)
+        self.assertTrue((self.root / "objects" / replacement.container_id).exists())
+        actions = [call for call in self.calls() if call[0] in {"pause", "rm", "top"}]
+        self.assertTrue(actions)
+        self.assertTrue(all(call[-1] == identity.container_id for call in actions))
+
+    def test_uncertain_backend_receipt_consumes_single_use_authority(self):
+        from sdk.liminal_capability_broker import CapabilityBroker
+        from sdk.liminal_isolated_execution import IsolatedExecutionBroker, verify_receipt
+        from sdk.liminal_post_sandbox_contracts import CapabilityContract
+        from sdk.liminal_runtime_mediation import RuntimeMediator
+        from tests.test_isolated_execution_broker import operation, P, SCOPE
+        capability = CapabilityContract.build(
+            capability_id="cap:uncertain", capability_type="process.execute", subject_id="agent:a",
+            issuer_id="human:owner", scope=SCOPE, issued_at_unix=10, not_before_unix=10,
+            expires_at_unix=500, max_uses=1, delegable=False, parent_capability_id=None, policy_sha256=P)
+        broker = CapabilityBroker("broker:uncertain")
+        broker.admit(capability.as_document(), at_unix=20)
+        isolated = IsolatedExecutionBroker(mediator=RuntimeMediator(broker=broker),
+                                          backend=DockerExecutor(str(self.binary)))
+        plan = self.plan()
+        op = operation(plan, operation_id=plan.operation_id)
+        self.configure(client_crash=True, removal_fails=True)
+        receipt = isolated.execute(operation=op, plan=plan)
+        verify_receipt(receipt)
+        self.assertEqual(receipt["execution_outcome"], "UNKNOWN")
+        self.assertTrue(receipt["backend_invoked"])
+        self.assertNotIn(str(self.root), str(receipt))
+        count = len(self.calls())
+        retry = isolated.execute(operation=op, plan=plan)
+        self.assertEqual(retry["execution_outcome"], "NOT_EXECUTED")
+        self.assertFalse(retry["backend_invoked"])
+        self.assertEqual(len(self.calls()), count)
+
+    def test_wheel_unverified_success_receipt_is_unknown_with_direct_identity(self):
+        for output in (b"", b"not json", b"[]", b"{}", b"\xff"):
+            with self.subTest(output=output):
+                (self.root / "receipt.bin").write_bytes(output)
+                with self.assertRaises(WheelDockerOutcomeUnknown) as raised:
+                    WheelMaterializingDockerExecutor(str(self.binary))(self.wheel_plan())
+                self.assertEqual(raised.exception.phase, "RECEIPT")
+                self.assertEqual(raised.exception.cleanup_state, "VERIFIED_ABSENT")
+                self.assertRegex(raised.exception.session.container_id, r"^[a-f0-9]{64}$")
+
+    def test_session_observer_persists_identity_before_start_and_failure_is_unknown(self):
+        import os
+        journal = self.root / "session.jsonl"
+        observed = []
+        def persist(identity):
+            observed.append(identity)
+            with journal.open("a") as stream:
+                stream.write(json.dumps(identity.as_document()) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            if identity.container_id is not None:
+                raise RuntimeError("injected observer failure after durable acknowledgement")
+        with self.assertRaises(DockerReconciliationRequired) as raised:
+            run_docker_plan(self.plan(), docker_binary=str(self.binary), session_observer=persist)
+        identities = [DockerSessionIdentity(**json.loads(line)) for line in journal.read_text().splitlines()]
+        self.assertEqual(identities, observed)
+        self.assertIsNone(identities[0].container_id)
+        self.assertEqual(identities[1], raised.exception.session)
+        self.assertFalse(any(call[0] == "start" for call in self.calls()))
+        self.assertEqual(raised.exception.cleanup_state, "VERIFIED_ABSENT")
+        recovery = reconcile_docker_session(identities[-1], docker_binary=str(self.binary))
+        self.assertEqual(recovery["cleanup_state"], "VERIFIED_ABSENT")
+
+    def test_observer_failure_before_create_has_no_container_effect(self):
+        def fail(_):
+            raise RuntimeError("journal unavailable")
+        with self.assertRaisesRegex(RuntimeError, "journal unavailable"):
+            run_docker_plan(self.plan(), docker_binary=str(self.binary), session_observer=fail)
+        self.assertFalse(any(call[0] == "create" for call in self.calls()))
 
     def test_invalid_output_budget_does_not_spawn_cli(self):
         for limit in (0, -1, True, 1.5):

@@ -105,6 +105,10 @@ class ExecutionObservation:
         _sha(self.result_sha256, "result_sha256")
 
 
+class ExecutionOutcomeUnknown(RuntimeError):
+    """Trusted executor cannot establish the terminal outcome; authority stays spent."""
+
+
 @dataclass(frozen=True)
 class RuntimeMediationReceipt:
     operation_id: str
@@ -157,6 +161,9 @@ class RuntimeMediator:
         self._receipts: list[RuntimeMediationReceipt] = []
         self._events: list[TrajectoryEvent] = []
         self._event_head = ZERO_SHA256
+        # Conservative in-process risk state, not an observation or authority
+        # grant. Only a separate trusted reconciliation contract could clear it.
+        self._unresolved_privilege_floor: int | None = None
 
     def enter_containment(self, *, incident_receipt_sha256: str) -> None:
         self._containment_evidence_sha256 = _sha(incident_receipt_sha256, "incident_receipt_sha256")
@@ -204,6 +211,14 @@ class RuntimeMediator:
             if not isinstance(observation, ExecutionObservation):
                 raise MediationError("executor must return ExecutionObservation")
             observation.validate()
+        except ExecutionOutcomeUnknown as exc:
+            return self._finish(
+                operation=operation, capability_receipt_sha=capability["receipt_sha256"],
+                admission="ALLOW", outcome="UNKNOWN",
+                result_sha=canonical_sha256({"error_type": type(exc).__name__}),
+                reasons=("executor_outcome_unknown", "reconciliation_required"),
+                capability_id=capability.get("capability_id"), scope_sha=scope_sha,
+            )
         except Exception as exc:
             # Error messages are intentionally excluded because they may contain
             # command lines, paths, tokens or other host-sensitive material.
@@ -281,13 +296,29 @@ class RuntimeMediator:
                 admission: str, outcome: str, result_sha: str, reasons: tuple[str, ...],
                 capability_id: str | None, scope_sha: str, event_kind_override: str | None = None) -> dict[str, Any]:
         event_kind = event_kind_override or PHASE3_KIND[operation.kind]
-        event_decision = "ALLOW" if admission == "ALLOW" and outcome == "SUCCEEDED" else "BLOCK"
+        # Phase 3 counts ALLOW events. A dispatched UNKNOWN may have effected
+        # its admitted operation, so retain it for conservative risk analysis;
+        # the receipt and metadata still record UNKNOWN rather than success.
+        event_decision = "ALLOW" if admission == "ALLOW" and outcome in {"SUCCEEDED", "UNKNOWN"} else "BLOCK"
+        privilege_before = operation.privilege_level_before
+        if self._unresolved_privilege_floor is not None:
+            privilege_before = max(privilege_before, self._unresolved_privilege_floor)
+        privilege_after = operation.privilege_level_after if event_decision == "ALLOW" else operation.privilege_level_before
+        if event_decision == "ALLOW" and outcome == "UNKNOWN":
+            # Retain the possible effect across later events. Preserve this
+            # event's prior bound so the first uncertain escalation remains
+            # measurable; denied requested escalations cannot raise the floor.
+            self._unresolved_privilege_floor = max(privilege_before, privilege_after)
+        if self._unresolved_privilege_floor is not None:
+            # Success, failure, denial and containment release do not reconcile
+            # the earlier uncertainty, including a successful requested decrease.
+            privilege_after = max(privilege_after, self._unresolved_privilege_floor)
         event = TrajectoryEvent.build(
             event_id=f"runtime-event:{len(self._events)+1}", sequence=len(self._events)+1,
             observed_at_unix=operation.at_unix, kind=event_kind, decision=event_decision,
             subject_id=operation.subject_id, capability_id=capability_id,
-            privilege_level_before=operation.privilege_level_before,
-            privilege_level_after=operation.privilege_level_after if event_decision == "ALLOW" else operation.privilege_level_before,
+            privilege_level_before=privilege_before,
+            privilege_level_after=privilege_after,
             metadata={
                 "operation_id": operation.operation_id,
                 "runtime_kind": operation.kind if event_kind_override is None else event_kind_override,
@@ -332,6 +363,6 @@ def _sha(value: str, name: str) -> str:
 
 
 __all__ = [
-    "AUTHORITY", "ExecutionObservation", "MediationError", "OPERATION_TO_CAPABILITY",
+    "AUTHORITY", "ExecutionObservation", "ExecutionOutcomeUnknown", "MediationError", "OPERATION_TO_CAPABILITY",
     "RuntimeMediationReceipt", "RuntimeMediator", "RuntimeOperation", "SCHEMA", "verify_receipt",
 ]

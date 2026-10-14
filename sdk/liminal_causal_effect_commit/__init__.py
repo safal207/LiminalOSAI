@@ -27,6 +27,7 @@ from sdk.liminal_objective_effect_commit import (
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
 from sdk.liminal_runtime_mediation import (
     ExecutionObservation,
+    ExecutionOutcomeUnknown,
     OPERATION_TO_CAPABILITY,
     PHASE3_KIND,
     RuntimeMediator,
@@ -63,6 +64,21 @@ class CausalEffectCommitError(ValueError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+class CausalEffectEvidenceError(CausalEffectCommitError, ExecutionOutcomeUnknown):
+    """Effect succeeded, but its required causal commit evidence is incomplete.
+
+    Existing causal-error handlers remain compatible; outer effect wrappers
+    recognize the incomplete terminal commit and retain spent authority.
+    """
+
+    def __init__(self, *, result_sha256: str, evidence_code: str = "trajectory_append_failed") -> None:
+        if evidence_code not in {"trajectory_append_failed", "causal_commit_receipt_failed"}:
+            raise CausalEffectCommitError("invalid_effect_evidence_code")
+        super().__init__(f"{evidence_code}_after_effect")
+        self.evidence_code = evidence_code
+        self.result_sha256 = _sha(result_sha256, "effect_result_sha256")
 
 
 def _sha(value: Any, name: str, *, allow_zero: bool = True) -> str:
@@ -160,6 +176,7 @@ class FencedTrajectoryRiskLedger:
         self._verify_event = verify_event
         self._events: list[TrajectoryEvent] = []
         self._event_ids: set[str] = set()
+        self._effect_uncertain = False
 
     @property
     def head_sha256(self) -> str:
@@ -186,13 +203,16 @@ class FencedTrajectoryRiskLedger:
             return {
                 "event_sha256": event.event_sha256,
                 "trajectory_head_sha256": event.event_sha256,
-                "trajectory_decision": decision["decision"],
+                "trajectory_decision": "BLOCK" if self._effect_uncertain else decision["decision"],
                 "trajectory_decision_receipt_sha256": decision["receipt_sha256"],
                 "risk_score": decision["risk_score"],
+                **self._uncertainty_fields(decision, event.event_sha256),
             }
 
     def project_verified_event(self, document: Mapping[str, Any]) -> dict[str, Any]:
         with self.commit_fence.hold():
+            if self._effect_uncertain:
+                raise CausalEffectCommitError("trajectory_effect_uncertain")
             event = self._verified_event(document)
             if event.event_id in self._event_ids:
                 raise CausalEffectCommitError("trajectory_event_replay")
@@ -220,13 +240,39 @@ class FencedTrajectoryRiskLedger:
                 "trajectory_head_sha256": head,
                 "graph_sha256": decision["graph_sha256"],
                 "decision_receipt_sha256": decision["receipt_sha256"],
-                "decision": decision["decision"],
+                "decision": "BLOCK" if self._effect_uncertain else decision["decision"],
                 "risk_score": decision["risk_score"],
                 "matched_rules": list(decision["matched_rules"]),
                 "causal_authority_sha256": canonical_sha256(CAUSAL_AUTHORITY),
                 "authority": dict(AUTHORITY),
+                **self._uncertainty_fields(decision, head),
             }
             return {**body, "state_sha256": canonical_sha256(body)}
+
+    def _mark_effect_uncertain(self) -> None:
+        """Fail closed across all brokers sharing this ledger until trusted reconciliation."""
+        with self.commit_fence.hold():
+            self._effect_uncertain = True
+
+    def _uncertainty_fields(self, decision: Mapping[str, Any], head: str) -> dict[str, Any]:
+        if not self._effect_uncertain:
+            return {}
+        # Preserve the actual Phase-3 evidence; this is a separate authority gate.
+        gate = {
+            "schema": "liminal-trajectory-uncertainty-gate-v0.1",
+            "decision": "BLOCK",
+            "reason_codes": ["effect_outcome_unreconciled"],
+            "event_count": len(self._events),
+            "trajectory_head_sha256": head,
+            "graph_sha256": decision["graph_sha256"],
+            "decision_receipt_sha256": decision["receipt_sha256"],
+        }
+        return {
+            "effect_uncertain": True,
+            "verified_trajectory_decision": decision["decision"],
+            "uncertainty_gate": gate,
+            "uncertainty_gate_sha256": canonical_sha256(gate),
+        }
 
     def _verified_event(self, document: Mapping[str, Any]) -> TrajectoryEvent:
         event = _parse_event(document)
@@ -509,48 +555,72 @@ class CausalBoundEffectCommitBroker:
                     executor=executor,
                 )
             except Exception as exc:
-                self._append_commit(
-                    lease=lease,
-                    head_after=state["trajectory_head_sha256"],
-                    objective_commit_sha256=self._latest_objective_commit(before_commits),
-                    committed_at_unix=now,
-                    outcome="FAILED",
-                    result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
-                    reasons=("causal_lease_consumed", "objective_bound_effect_failed"),
-                )
+                if isinstance(exc, ExecutionOutcomeUnknown):
+                    self.ledger._mark_effect_uncertain()
+                try:
+                    self._append_commit(
+                        lease=lease,
+                        head_after=state["trajectory_head_sha256"],
+                        objective_commit_sha256=self._latest_objective_commit(before_commits),
+                        committed_at_unix=now,
+                        outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
+                        result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
+                        reasons=("causal_lease_consumed", "effect_outcome_unknown", "reconciliation_required")
+                        if isinstance(exc, ExecutionOutcomeUnknown)
+                        else ("causal_lease_consumed", "objective_bound_effect_failed"),
+                    )
+                except Exception:
+                    if isinstance(exc, ExecutionOutcomeUnknown):
+                        # A diagnostic failure cannot replace the effect outcome.
+                        raise exc from CausalEffectCommitError("causal_commit_evidence_unavailable")
+                    raise
+                if isinstance(exc, ExecutionOutcomeUnknown):
+                    raise
                 raise CausalEffectCommitError("objective_bound_effect_failed") from exc
 
             try:
                 appended = self.ledger.append_verified_event(lease.proposal)
             except Exception as exc:
+                self.ledger._mark_effect_uncertain()
+                evidence_error = CausalEffectEvidenceError(result_sha256=observation.result_sha256)
+                try:
+                    self._append_commit(
+                        lease=lease,
+                        head_after=state["trajectory_head_sha256"],
+                        objective_commit_sha256=self._latest_objective_commit(before_commits),
+                        committed_at_unix=now,
+                        outcome="EFFECT_SUCCEEDED_EVIDENCE_FAILED",
+                        result_sha256=observation.result_sha256,
+                        reasons=("causal_lease_consumed", "effect_succeeded", "trajectory_append_failed"),
+                    )
+                except Exception:
+                    raise evidence_error from CausalEffectCommitError("causal_commit_evidence_unavailable")
+                raise evidence_error from exc
+
+            try:
                 self._append_commit(
                     lease=lease,
-                    head_after=state["trajectory_head_sha256"],
+                    head_after=appended["trajectory_head_sha256"],
                     objective_commit_sha256=self._latest_objective_commit(before_commits),
                     committed_at_unix=now,
-                    outcome="EFFECT_SUCCEEDED_EVIDENCE_FAILED",
+                    outcome="SUCCEEDED",
                     result_sha256=observation.result_sha256,
-                    reasons=("causal_lease_consumed", "effect_succeeded", "trajectory_append_failed"),
+                    reasons=(
+                        "trajectory_head_rechecked",
+                        "trajectory_state_allow",
+                        "projected_trajectory_allow",
+                        "causal_lease_consumed",
+                        "objective_runtime_effect_committed",
+                        "committed_event_appended",
+                        "effect_committed_under_shared_fence",
+                    ),
                 )
-                raise CausalEffectCommitError("trajectory_append_failed_after_effect") from exc
-
-            self._append_commit(
-                lease=lease,
-                head_after=appended["trajectory_head_sha256"],
-                objective_commit_sha256=self._latest_objective_commit(before_commits),
-                committed_at_unix=now,
-                outcome="SUCCEEDED",
-                result_sha256=observation.result_sha256,
-                reasons=(
-                    "trajectory_head_rechecked",
-                    "trajectory_state_allow",
-                    "projected_trajectory_allow",
-                    "causal_lease_consumed",
-                    "objective_runtime_effect_committed",
-                    "committed_event_appended",
-                    "effect_committed_under_shared_fence",
-                ),
-            )
+            except Exception:
+                self.ledger._mark_effect_uncertain()
+                raise CausalEffectEvidenceError(
+                    result_sha256=observation.result_sha256,
+                    evidence_code="causal_commit_receipt_failed",
+                ) from CausalEffectCommitError("causal_commit_evidence_unavailable")
             return observation
 
     def commit_authorized_effect(
@@ -834,9 +904,13 @@ class CausalBoundEffectRuntimeMediator(RuntimeMediator):
                 operation=operation,
                 capability_receipt_sha=capability["receipt_sha256"],
                 admission="ALLOW",
-                outcome="FAILED",
-                result_sha=canonical_sha256({"error_type": type(exc).__name__}),
-                reasons=("causal_bound_effect_commit_failed",),
+                outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
+                result_sha=exc.result_sha256 if isinstance(exc, CausalEffectEvidenceError)
+                else canonical_sha256({"error_type": type(exc).__name__}),
+                reasons=("effect_succeeded", exc.evidence_code, "reconciliation_required")
+                if isinstance(exc, CausalEffectEvidenceError)
+                else ("effect_outcome_unknown", "reconciliation_required")
+                if isinstance(exc, ExecutionOutcomeUnknown) else ("causal_bound_effect_commit_failed",),
                 capability_id=capability.get("capability_id"),
                 scope_sha=scope_sha,
             )
@@ -876,7 +950,7 @@ def verify_commit_receipt(document: Mapping[str, Any]) -> dict[str, Any]:
     digest = raw.pop("receipt_sha256", None)
     if raw.get("schema") != COMMIT_SCHEMA or raw.get("authority") != AUTHORITY:
         raise CausalEffectCommitError("commit_receipt_schema_mismatch")
-    if raw.get("effect_outcome") not in {"SUCCEEDED", "FAILED", "NOT_EXECUTED", "EFFECT_SUCCEEDED_EVIDENCE_FAILED"}:
+    if raw.get("effect_outcome") not in {"SUCCEEDED", "FAILED", "UNKNOWN", "NOT_EXECUTED", "EFFECT_SUCCEEDED_EVIDENCE_FAILED"}:
         raise CausalEffectCommitError("commit_receipt_outcome_invalid")
     if digest != canonical_sha256(raw):
         raise CausalEffectCommitError("commit_receipt_digest_mismatch")
@@ -890,6 +964,7 @@ __all__ = [
     "CausalBoundEffectRuntimeMediator",
     "CausalEffectAuthorizationReceipt",
     "CausalEffectCommitError",
+    "CausalEffectEvidenceError",
     "CausalEffectCommitReceipt",
     "FencedTrajectoryRiskLedger",
     "LEDGER_SCHEMA",

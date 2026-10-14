@@ -11,6 +11,9 @@ on:
       - 'sdk/liminal_containment/**'
       - 'adapters/docker/**'
       - 'tests/test_isolated_execution_broker.py'
+      - 'tests/test_docker_adapter_lifecycle.py'
+      - 'tests/test_docker_failure_evidence.py'
+      - 'tests/test_uncertain_effect_outcomes.py'
       - 'tests/test_process_tree_active_containment.py'
       - 'tests/fixtures/isolated_executor/**'
       - 'docs/ISOLATED_EXECUTION_BROKER.md'
@@ -23,6 +26,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,6 +34,9 @@ jobs:
 
       - name: Run isolated execution broker tests
         run: python3 -m unittest tests/test_isolated_execution_broker.py -v
+
+      - name: Check bounded lifecycle failures and uncertainty propagation
+        run: python3 -m unittest tests.test_docker_adapter_lifecycle tests.test_docker_failure_evidence tests.test_uncertain_effect_outcomes -v
 
       - name: Re-run Process Tree Active Containment
         run: python3 -m unittest tests/test_process_tree_active_containment.py -v
@@ -52,7 +59,7 @@ jobs:
       - name: Verify model-facing SDK has no host execution authority
         run: |
           python3 scripts/check_forbidden.py -- -R -nE '(^|[[:space:]])(import|from)[[:space:]]+(subprocess|socket|os)([[:space:].]|$)' sdk/liminal_isolated_execution sdk/liminal_process_tree_containment
-          grep -q 'shell=False' adapters/docker/liminal_docker_executor.py
+          grep -q 'shell=False' adapters/docker/_bounded_cli.py
 
       - name: Build immutable local fixture image
         run: |
@@ -60,6 +67,24 @@ jobs:
           IMAGE_ID="$(docker image inspect liminal-isolated-fixture:local --format '{{.Id}}')"
           case "$IMAGE_ID" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo "unexpected image id: $IMAGE_ID"; exit 1 ;; esac
           echo "IMAGE_ID=$IMAGE_ID" >> "$GITHUB_ENV"
+
+      - name: Exercise failure lifecycle on an owned disposable daemon
+        run: |
+          docker save "$IMAGE_ID" --output "$RUNNER_TEMP/liminal-fixture.tar"
+          REVISION="$(git rev-parse HEAD)"
+          sudo python3 tests/fixtures/isolated_executor/docker_failure_probe.py \
+            --image "$IMAGE_ID" --archive "$RUNNER_TEMP/liminal-fixture.tar" \
+            --revision "$REVISION" --output "$RUNNER_TEMP/docker-failure-evidence/report.json"
+          python3 tests/fixtures/isolated_executor/verify_docker_failure_probe.py \
+            "$RUNNER_TEMP/docker-failure-evidence/report.json" --revision "$REVISION" --image "$IMAGE_ID"
+
+      - name: Upload owned-daemon lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-failure-lifecycle
+          path: ${{ runner.temp }}/docker-failure-evidence/report.json
+          if-no-files-found: warn
 
       - name: Run real container isolation negative probes
         run: python3 adapters/docker/liminal_docker_executor.py --self-test "$IMAGE_ID" "$GITHUB_WORKSPACE"

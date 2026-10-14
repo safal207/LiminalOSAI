@@ -20,6 +20,7 @@ from sdk.liminal_post_sandbox_contracts import canonical_sha256
 from sdk.liminal_runtime_config import BoundRuntimeConfigBroker
 from sdk.liminal_runtime_mediation import (
     ExecutionObservation,
+    ExecutionOutcomeUnknown,
     MediationError,
     OPERATION_TO_CAPABILITY,
     RuntimeMediator,
@@ -488,16 +489,23 @@ class EffectCommitBroker:
                         raise EffectCommitError("executor_observation_invalid")
                     observation.validate()
                 except Exception as exc:
-                    self._append_commit(
-                        lease=lease,
-                        world=world,
-                        session=session,
-                        committed_at_unix=now,
-                        outcome="FAILED",
-                        result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
-                        reasons=("lease_consumed", "effect_callback_failed"),
-                    )
-                    if isinstance(exc, EffectCommitError):
+                    try:
+                        self._append_commit(
+                            lease=lease,
+                            world=world,
+                            session=session,
+                            committed_at_unix=now,
+                            outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
+                            result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
+                            reasons=("lease_consumed", "effect_outcome_unknown", "reconciliation_required")
+                            if isinstance(exc, ExecutionOutcomeUnknown)
+                            else ("lease_consumed", "effect_callback_failed"),
+                        )
+                    except Exception:
+                        if isinstance(exc, ExecutionOutcomeUnknown):
+                            raise exc from EffectCommitError("effect_commit_evidence_unavailable")
+                        raise
+                    if isinstance(exc, (EffectCommitError, ExecutionOutcomeUnknown)):
                         raise
                     raise EffectCommitError("effect_callback_failed") from exc
 
@@ -638,9 +646,10 @@ class EpochBoundEffectRuntimeMediator(RuntimeMediator):
                 operation=operation,
                 capability_receipt_sha=capability["receipt_sha256"],
                 admission="ALLOW",
-                outcome="FAILED",
+                outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
                 result_sha=canonical_sha256({"error_type": type(exc).__name__}),
-                reasons=("effect_commit_failed",),
+                reasons=("effect_outcome_unknown", "reconciliation_required")
+                if isinstance(exc, ExecutionOutcomeUnknown) else ("effect_commit_failed",),
                 capability_id=capability.get("capability_id"),
                 scope_sha=scope_sha,
             )
