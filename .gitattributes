@@ -1,0 +1,4 @@
+# These production sources retain their historical CRLF line endings.
+# A carriage return is an EOL marker; actual trailing spaces remain errors.
+core/pulse_kernel.c whitespace=trailing-space,space-before-tab,cr-at-eol
+core/liminal_substrate.c whitespace=trailing-space,space-before-tab,cr-at-eol
