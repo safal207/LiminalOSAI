@@ -87,9 +87,43 @@ class LiminalSubstrateCliCharacterizationTests(unittest.TestCase):
         self.assertEqual(self.successful_lines("--limit=0"), baseline)
 
     def test_named_allowance_and_hex_context_remain_valid(self) -> None:
-        for argument in ("--allow=now", "--allow=NOW", "--allow=0.25", "--entangle-ctx=0x10"):
+        for argument in ("--allow=now", "--allow=NOW", "--allow=nOw", "--allow=0.25",
+                         "--entangle-ctx=0x10", "--entangle-ctx=4294967295", "--entangle-ctx=0xffffffff",
+                         "--entangle-ctx=037777777777", "--entangle-ctx=+0xffffffff"):
             with self.subTest(argument=argument):
                 self.successful_lines(argument)
+
+    def test_shared_float_scalars_reject_empty_nonfinite_and_overflow(self) -> None:
+        for option in ("allow", "empathy-gain", "recognition-threshold"):
+            for value in ("", "nan", "inf", "-inf", "1e999", "1e-999", "nowjunk"):
+                with self.subTest(option=option, value=value):
+                    self.assert_composite_rejected(f"--{option}={value}")
+
+    def test_context_rejects_malformed_negative_and_uint32_overflow(self) -> None:
+        for value in ("", "nan", "inf", "1e999", "1.5", "-1", " -1", "0x10tail",
+                      "4294967296", "0x100000000", "040000000000", "18446744073709551616"):
+            with self.subTest(value=value):
+                self.assert_composite_rejected(f"--entangle-ctx={value}")
+
+    def test_tune_seed_rejects_int_narrowing_overflow(self) -> None:
+        for value in ("2147483648", "-2147483649", "4294967296"):
+            with self.subTest(value=value):
+                self.assert_composite_rejected(f"--tune-seed={value}")
+        for value in ("-2147483648", "2147483647", "-1", "42"):
+            with self.subTest(value=value):
+                self.successful_lines(f"--tune-seed={value}")
+
+    def test_hex_uint32_context_boundary_is_recorded_without_narrowing(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="substrate-context-control-") as directory:
+            (Path(directory) / "logs").mkdir()
+            result = subprocess.run(
+                [str(BINARY), "--substrate", "--limit=1", "--qel", "--introspect", "--entangle-ctx=0xffffffff"],
+                cwd=directory, capture_output=True, text=True, check=False, timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = [json.loads(line) for line in (Path(directory) / "logs" / "qel_raw.jsonl").read_text().splitlines()]
+            self.assertTrue(rows)
+            self.assertTrue(all(row["ctx"] == 4294967295 for row in rows))
 
     def test_malformed_scalar_floats_are_rejected(self) -> None:
         prefixes = (

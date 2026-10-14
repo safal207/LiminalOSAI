@@ -66,15 +66,20 @@ comparison, a binary rebuild with identical behavior succeeds, and a candidate
 cannot overwrite its comparison baseline by reusing the output path.
 
 After integrating the CLI validation commit, strict GCC validation and the
-GCC AddressSanitizer/UndefinedBehaviorSanitizer profile each passed **1,022 Python
+GCC AddressSanitizer/UndefinedBehaviorSanitizer profile each passed **1,031 Python
 tests and nine C executables**, with no skipped tests. Local ASan used
 `detect_leaks=0` because leak inspection is unavailable in this environment;
 CI retains its leak checks. Clang was unavailable locally and requires CI
 verification against the final published revision.
 
 The committed [measurement record](benchmarks/c-orchestrator-boundaries.json)
-contains binary fingerprints, exact characterization hashes and raw local
-resource samples. Both measurement binaries used GCC `-Os` with the same build
+compares baseline `724ff8cf6ec238adeb110ae1c0632c314d727a1c` with the frozen
+candidate C source at `4c410e6f02ca166f37dec28433666bf48dfa9660`. It contains
+binary fingerprints, fingerprints for all tracked C sources and headers,
+exact characterization hashes and raw local resource samples. The candidate
+core tree is `dfb85e3a2ae0a7fd6a91a519dfc0cb9c87e827d6`; subsequent evidence and
+documentation changes do not alter that measured source. Both measurement
+binaries used clean GCC `-Os` builds with the same build
 flags. Seven samples per binary execute 1,024 cycles with the enabled-module
 fixture and controlled clocks/sleep. Child-process CPU time and peak resident
 memory are recorded with Linux `wait4`; wall time includes process startup and
@@ -83,14 +88,15 @@ latency claims. The observed medians were:
 
 | Binary | CPU seconds before / after | Peak RSS KiB before / after |
 | --- | --- | --- |
-| Pulse | 0.5044 / 0.4610 | 12,032 / 12,032 |
-| Substrate | 0.5495 / 0.5331 | 12,288 / 12,288 |
+| Pulse | 0.4589 / 0.4784 | 12,032 / 12,160 |
+| Substrate | 0.6057 / 0.5330 | 12,288 / 12,416 |
 
-The sample ranges overlap. These observations support retaining the interfaces
-for this fixture without a speedup claim.
+The CPU sample ranges overlap; the pulse median increases while the substrate
+median decreases. Peak RSS rises by 128 KiB for each process in this sample.
+These observations record the interface tradeoff without a speedup claim.
 
-Binary text grew from 126,454 to 127,854 bytes for pulse and from 111,801 to
-112,766 bytes for substrate. Mutable data size stayed the same; substrate BSS
+Binary text grew from 126,494 to 127,894 bytes for pulse and from 111,829 to
+112,794 bytes for substrate. Mutable data size stayed the same; substrate BSS
 alignment grew by 32 bytes. The explicit module interfaces therefore have a
 small binary-size cost. The scheduler and state transitions introduce no heap
 allocation of their own.

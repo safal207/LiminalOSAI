@@ -1,7 +1,8 @@
 {
   "schema": "liminal-c-orchestrator-characterization-v1",
-  "baseline_revision": "6841b61e7603ea95469a0c59908f885dcbfa05f0",
-  "candidate_c_revision": "88021a45c286d476162f28e072138af579955e3f",
+  "baseline_revision": "724ff8cf6ec238adeb110ae1c0632c314d727a1c",
+  "candidate_c_revision": "4c410e6f02ca166f37dec28433666bf48dfa9660",
+  "candidate_core_tree_sha": "dfb85e3a2ae0a7fd6a91a519dfc0cb9c87e827d6",
   "build_flags": "-std=c11 -Wall -Wextra -pedantic -Os -Iinclude; -lm",
   "compiler": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0",
   "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
@@ -13,10 +14,25 @@
   ],
   "candidate_c_source_sha256": {
     "Makefile": "0824e78072c3f89b350b4f3129902054ee5d2c47b96df38a65fcff549509f692",
-    "core/pulse_kernel.c": "1ef69984e8b22f97af73b2dbe034579c8726d50ca99e6d182e5f15d6f78a6d93",
+    "affinity/core.c": "eec0bbe02f3f07c74e1c019ad46c48e28a632cfc20295d1e422b2ececb8213c3",
+    "anticipation/v2.c": "46e85024736c56fad7ac2e94cd5f6022eb756a100756e4621905c16ec72bbc7e",
+    "awareness/bridge.c": "a7c0f0b0c636ee69dc17bb97c4e277f14ac4b36eb804e724ac184bf01974b734",
+    "bus/resonant.c": "65b9a7f247feaa097cb5ae12b10be4a298adbf1599a11422759672a3dacf095c",
+    "coherence/field.c": "c6c583ef5b0377e3e2a475622f13c77fc3004ab7fa37162c2fe1792bb7a5e67c",
+    "collective/graph.c": "69816210d405f10af3ac6da4c8274e60ab1eb7c93bf0d519e5499a0b73c30fb1",
+    "collective/memory.c": "39c4a76d55c380093d4f13c027437e3f9eb484e6f612ae3f176d3e5d79b5b0a5",
+    "core/astro_sync.c": "f7e63a0eec02e51cb18acc28fc0fec23405175e50f2145a195bc39495c87f81b",
+    "core/consent_gate.c": "96633c41314bce1f4d94570d30454cf40b1778e4058bffd644c29ff2622e1c19",
+    "core/dream_replay.c": "0ff9a27223f9d7a5befac473d6a9452df8992e772d0888bae31948784467785b",
+    "core/erb.c": "819228e49d087ec158f662540185bd077a6dc72fdfb2f02a8c89e92acc5c77b7",
+    "core/flow_equilibrium.c": "1cfbc298f1b3bae111166e6631480111b638970258d3cd52d03a13c82695d69b",
+    "core/kiss_cascade.c": "b4bd61cd1029a744ac543249d57734769b4968383f2fcd95eb812f0af0dccf0f",
     "core/liminal_substrate.c": "c4ad7b6e4b534b005e4a3b1a3af3fb2ab282f819022fbb336f2046b589c91d0f",
-    "core/runtime/kernel_cli_guard.c": "760140e86745e1040f567944d71c481bc05ed27e9fd8135d64fb778a237b316c",
-    "core/runtime/kernel_cli_guard.h": "60f727da359b0cce1ee3ada25058f79da479a41049deb5218ea84a555afd95f7",
+    "core/neural_resonance.c": "86d76b46bc6053cc1c0c3eb32e8e61c5cb969b3edbabf07d44b0f900ee0858e2",
+    "core/pulse_kernel.c": "1ef69984e8b22f97af73b2dbe034579c8726d50ca99e6d182e5f15d6f78a6d93",
+    "core/qel.c": "a6f02ff5677d17e052dd82aeb9e2599016ff5e8d9d2163b20aa15dd9efb416fc",
+    "core/runtime/kernel_cli_guard.c": "564c4019d078552643533ee09c849af0ca36e38fd4b5bff09251020d531079b0",
+    "core/runtime/kernel_cli_guard.h": "a9d41a5e63a62803574df693151ef2d131df8a7e11fbbec2fe6ee8931a414393",
     "core/runtime/kernel_context.c": "3391ff3eec3213ca8626c0c2e44fe89051c97838afca74e041bb291547b270ab",
     "core/runtime/kernel_context.h": "6b8cd4ca65f5d6e7fb51cc378b8c86e81f67bfaeffa777b395f87f47230c1aee",
     "core/runtime/kernel_runtime_utils.c": "7f62346429c48b2599659030a432ba3b111cfe2c633f01d8bf16572a635e36b7",
@@ -37,26 +53,93 @@
     "core/runtime/substrate_options.c": "6c39cfe81fef79821474c3779acaddefce65cc2e371b18d657b9480c7f214b95",
     "core/runtime/substrate_options.h": "041fd650e251314913a601392c574b6f41f7c8340cc6e73ca9f3b0641d857728",
     "core/runtime/substrate_state.c": "631f57caae65a05b59e346586705e2e9fe9ac6d38c182875ba17f118b744fd96",
-    "core/runtime/substrate_state.h": "9802a54e20e068388b71293df9656aa9236238a297261929f30546570103b606"
+    "core/runtime/substrate_state.h": "9802a54e20e068388b71293df9656aa9236238a297261929f30546570103b606",
+    "core/synaptic_bridge.c": "8017700accb4d8d8bc9765cfa8788a00cb5ebc727bfd6196c3bb8397f93995ac",
+    "core/trs_adapt.c": "b3050ff9f11401f7a9aa99afcc0ec9e98aff87a86e7af15f4b4b965215abbfcc",
+    "core/trs_filter.c": "64041e60e2fc0c0b793fd56b4d6501b4dc6c8757108b3c62f62c91fb6e06e4de",
+    "core/vse.c": "110bbce02bd19468c3a77c3531df46a6d2fe1c02dddc3caae6d86b5dfc37a7d0",
+    "council/inner.c": "660ffc7a6af87330936a3d4cfee1786e093cc0bc57a846802d1c6b5bd8d4a2d8",
+    "diagnostics/health_scan.c": "158848f6d08be269cf00bfa8c6bfcf504cd2699c41d64f8b4d149c696dad3aff",
+    "dream/balancer.c": "6a959deaf17e430dcd60cd643b334ac30271cc7ddef9c4f368ad038d218f8324",
+    "dream/state.c": "d1c7858ba5074eb9db2c793b4fe89b0fc9a482db4588edee7b6b0bfb0177b25d",
+    "empathic/field.c": "dd23b82064cc6675cae9f3256d03995d9ebafa1c4621141723c5ea8b7d6a3da9",
+    "include/affinity.h": "9d894063a86edcbb8c781dfba89f1e058cec08d5fc0ff96daeffd18ba6f3eafd",
+    "include/anticipation_v2.h": "9058cf7272b9b54f62c59b13b247fa0b3268b6959d2b16235e71b3eb80f9a95d",
+    "include/astro_sync.h": "9fb53622c591f83f0dd5e80e6c3fd3dc8d05ff3cb72a60c2b8e63639b7c88e33",
+    "include/autotune.h": "0fbc0ef673c98ac34ce0a39d2cdf9f425097474fc914454035e020666a03150e",
+    "include/awareness.h": "2a2c1395e28c0e2895df385b68843042f27518f41a15fac914cf1143801cb02c",
+    "include/coherence.h": "b9fe85c542eb18c4a7e80d0ed3127fbcb1296f3e709a1cb0bfebd970722f5866",
+    "include/collective.h": "5751434727b9c10de9436a6f9a77566d12dc6b1da5d3f311856eacb3227b3474",
+    "include/collective_memory.h": "258a0223f6dbbbbb5923938448f52d15223eb066b85b6ea5df76afd1f4150d2e",
+    "include/consent_gate.h": "f1747e59281e932f810b27226dc57ebf7988c21cd142ed2895fd8ea6c5c6c39a",
+    "include/council.h": "993c9667abcc3a31c8510387a2706602348814073fac0166aff6f26306822f4d",
+    "include/dream.h": "f2bf152bfc4b4ccf5300ea4136201e4b6af5ea580dfd93198b1cc1d5db4fb6d4",
+    "include/dream_balance.h": "e953ba9ea0f3458ac246d6d19b73ddb0dded4db6e8fe0a2d00c4e5a8436d5ad4",
+    "include/dream_coupler.h": "deaba5476788bdff03750708bfc4ac304d6ada51d0d2b962774e1ed80f15e10e",
+    "include/dream_replay.h": "d60ab046db25ef2720dd48f389430e46ede42524cfc7ba7e075012320d160058",
+    "include/emotion_memory.h": "bbcc4de4b640a28bf574cc8eb1e702445b083995f1a9e4ddb30688b84ed02f85",
+    "include/empathic.h": "0f45f879ac9613611c3add8c2c85a1b2acbaea9e9707700a0463968add898c0b",
+    "include/erb.h": "86cc39db0c12dc13a808391e4c8048427d5c185b1b04cd9bad7668a1689bbf87",
+    "include/flow_equilibrium.h": "84160f57bc5961bc8fbda0a5fd7d09f201d763d3049d2ebcf5dddee5fe8d6e78",
+    "include/harmony.h": "54904f1f4d34699c8df29e264df2aa993cdd3a51108d82ad4c613e58996ca4ec",
+    "include/health_scan.h": "3c1f1a3a685aeb208297e82472236fc6296688fde90473f3c76f0eb1afe82fac",
+    "include/introspect.h": "df95bbc23c0065fa4ad9313b7af7dc49bcc83cb5afb74344006be67096a6a2ba",
+    "include/kiss.h": "a9dcf9df78b8671c8943c0f6cdc3d7e2365ed6b60c5d8d68eda0b40b8fba70a5",
+    "include/metabolic.h": "bf55a36fa104e69b5c29d438bcea48d16f1aa3af61a8b099664e5deb8b33d3bf",
+    "include/mirror.h": "44e91ff4d9802a45a70507c415126282e1c913bde72767666a6cbc4bb7885fbc",
+    "include/neural_resonance.h": "c43bb867a1227fdcd221a024ce45ecbbfffce32324415c28fc0ec124c9d85362",
+    "include/qel.h": "4bea15da36073c5cac8301b384b0a8514d4b3be91051cfaddad0d59f06567c83",
+    "include/reflection.h": "a18e15bd58754cc563ac7150b5f2918251a84bd53213b031a2eeceb77d48b319",
+    "include/resonant.h": "94a8f2b361f4bd74dad90c0f09e47d3e48a8fa4a30188add374ad6d67cb0f0ef",
+    "include/soil.h": "ac1bb92df41cd5d5eabb97b441703bce8d9ba8abb39d1b9ec838d10257ada954",
+    "include/string_utils.h": "ec53140ef0185187a171a7a5deef078abf4859f3a9d1736c6ce683268e5a042f",
+    "include/symbiosis.h": "0919fbeb706478af172c3d18cd72631aebe17d06625283981a53eae316828706",
+    "include/symbol.h": "c2dd208ef285ec5cc6e819ffe3fbbc76d155879bbefc7836ed0bd59a9d945e72",
+    "include/synaptic_bridge.h": "065a9ac9d4f61e701fd974f222bc867c738d1a2d62bc04afacc45653db324531",
+    "include/trs_adapt.h": "4b8e1b9daa39b2fa56c74e9f4eedf919cea7712851f026967d1f5e635c428af3",
+    "include/trs_filter.h": "980733a0fee795503ba559907daf267a57d883be176cb62795894b165d94a582",
+    "include/vse.h": "4b22c630e514beb86523cd2ffba378d0bbacfbcd49d0cbe8d7f2165d02adde04",
+    "include/weave.h": "8271825500b6c54b23be4c7138ac09b83a9ac5029a8ccc6426b1c754ca7854bd",
+    "memory/emotion_memory.c": "301de9c9dfcfb82496ea40b0f366b8ed360d139cb48c8dc626f83728937535b5",
+    "memory/soil.c": "2ee28d9dedfcf68573a163517e3628d2cd36226578acfd25f3b9a60cced5abea",
+    "metabolic/flow.c": "4b55434738a60f1ee8febb066e4071ac47a79a4c09d13ec60dcc1f2cfe6f5a3b",
+    "mirror/sympathetic.c": "5811c3a8715f560e9f448af9211a56e72d397e193ba8b6ad8ff718b6a4c2a638",
+    "reflection/layer.c": "ff98dc608392c3519a8e3437cc1388a76f0e1af21702cd68b303d01ab24a9a3a",
+    "src/dream_coupler.c": "7ed7e433553497d2f6d52a1f8af2b9dd9b8a0a02af9450fcf8dd21a20d65f1d6",
+    "src/harmony.c": "c73a3c19f4dcc2d446af70a9c840d9ad453e7c33cc788e003419c1bad9a47c9f",
+    "src/introspect.c": "bab37234e85a5132977f89d3ee7df2cc234470df4b01f2c12f665f3e26370a36",
+    "symbiosis/bridge.c": "70d4c474283ae72cd773086c0fc302fbe1954c283d2ef6b5539ba93a31287ec5",
+    "symbol/layer.c": "13e79e096c8cc2ee59191f6ae575f5bb1d8c8396c9f9f20a01f84e38d6df9a2a",
+    "synchrony/weave.c": "99a9ba2df4aaf9336266da3d01c893d2e1b00e38990e193e52dbbc718d87cb68",
+    "tests/test_anticipation_v2.c": "23ba162a964d32c4203bc0e8855a46673d0a055805fab09455a68bf7675c9fa1",
+    "tests/test_collective_graph.c": "377a2af910c6a7c0f346ad6d54a17660a46864090053280adef5aba4becba412",
+    "tests/test_collective_memory.c": "7a88900bd332c7139e9a9bffbe1bbdb6c7f062919b55bbe9498b246d2153c357",
+    "tests/test_consent_gate.c": "8e0920cbf69b18c382e7c9bc1efb12ced46cffdd50a2ed845de2fe249d3bd394",
+    "tests/test_kernel_context.c": "2c5c305fbe1682e136b3a889e014e300cec6433cd6db1ce5416f716bd8f4e2f3",
+    "tests/test_kernel_runtime.c": "dca2da34affaf2eda2ddeade89653cb37761d741653adf891e80582c7c6952fe",
+    "tests/test_qel.c": "a50cc249df03e1cbd4289c428840b90ff29a64acd3cd06b3caa4951bfe306513",
+    "tests/test_runtime_boundaries.c": "6ff0081abaf5f000200ba8d996c5d23eb3e2f2345f4916511bfeb169ed3de880",
+    "tests/test_vse.c": "e0cc091a06888d58b4b29c8a2c42720367dd48c1475e5f1b60895ecbace070e4",
+    "tune/autotune.c": "853bd6a87a1e2d1c3c02707b069e3b4cf40cb8f916bc1e5df911e3aef1b45434"
   },
   "baseline_binaries": {
     "pulse_kernel": {
       "bytes": 166824,
-      "sha256": "9d97dbdce020ffbf81f1a730566676d188631c08dd3ed6bb3224c1e0895d4181"
+      "sha256": "e1742abebdab8e6bbb341b9e21925279e5ea3f1fb76bff9d7a2a4f5792bc0779"
     },
     "liminal_core": {
       "bytes": 143800,
-      "sha256": "d8de998e61d8f6d157dd35c3e3324d6ee7a0fe813d1597e11b24f8cab68aa7b7"
+      "sha256": "d752b44e721ddef36afb671483f8e4a97fdd242cb080a388b5ffb40cfdbf2e81"
     }
   },
   "candidate_binaries": {
     "pulse_kernel": {
       "bytes": 167376,
-      "sha256": "62bcfcec0cd7409bbcf10bcac7637709afc48ff9f84359a80523171c33869b1d"
+      "sha256": "b6dc714f07b89524d266d82e67390fac9e91c957d9ba995bd9225d1dbffa8a66"
     },
     "liminal_core": {
       "bytes": 144376,
-      "sha256": "367b689b701308ae159e5896e77f82726c8212b8713c9a01ff6193c41bbcd03d"
+      "sha256": "01760a2658ad8d1fd5d624625e38baa305aeb8dd24d5a0554499c76a2368b761"
     }
   },
   "exact_cases_match": true,
@@ -1265,126 +1348,126 @@
       "binary": "pulse_kernel",
       "sample": 0,
       "cycles": 1024,
-      "user_seconds": 0.470885,
-      "system_seconds": 0.071488,
-      "wall_seconds": 0.5430585129943211,
+      "user_seconds": 0.42626899999999995,
+      "system_seconds": 0.032611999999999995,
+      "wall_seconds": 0.4597045479968074,
       "peak_rss_kib": 12032
     },
     {
       "binary": "pulse_kernel",
       "sample": 1,
       "cycles": 1024,
-      "user_seconds": 0.45981,
-      "system_seconds": 0.044042,
-      "wall_seconds": 0.5049979960022029,
+      "user_seconds": 0.39177,
+      "system_seconds": 0.041927,
+      "wall_seconds": 0.4341822070055059,
       "peak_rss_kib": 12032
     },
     {
       "binary": "pulse_kernel",
       "sample": 2,
       "cycles": 1024,
-      "user_seconds": 0.467182,
-      "system_seconds": 0.057003,
-      "wall_seconds": 0.5261257249949267,
+      "user_seconds": 0.395397,
+      "system_seconds": 0.035644999999999996,
+      "wall_seconds": 0.4313432940034545,
       "peak_rss_kib": 12032
     },
     {
       "binary": "pulse_kernel",
       "sample": 3,
       "cycles": 1024,
-      "user_seconds": 0.46695499999999995,
-      "system_seconds": 0.037461,
-      "wall_seconds": 0.504759561001265,
+      "user_seconds": 0.39309499999999997,
+      "system_seconds": 0.073391,
+      "wall_seconds": 0.46700960399903124,
       "peak_rss_kib": 12032
     },
     {
       "binary": "pulse_kernel",
       "sample": 4,
       "cycles": 1024,
-      "user_seconds": 0.441914,
-      "system_seconds": 0.035697,
-      "wall_seconds": 0.4779740329977358,
+      "user_seconds": 0.47236,
+      "system_seconds": 0.037115999999999996,
+      "wall_seconds": 0.5099809780003852,
       "peak_rss_kib": 12032
     },
     {
       "binary": "pulse_kernel",
       "sample": 5,
       "cycles": 1024,
-      "user_seconds": 0.461387,
-      "system_seconds": 0.058491999999999995,
-      "wall_seconds": 0.520418444997631,
+      "user_seconds": 0.42112,
+      "system_seconds": 0.037193,
+      "wall_seconds": 0.45870159799960675,
       "peak_rss_kib": 12032
     },
     {
       "binary": "pulse_kernel",
       "sample": 6,
       "cycles": 1024,
-      "user_seconds": 0.428012,
-      "system_seconds": 0.072533,
-      "wall_seconds": 0.5012237089977134,
+      "user_seconds": 0.41778,
+      "system_seconds": 0.052566999999999996,
+      "wall_seconds": 0.47078300599969225,
       "peak_rss_kib": 12032
     },
     {
       "binary": "liminal_core",
       "sample": 0,
       "cycles": 1024,
-      "user_seconds": 0.491425,
-      "system_seconds": 0.058084,
-      "wall_seconds": 0.5500446320002084,
+      "user_seconds": 0.5506909999999999,
+      "system_seconds": 0.054966999999999995,
+      "wall_seconds": 0.6059537659966736,
       "peak_rss_kib": 12288
     },
     {
       "binary": "liminal_core",
       "sample": 1,
       "cycles": 1024,
-      "user_seconds": 0.523318,
-      "system_seconds": 0.052093,
-      "wall_seconds": 0.5759791819946258,
+      "user_seconds": 0.584714,
+      "system_seconds": 0.069103,
+      "wall_seconds": 0.6541440879955189,
       "peak_rss_kib": 12288
     },
     {
       "binary": "liminal_core",
       "sample": 2,
       "cycles": 1024,
-      "user_seconds": 0.46615399999999996,
-      "system_seconds": 0.048039,
-      "wall_seconds": 0.51454087899765,
+      "user_seconds": 0.570129,
+      "system_seconds": 0.027887,
+      "wall_seconds": 0.5984247160013183,
       "peak_rss_kib": 12288
     },
     {
       "binary": "liminal_core",
       "sample": 3,
       "cycles": 1024,
-      "user_seconds": 0.49006099999999997,
-      "system_seconds": 0.035695,
-      "wall_seconds": 0.5265399460040499,
+      "user_seconds": 0.568386,
+      "system_seconds": 0.058131999999999996,
+      "wall_seconds": 0.6269768130005104,
       "peak_rss_kib": 12288
     },
     {
       "binary": "liminal_core",
       "sample": 4,
       "cycles": 1024,
-      "user_seconds": 0.47411699999999996,
-      "system_seconds": 0.055341999999999995,
-      "wall_seconds": 0.5304544509999687,
+      "user_seconds": 0.586204,
+      "system_seconds": 0.048784999999999995,
+      "wall_seconds": 0.6354080730015994,
       "peak_rss_kib": 12288
     },
     {
       "binary": "liminal_core",
       "sample": 5,
       "cycles": 1024,
-      "user_seconds": 0.50378,
-      "system_seconds": 0.052055,
-      "wall_seconds": 0.5562419049965683,
+      "user_seconds": 0.477273,
+      "system_seconds": 0.06330899999999999,
+      "wall_seconds": 0.5502943590036011,
       "peak_rss_kib": 12288
     },
     {
       "binary": "liminal_core",
       "sample": 6,
       "cycles": 1024,
-      "user_seconds": 0.5313129999999999,
-      "system_seconds": 0.027476,
-      "wall_seconds": 0.5621012290066574,
+      "user_seconds": 0.517251,
+      "system_seconds": 0.047894,
+      "wall_seconds": 0.5655089230058366,
       "peak_rss_kib": 12288
     }
   ],
@@ -1393,167 +1476,167 @@
       "binary": "pulse_kernel",
       "sample": 0,
       "cycles": 1024,
-      "user_seconds": 0.422964,
-      "system_seconds": 0.029233,
-      "wall_seconds": 0.45259410399739863,
-      "peak_rss_kib": 12032
+      "user_seconds": 0.44756999999999997,
+      "system_seconds": 0.030794,
+      "wall_seconds": 0.4797517319966573,
+      "peak_rss_kib": 12160
     },
     {
       "binary": "pulse_kernel",
       "sample": 1,
       "cycles": 1024,
-      "user_seconds": 0.42553199999999997,
-      "system_seconds": 0.035461,
-      "wall_seconds": 0.46128740899439435,
-      "peak_rss_kib": 12032
+      "user_seconds": 0.43264199999999997,
+      "system_seconds": 0.045833,
+      "wall_seconds": 0.47883089399692835,
+      "peak_rss_kib": 12160
     },
     {
       "binary": "pulse_kernel",
       "sample": 2,
       "cycles": 1024,
-      "user_seconds": 0.401006,
-      "system_seconds": 0.056615,
-      "wall_seconds": 0.45840449599927524,
-      "peak_rss_kib": 12032
+      "user_seconds": 0.41118699999999997,
+      "system_seconds": 0.048034,
+      "wall_seconds": 0.45953906499926234,
+      "peak_rss_kib": 12160
     },
     {
       "binary": "pulse_kernel",
       "sample": 3,
       "cycles": 1024,
-      "user_seconds": 0.389256,
-      "system_seconds": 0.06353,
-      "wall_seconds": 0.45400359699851833,
-      "peak_rss_kib": 12032
+      "user_seconds": 0.436364,
+      "system_seconds": 0.043872,
+      "wall_seconds": 0.4805368540037307,
+      "peak_rss_kib": 12160
     },
     {
       "binary": "pulse_kernel",
       "sample": 4,
       "cycles": 1024,
-      "user_seconds": 0.42077499999999995,
-      "system_seconds": 0.0487,
-      "wall_seconds": 0.4701891849981621,
-      "peak_rss_kib": 12032
+      "user_seconds": 0.406229,
+      "system_seconds": 0.035886999999999995,
+      "wall_seconds": 0.442462032995536,
+      "peak_rss_kib": 12160
     },
     {
       "binary": "pulse_kernel",
       "sample": 5,
       "cycles": 1024,
-      "user_seconds": 0.439557,
-      "system_seconds": 0.0371,
-      "wall_seconds": 0.47750870200252393,
-      "peak_rss_kib": 12032
+      "user_seconds": 0.450283,
+      "system_seconds": 0.035536,
+      "wall_seconds": 0.4875586589987506,
+      "peak_rss_kib": 12160
     },
     {
       "binary": "pulse_kernel",
       "sample": 6,
       "cycles": 1024,
-      "user_seconds": 0.43052599999999996,
-      "system_seconds": 0.051400999999999995,
-      "wall_seconds": 0.4823903669966967,
-      "peak_rss_kib": 12032
+      "user_seconds": 0.408024,
+      "system_seconds": 0.049082999999999995,
+      "wall_seconds": 0.4573830859953887,
+      "peak_rss_kib": 12160
     },
     {
       "binary": "liminal_core",
       "sample": 0,
       "cycles": 1024,
-      "user_seconds": 0.5014609999999999,
-      "system_seconds": 0.030153,
-      "wall_seconds": 0.5319341319991508,
-      "peak_rss_kib": 12288
+      "user_seconds": 0.491741,
+      "system_seconds": 0.031853,
+      "wall_seconds": 0.523877886000264,
+      "peak_rss_kib": 12416
     },
     {
       "binary": "liminal_core",
       "sample": 1,
       "cycles": 1024,
-      "user_seconds": 0.49144699999999997,
-      "system_seconds": 0.040784,
-      "wall_seconds": 0.5325813360032043,
-      "peak_rss_kib": 12288
+      "user_seconds": 0.496289,
+      "system_seconds": 0.052718,
+      "wall_seconds": 0.5492878730001394,
+      "peak_rss_kib": 12416
     },
     {
       "binary": "liminal_core",
       "sample": 2,
       "cycles": 1024,
-      "user_seconds": 0.486753,
-      "system_seconds": 0.060104,
-      "wall_seconds": 0.5472019220032962,
-      "peak_rss_kib": 12288
+      "user_seconds": 0.51628,
+      "system_seconds": 0.088502,
+      "wall_seconds": 0.605850232001103,
+      "peak_rss_kib": 12416
     },
     {
       "binary": "liminal_core",
       "sample": 3,
       "cycles": 1024,
-      "user_seconds": 0.493031,
-      "system_seconds": 0.040095,
-      "wall_seconds": 0.533454783995694,
-      "peak_rss_kib": 12288
+      "user_seconds": 0.465327,
+      "system_seconds": 0.060141999999999994,
+      "wall_seconds": 0.5260681530053262,
+      "peak_rss_kib": 12416
     },
     {
       "binary": "liminal_core",
       "sample": 4,
       "cycles": 1024,
-      "user_seconds": 0.477037,
-      "system_seconds": 0.07082,
-      "wall_seconds": 0.5481828390038572,
-      "peak_rss_kib": 12288
+      "user_seconds": 0.477578,
+      "system_seconds": 0.051695,
+      "wall_seconds": 0.5296074929938186,
+      "peak_rss_kib": 12416
     },
     {
       "binary": "liminal_core",
       "sample": 5,
       "cycles": 1024,
-      "user_seconds": 0.478006,
-      "system_seconds": 0.037814,
-      "wall_seconds": 0.5164393009981723,
-      "peak_rss_kib": 12288
+      "user_seconds": 0.481263,
+      "system_seconds": 0.051696,
+      "wall_seconds": 0.5332554180058651,
+      "peak_rss_kib": 12416
     },
     {
       "binary": "liminal_core",
       "sample": 6,
       "cycles": 1024,
-      "user_seconds": 0.50432,
-      "system_seconds": 0.060858999999999996,
-      "wall_seconds": 0.5654463449973264,
-      "peak_rss_kib": 12288
+      "user_seconds": 0.493583,
+      "system_seconds": 0.044156,
+      "wall_seconds": 0.5415400870042504,
+      "peak_rss_kib": 12416
     }
   ],
   "resource_summary": {
     "pulse_kernel": {
       "before": {
-        "median_cpu_seconds": 0.504416,
-        "median_wall_seconds": 0.5049979960022029,
+        "median_cpu_seconds": 0.45888099999999993,
+        "median_wall_seconds": 0.4597045479968074,
         "median_peak_rss_kib": 12032,
         "cpu_seconds_range": [
-          0.47761099999999995,
-          0.542373
+          0.431042,
+          0.509476
         ]
       },
       "after": {
-        "median_cpu_seconds": 0.460993,
-        "median_wall_seconds": 0.46128740899439435,
-        "median_peak_rss_kib": 12032,
+        "median_cpu_seconds": 0.47836399999999996,
+        "median_wall_seconds": 0.47883089399692835,
+        "median_peak_rss_kib": 12160,
         "cpu_seconds_range": [
-          0.452197,
-          0.48192699999999994
+          0.442116,
+          0.485819
         ]
       }
     },
     "liminal_core": {
       "before": {
-        "median_cpu_seconds": 0.549509,
-        "median_wall_seconds": 0.5500446320002084,
+        "median_cpu_seconds": 0.6056579999999999,
+        "median_wall_seconds": 0.6059537659966736,
         "median_peak_rss_kib": 12288,
         "cpu_seconds_range": [
-          0.5141929999999999,
-          0.5754109999999999
+          0.540582,
+          0.653817
         ]
       },
       "after": {
-        "median_cpu_seconds": 0.533126,
-        "median_wall_seconds": 0.533454783995694,
-        "median_peak_rss_kib": 12288,
+        "median_cpu_seconds": 0.532959,
+        "median_wall_seconds": 0.5332554180058651,
+        "median_peak_rss_kib": 12416,
         "cpu_seconds_range": [
-          0.51582,
-          0.565179
+          0.523594,
+          0.6047819999999999
         ]
       }
     }
@@ -1561,24 +1644,24 @@
   "elf_sizes": {
     "before": {
       "pulse_kernel": {
-        "text": 126454,
+        "text": 126494,
         "data": 2824,
         "bss": 204696
       },
       "liminal_core": {
-        "text": 111801,
+        "text": 111829,
         "data": 2488,
         "bss": 178848
       }
     },
     "after": {
       "pulse_kernel": {
-        "text": 127854,
+        "text": 127894,
         "data": 2824,
         "bss": 204696
       },
       "liminal_core": {
-        "text": 112766,
+        "text": 112794,
         "data": 2488,
         "bss": 178880
       }
