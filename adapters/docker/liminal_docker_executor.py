@@ -354,8 +354,11 @@ class DockerExecutor:
 
 
 def _daemon_id(docker_binary: str) -> str:
-    result = run_cli([docker_binary, "info", "--format", "{{.ID}}"], timeout=10, stdout_limit=1024)
-    identity = result.stdout.decode("utf-8").strip()
+    try:
+        result = run_cli([docker_binary, "info", "--format", "{{.ID}}"], timeout=10, stdout_limit=1024)
+        identity = result.stdout.decode("utf-8").strip()
+    except (OSError, subprocess.TimeoutExpired, OutputLimitExceeded, UnicodeDecodeError) as exc:
+        raise DockerExecutionError("Docker daemon identity unavailable") from exc
     if result.returncode != 0 or not identity or len(identity) > 256:
         raise DockerExecutionError("Docker daemon identity unavailable")
     return identity

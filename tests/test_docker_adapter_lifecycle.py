@@ -4,11 +4,13 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
+from adapters.docker._bounded_cli import OutputLimitExceeded
 from adapters.docker.liminal_docker_executor import (
     DockerExecutionError,
     DockerExecutionTimeout,
@@ -36,6 +38,7 @@ from sdk.liminal_package_install_broker import (
     PackageInstallBroker,
     PackageWorkspaceBinding,
 )
+from sdk.liminal_runtime_mediation import ExecutionOutcomeUnknown
 
 
 FAKE_CLI = r'''
@@ -428,6 +431,102 @@ class DockerAdapterLifecycleTests(unittest.TestCase):
             with self.subTest(limit=limit), self.assertRaises(DockerExecutionError):
                 run_docker_plan(self.plan(), docker_binary=str(self.binary), stdout_limit=limit)
         self.assertFalse((self.root / "calls.jsonl").exists())
+
+    def daemon_lookup_faults(self):
+        return (subprocess.TimeoutExpired(["docker", "info"], 10),
+                OutputLimitExceeded("daemon identity output exceeded its limit"),
+                FileNotFoundError("Docker binary unavailable"), b"\xff")
+
+    def test_daemon_lookup_failures_are_adapter_errors_without_mutating_cli(self):
+        identity, _ = self.owned_object()
+        backend = DockerProcessTreeBackend(session_id=identity.session_id,
+                                           docker_binary=str(self.binary))
+        for fault in self.daemon_lookup_faults():
+            for target in ("run_plan", "supervisor_constructor", "supervisor_operation"):
+                with self.subTest(fault=type(fault).__name__, target=target):
+                    observed = []
+                    def broken_cli(argv, **_):
+                        if isinstance(fault, bytes):
+                            return subprocess.CompletedProcess(argv, 0, fault, b"")
+                        raise fault
+                    with patch("adapters.docker.liminal_docker_executor.run_cli",
+                               side_effect=broken_cli) as cli:
+                        with self.assertRaises(DockerExecutionError) as raised:
+                            if target == "run_plan":
+                                run_docker_plan(self.plan(), session_observer=observed.append)
+                            elif target == "supervisor_constructor":
+                                DockerProcessTreeBackend(session_id=identity.session_id)
+                            else:
+                                backend.snapshot(identity.session_id)
+                    error = raised.exception
+                    self.assertNotIsInstance(error, ExecutionOutcomeUnknown)
+                    self.assertIsNone(error.session)
+                    self.assertIsNone(error.phase)
+                    if isinstance(fault, bytes):
+                        self.assertIsInstance(error.__cause__, UnicodeDecodeError)
+                    else:
+                        self.assertIs(error.__cause__, fault)
+                    self.assertEqual(observed, [])
+                    self.assertEqual([call.args[0][1] for call in cli.call_args_list], ["info"])
+                    self.assertTrue((self.root / "objects" / identity.container_id).exists())
+
+    def test_wheel_daemon_lookup_failures_are_backend_errors_before_create(self):
+        for fault in self.daemon_lookup_faults():
+            with self.subTest(fault=type(fault).__name__):
+                observed = []
+                def broken_cli(argv, **_):
+                    if isinstance(fault, bytes):
+                        return subprocess.CompletedProcess(argv, 0, fault, b"")
+                    raise fault
+                with patch("adapters.docker.liminal_docker_executor.run_cli",
+                           side_effect=broken_cli) as cli:
+                    with self.assertRaises(WheelDockerBackendError) as raised:
+                        WheelMaterializingDockerExecutor(session_observer=observed.append)(self.wheel_plan())
+                error = raised.exception
+                self.assertNotIsInstance(error, WheelDockerOutcomeUnknown)
+                self.assertIsInstance(error.__cause__, DockerExecutionError)
+                if isinstance(fault, bytes):
+                    self.assertIsInstance(error.__cause__.__cause__, UnicodeDecodeError)
+                else:
+                    self.assertIs(error.__cause__.__cause__, fault)
+                self.assertEqual(observed, [])
+                self.assertEqual([call.args[0][1] for call in cli.call_args_list], ["info"])
+
+    def test_create_transport_failures_remain_unknown_without_starting(self):
+        for fault in self.daemon_lookup_faults()[:3]:
+            for acknowledged in (False, True):
+                with self.subTest(fault=type(fault).__name__, acknowledged=acknowledged):
+                    verbs = []
+                    def broken_create(argv, **_):
+                        verbs.append(argv[1])
+                        if argv[1] == "info":
+                            if acknowledged and "create" in verbs:
+                                raise fault
+                            return subprocess.CompletedProcess(argv, 0, b"owned-daemon-1\n", b"")
+                        if argv[1] == "create":
+                            if acknowledged:
+                                return subprocess.CompletedProcess(argv, 0, b"b" * 64 + b"\n", b"")
+                            raise fault
+                        if argv[1] == "inspect":
+                            return subprocess.CompletedProcess(argv, 1, b"", b"No such container")
+                        self.fail("unexpected CLI action: " + argv[1])
+                    with patch("adapters.docker.liminal_docker_executor.run_cli",
+                               side_effect=broken_create):
+                        with self.assertRaises(DockerReconciliationRequired) as raised:
+                            run_docker_plan(self.plan())
+                    error = raised.exception
+                    self.assertIsInstance(error, ExecutionOutcomeUnknown)
+                    self.assertEqual(error.phase, "CREATE")
+                    self.assertEqual(error.cleanup_state, "UNKNOWN")
+                    if acknowledged:
+                        self.assertIsInstance(error.__cause__, DockerExecutionError)
+                        self.assertIs(error.__cause__.__cause__, fault)
+                        self.assertEqual(error.session.container_id, "b" * 64)
+                        self.assertEqual(verbs, ["info", "create", "info", "info"])
+                    else:
+                        self.assertIs(error.__cause__, fault)
+                        self.assertIsNone(error.session.container_id)
+                        self.assertEqual(verbs, ["info", "create", "info", "inspect", "info"])
 
 
 if __name__ == "__main__":

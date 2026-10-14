@@ -102,7 +102,11 @@ check: $(TARGET) $(SUBSTRATE_TARGET)
 	@$(SUBSTRATE_TARGET) --substrate --limit=2 --trace >/dev/null
 
 build/tests:
+ifeq ($(OS),Windows_NT)
+	@powershell -NoProfile -Command "$$ErrorActionPreference = 'Stop'; if (-not (Test-Path 'build/tests' -PathType Container)) { New-Item -ItemType Directory -Path 'build/tests' | Out-Null }"
+else
 	@mkdir -p $@
+endif
 
 build/tests/test_consent_gate: tests/test_consent_gate.o core/consent_gate.o | build/tests
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
@@ -129,7 +133,11 @@ build/tests/test_vse: tests/test_vse.o core/vse.o | build/tests
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -Wl,--wrap=malloc,--wrap=free,--wrap=rand
 
 test-c: $(C_TEST_BINS)
+ifeq ($(OS),Windows_NT)
+	@powershell -NoProfile -Command "$$ErrorActionPreference = 'Stop'; foreach ($$testBinary in ('$(C_TEST_BINS)' -split ' ')) { & ('./' + $$testBinary); if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE } }"
+else
 	@set -e; for test_binary in $(C_TEST_BINS); do "$$test_binary"; done
+endif
 
 test-python: all
 	@$(PYTHON) scripts/run_python_tests.py $(PYTHON_TESTS)
