@@ -22,6 +22,7 @@ from sdk.liminal_durable_governance_fence import (
     verify_commit_receipt as verify_durable_commit,
 )
 from sdk.liminal_post_sandbox_contracts import canonical_sha256
+from sdk.liminal_effect_commit import ZERO_SHA256
 from sdk.liminal_runtime_mediation import (
     ExecutionObservation,
     ExecutionOutcomeUnknown,
@@ -604,6 +605,255 @@ class UnknownTrajectoryProjectionTests(unittest.TestCase):
                 )
             self.assertEqual(calls, ["entered"])
             self.assertTrue(store.read_state(root_id=DURABLE_ROOT)["reservation_active"])
+
+    def test_plain_durable_unknown_commit_explicitly_requires_reconciliation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stack = setup_durable_stack(str(Path(directory) / "governance.db"))
+            _, _, _, _, epoch, _, guard, _, ledger, _, store, _, durable, _ = stack
+            operation = durable_operation()
+            capability = durable_authorize(epoch, operation)
+            lease, _ = durable.issue_for_trusted_adapter(
+                operation=operation, capability_decision=capability,
+                objective_decision=guard.evaluate_operation(operation),
+                proposed_event=durable_proposal(ledger, operation, capability),
+            )
+            marker = ExecutionOutcomeUnknown("private executor details")
+
+            def execute(_):
+                raise marker
+
+            with self.assertRaises(ExecutionOutcomeUnknown) as caught:
+                durable.consume_for_trusted_adapter(lease, adapter_token=DURABLE_ADAPTER_TOKEN, executor=execute)
+            self.assertIs(caught.exception, marker)
+            receipt = durable.commit_receipts()[-1]
+            self.assertEqual(receipt["effect_outcome"], "EFFECT_UNKNOWN_RESERVATION_STUCK")
+            self.assertIn("effect_outcome_unknown", receipt["reason_codes"])
+            self.assertIn("reconciliation_required", receipt["reason_codes"])
+            self.assertEqual(receipt["result_sha256"], canonical_sha256({"error_type": "ExecutionOutcomeUnknown"}))
+            self.assertEqual(verify_durable_commit(receipt), receipt)
+            self.assertTrue(store.read_state(root_id=DURABLE_ROOT)["reservation_active"])
+            self.assert_uncertain_ledger(ledger)
+
+    def test_durable_post_success_faults_preserve_effect_and_actual_reservation_state(self):
+        boundaries = {
+            "missing_inner_receipt": "inner_commit_receipt_missing",
+            "inner_cursor": "inner_commit_receipt_unavailable",
+            "world": "durable_world_evidence_failed",
+            "finalize": "durable_finalize_failed",
+            "commit_ack_loss": "durable_finalize_failed",
+            "commit_ack_loss_new_reservation": "durable_finalize_failed",
+            "final_receipt": "durable_commit_receipt_failed",
+            "final_receipt_new_reservation": "durable_commit_receipt_failed",
+        }
+        for boundary, evidence_code in boundaries.items():
+            for interface in ("broker", "mediator"):
+                with self.subTest(boundary=boundary, interface=interface), tempfile.TemporaryDirectory() as directory:
+                    stack = setup_durable_stack(str(Path(directory) / "governance.db"))
+                    _, _, _, _, epoch, _, guard, _, ledger, causal, store, _, durable, _ = stack
+                    operation = replace(durable_operation(), privilege_level_after=3)
+                    observed = ExecutionObservation.success({"effect_completed": True})
+                    calls = []
+                    original_world = durable._local_world
+                    original_commit = store.commit_effect
+
+                    def world():
+                        if calls:
+                            raise OSError("private world path")
+                        return original_world()
+
+                    def commit(**kwargs):
+                        if boundary != "finalize":
+                            state = original_commit(**kwargs)
+                            if boundary.endswith("new_reservation"):
+                                store.reserve_effect(
+                                    root_id=DURABLE_ROOT, expected_generation=state["generation"],
+                                    expected_world_sha256=state["world_sha256"],
+                                    reservation_id="peer:successor-reservation", reservation_payload_sha256="9" * 64,
+                                )
+                            if boundary == "final_receipt_new_reservation":
+                                return state
+                        raise OSError("private commit details")
+
+                    def execute(_):
+                        calls.append("effect completed")
+                        return observed
+
+                    with ExitStack() as faults:
+                        if boundary == "missing_inner_receipt":
+                            faults.enter_context(patch.object(durable, "_latest_inner_commit", return_value=ZERO_SHA256))
+                        elif boundary == "inner_cursor":
+                            faults.enter_context(patch.object(durable, "_latest_inner_commit", side_effect=OSError("private cursor details")))
+                        elif boundary == "world":
+                            faults.enter_context(patch.object(durable, "_local_world", side_effect=world))
+                        elif boundary in ("finalize", "commit_ack_loss", "commit_ack_loss_new_reservation", "final_receipt_new_reservation"):
+                            faults.enter_context(patch.object(store, "commit_effect", side_effect=commit))
+                            if boundary == "final_receipt_new_reservation":
+                                faults.enter_context(patch.object(durable, "_append_commit", side_effect=OSError("private receipt details")))
+                        else:
+                            faults.enter_context(patch.object(durable, "_append_commit", side_effect=OSError("private receipt details")))
+                        if interface == "broker":
+                            capability = durable_authorize(epoch, operation)
+                            lease, _ = durable.issue_for_trusted_adapter(
+                                operation=operation, capability_decision=capability,
+                                objective_decision=guard.evaluate_operation(operation),
+                                proposed_event=durable_proposal(ledger, operation, capability),
+                            )
+                            with self.assertRaises(DurableGovernanceError) as caught:
+                                durable.consume_for_trusted_adapter(lease, adapter_token=DURABLE_ADAPTER_TOKEN, executor=execute)
+                            self.assertIsInstance(caught.exception, ExecutionOutcomeUnknown)
+                            from sdk.liminal_durable_governance_fence import DurableEffectEvidenceError
+                            self.assertIsInstance(caught.exception, DurableEffectEvidenceError)
+                            self.assertEqual(caught.exception.result_sha256, observed.result_sha256)
+                            self.assertEqual(caught.exception.evidence_code, evidence_code)
+                            self.assertEqual(caught.exception.durable_commit_confirmed, boundary.startswith("final_receipt"))
+                            expected_status = "released" if boundary.startswith(("commit_ack_loss", "final_receipt")) else "retained"
+                            self.assertEqual(caught.exception.reservation_status, expected_status)
+                            self.assertNotIn("private", str(caught.exception))
+                            with self.assertRaisesRegex(DurableGovernanceError, "durable_lease_replayed"):
+                                durable.consume_for_trusted_adapter(lease, adapter_token=DURABLE_ADAPTER_TOKEN, executor=execute)
+                        else:
+                            mediator = DurableGovernanceRuntimeMediator(
+                                broker=epoch, durable_effect_broker=durable, adapter_token=DURABLE_ADAPTER_TOKEN,
+                                proposal_factory=lambda op, cap, journal: durable_proposal(journal, op, cap),
+                            )
+                            result = mediator.mediate(operation, execute)
+                            self.assertEqual(result["execution_outcome"], "UNKNOWN")
+                            self.assertEqual(result["result_sha256"], observed.result_sha256)
+                            self.assertIn(evidence_code, result["reason_codes"])
+                            self.assertIn("effect_succeeded", result["reason_codes"])
+                            self.assertIn("reconciliation_required", result["reason_codes"])
+                            self.assertEqual(verify_receipt(result), result)
+                            if boundary.startswith(("commit_ack_loss", "final_receipt")):
+                                self.assertIn("durable_reservation_released", result["reason_codes"])
+                                self.assertNotIn("durable_reservation_retained", result["reason_codes"])
+                            event = mediator.trajectory_events()[0]
+                            self.assertEqual((event.decision, event.privilege_level_after), ("ALLOW", 3))
+                            self.assertEqual(analyze_trajectory(mediator.trajectory_events())["risk_score"], 15)
+                            self.assertEqual(replay([event.__dict__]), analyze_trajectory(mediator.trajectory_events()))
+                            self.assertNotIn("private", repr(result))
+                    self.assertEqual(calls, ["effect completed"])
+                    self.assertEqual(ledger.event_count, 1)
+                    self.assertEqual(causal.commit_receipts()[-1]["effect_outcome"], "SUCCEEDED")
+                    self.assert_uncertain_ledger(ledger)
+                    state = store.read_state(root_id=DURABLE_ROOT)
+                    finalized = boundary.startswith(("commit_ack_loss", "final_receipt"))
+                    self.assertEqual(state["reservation_active"], not finalized or boundary.endswith("new_reservation"))
+                    self.assertEqual(state["generation"], 1 if finalized else 0)
+                    if boundary.endswith("new_reservation"):
+                        # The old failure cannot claim or mutate the successor's reservation.
+                        self.assertEqual(state["reservation_id_sha256"], canonical_sha256("peer:successor-reservation"))
+                        self.assertEqual(state["reservation_payload_sha256"], "9" * 64)
+                    if not boundary.startswith("final_receipt"):
+                        receipt = durable.commit_receipts()[-1]
+                        self.assertEqual(receipt["effect_outcome"], "EFFECT_SUCCEEDED_DURABLE_COMMIT_FAILED")
+                        self.assertEqual(receipt["result_sha256"], observed.result_sha256)
+                        self.assertIn(evidence_code, receipt["reason_codes"])
+                        self.assertEqual(verify_durable_commit(receipt), receipt)
+                    # A different mediator cannot bypass the durable failure through its shared causal ledger.
+                    peer = CausalBoundEffectRuntimeMediator(
+                        broker=epoch, causal_effect_broker=causal, adapter_token=DURABLE_ADAPTER_TOKEN,
+                        proposal_factory=lambda op, cap, journal: durable_proposal(journal, op, cap),
+                    )
+                    followup = peer.mediate(durable_operation("op:peer-after-failure"), execute)
+                    self.assertEqual(followup["execution_outcome"], "FAILED")
+                    self.assertEqual(calls, ["effect completed"])
+                    self.assertEqual(ledger.event_count, 1)
+
+    def test_durable_finalize_marker_survives_diagnostic_read_and_append_cascades(self):
+        for diagnostic in ("read", "append", "both"):
+            for commit_before_error in (False, True):
+                with self.subTest(diagnostic=diagnostic, committed=commit_before_error), tempfile.TemporaryDirectory() as directory:
+                    stack = setup_durable_stack(str(Path(directory) / "governance.db"))
+                    _, _, _, _, epoch, _, _, _, ledger, _, store, _, durable, _ = stack
+                    original_read = store.read_state
+                    original_commit = store.commit_effect
+                    dispatched = []
+
+                    def read(**kwargs):
+                        if dispatched:
+                            raise OSError("private diagnostic read")
+                        return original_read(**kwargs)
+
+                    def commit(**kwargs):
+                        if commit_before_error:
+                            original_commit(**kwargs)
+                        raise OSError("private primary failure")
+
+                    observed = ExecutionObservation.success({"effect_completed": True})
+                    mediator = DurableGovernanceRuntimeMediator(
+                        broker=epoch, durable_effect_broker=durable, adapter_token=DURABLE_ADAPTER_TOKEN,
+                        proposal_factory=lambda op, cap, journal: durable_proposal(journal, op, cap),
+                    )
+                    with ExitStack() as faults:
+                        faults.enter_context(patch.object(store, "commit_effect", side_effect=commit))
+                        if diagnostic in ("read", "both"):
+                            faults.enter_context(patch.object(store, "read_state", side_effect=read))
+                        if diagnostic in ("append", "both"):
+                            faults.enter_context(patch.object(durable, "_append_commit", side_effect=OSError("private diagnostic append")))
+                        result = mediator.mediate(
+                            replace(durable_operation(), privilege_level_after=3),
+                            lambda _: dispatched.append("effect completed") or observed,
+                        )
+                    self.assertEqual(result["execution_outcome"], "UNKNOWN")
+                    self.assertEqual(result["result_sha256"], observed.result_sha256)
+                    self.assertIn("durable_finalize_failed", result["reason_codes"])
+                    self.assertIn("reconciliation_required", result["reason_codes"])
+                    if diagnostic in ("read", "both"):
+                        self.assertIn("durable_reservation_unconfirmed", result["reason_codes"])
+                        self.assertNotIn("durable_reservation_retained", result["reason_codes"])
+                    self.assertNotIn("private", repr(result))
+                    self.assertEqual(verify_receipt(result), result)
+                    self.assertEqual(dispatched, ["effect completed"])
+                    self.assertEqual(original_read(root_id=DURABLE_ROOT)["reservation_active"], not commit_before_error)
+                    self.assert_uncertain_ledger(ledger)
+
+    def test_durable_pre_dispatch_failures_keep_failed_without_effect_uncertainty(self):
+        for boundary in ("read", "world", "cursor"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as directory:
+                stack = setup_durable_stack(str(Path(directory) / "governance.db"))
+                _, _, _, _, epoch, _, _, _, ledger, causal, store, _, durable, _ = stack
+                mediator = DurableGovernanceRuntimeMediator(
+                    broker=epoch, durable_effect_broker=durable, adapter_token=DURABLE_ADAPTER_TOKEN,
+                    proposal_factory=lambda op, cap, journal: durable_proposal(journal, op, cap),
+                )
+                target, method = {
+                    "read": (store, "read_state"), "world": (durable, "_local_world"),
+                    "cursor": (causal, "commit_cursor"),
+                }[boundary]
+                calls = []
+                with patch.object(target, method, side_effect=OSError("private pre-dispatch failure")):
+                    result = mediator.mediate(
+                        replace(durable_operation(), privilege_level_after=3),
+                        lambda _: calls.append("entered"),
+                    )
+                self.assertEqual(result["execution_outcome"], "FAILED")
+                self.assertEqual(calls, [])
+                self.assertEqual(ledger.event_count, 0)
+                self.assertNotIn("effect_uncertain", ledger.state_document())
+                self.assertEqual(mediator.trajectory_events()[0].decision, "BLOCK")
+
+    def test_durable_ordinary_success_and_failure_keep_published_hashes(self):
+        goldens = {
+            "success": ("d7deb1106aeddaea9b714de2346e3e1bb25719745cd24701dfc5117835b1c2d7", "f3561d1ebcb4be77ae301d5912e4e72abdc72deb40b0d3dbbc9f00538e3eb3fe"),
+            "failure": ("c87122183ac5701c5e69a294744cb070286cd9b8aa69300c70b28f5d3cb358c8", "64226c3b9e0583665abb666925f641bb1558a21df453e2aacbd17477a909a17c"),
+        }
+        for case, (runtime_sha, durable_sha) in goldens.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                stack = setup_durable_stack(str(Path(directory) / "governance.db"))
+                _, _, _, _, epoch, _, _, _, _, _, _, _, durable, _ = stack
+                mediator = DurableGovernanceRuntimeMediator(
+                    broker=epoch, durable_effect_broker=durable, adapter_token=DURABLE_ADAPTER_TOKEN,
+                    proposal_factory=lambda op, cap, journal: durable_proposal(journal, op, cap),
+                )
+
+                def execute(_):
+                    if case == "failure":
+                        raise RuntimeError("private")
+                    return ExecutionObservation.success({"normal": True})
+
+                result = mediator.mediate(durable_operation("op:durable-golden"), execute)
+                self.assertEqual(result["receipt_sha256"], runtime_sha)
+                self.assertEqual(durable.commit_receipts()[-1]["receipt_sha256"], durable_sha)
 
 
 if __name__ == "__main__":

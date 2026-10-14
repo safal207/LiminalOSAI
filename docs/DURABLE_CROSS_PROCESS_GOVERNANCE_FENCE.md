@@ -131,18 +131,20 @@ inner effect succeeds
 
 ### Inner effect failure or uncertainty
 
-If the inner effect stack raises after the durable reservation exists, the reservation remains active:
+If the inner effect stack raises after the durable reservation exists, the reservation remains active. Unknown outcomes retain their marker and explicit `effect_outcome_unknown` and `reconciliation_required` reasons:
 
 ```text
 reservation
 → inner effect failure / unknown partial effect
-→ EFFECT_FAILED_RESERVATION_STUCK
+→ EFFECT_FAILED_RESERVATION_STUCK / EFFECT_UNKNOWN_RESERVATION_STUCK
 → no automatic release
 ```
 
 This is conservative because a failing host callback can have produced a partial external effect.
 
-### Effect succeeds but durable finalization fails
+### Effect succeeds but durable terminal evidence fails
+
+When the durable update fails before committing, the existing reservation remains active:
 
 ```text
 physical effect succeeds
@@ -153,7 +155,26 @@ physical effect succeeds
 → fail closed
 ```
 
-The layer does not claim automatic rollback of the physical effect.
+`DurableEffectEvidenceError` preserves the validated effect result digest and
+specific evidence reason. It is compatible with both `DurableGovernanceError`
+and `ExecutionOutcomeUnknown`; runtime mediation reports `UNKNOWN`, retains the
+effect in trajectory risk and consumes the lease. This also covers missing or
+unavailable inner receipts, post-effect world observation and final durable
+receipt failures. The shared authoritative trajectory ledger is blocked before
+optional diagnostics, without appending another effect event.
+
+The `EFFECT_SUCCEEDED_DURABLE_COMMIT_FAILED` receipt describes incomplete terminal
+evidence, not proof that the store update did not commit. A store can commit and
+then lose its acknowledgement, and the final receipt can fail after an
+acknowledged commit. The typed marker and available receipts report the observed
+status of the original bound reservation (`retained` or `released`), or
+`unconfirmed` if it cannot be established. An active successor reservation does
+not make the old reservation retained and is never modified by these diagnostics.
+`durable_commit_confirmed` records an acknowledged store commit.
+Secondary diagnostic read or receipt failures preserve the typed result and
+evidence code. No path re-reserves or rolls back an already completed commit.
+The trajectory uncertainty gate is in-process; a retained store reservation is
+the cross-process block. Neither time nor containment release reconciles them.
 
 ### Explicit reconciliation
 
@@ -220,6 +241,6 @@ This component does **not**:
 
 Its claim is narrower:
 
-> For cooperating processes using the same durable governance root, an effect cannot obtain a second concurrent governance reservation, and an uncertain post-reservation process failure cannot silently restore authority without an explicit generation-advancing reconciliation.
+> For cooperating processes using the same durable governance root, an effect cannot obtain a second concurrent governance reservation. A retained crash-stuck reservation requires explicit generation-advancing reconciliation; post-finalization evidence uncertainty is additionally blocked by the shared in-process trajectory ledger.
 
 Refs: #129, #151, #157, #159, #161, #163, #165, #167, #169, #134.
