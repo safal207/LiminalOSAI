@@ -388,4 +388,3 @@ class ExternalCommandDockerEvidenceTests(unittest.TestCase):
         self.reject(lambda r: r["scope"].update(actual_docker=False))
         self.reject(lambda r: r["scope"].update(business_effects="COMMITTED"))
         self.reject(lambda r: r["scope"].update(live_training="PASS"))
-

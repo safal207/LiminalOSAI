@@ -229,4 +229,3 @@ def verify_agent_channels_projection(value: Any) -> dict:
         return json.loads(encoded)
     except (TypeError, ValueError, OverflowError, RecursionError, UnicodeError) as exc:
         raise ControlError("AGENT_DOCKER_CHANNELS_INVALID") from exc
-
