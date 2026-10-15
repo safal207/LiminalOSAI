@@ -20,6 +20,7 @@ from sdk.liminal_post_sandbox_contracts import canonical_sha256
 from sdk.liminal_runtime_config import BoundRuntimeConfigBroker
 from sdk.liminal_runtime_mediation import (
     ExecutionObservation,
+    ExecutionOutcomeUnknown,
     MediationError,
     OPERATION_TO_CAPABILITY,
     RuntimeMediator,
@@ -54,6 +55,15 @@ class EffectCommitError(ValueError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+class EffectCommitEvidenceError(EffectCommitError, ExecutionOutcomeUnknown):
+    """A validated effect succeeded, but its epoch commit receipt is incomplete."""
+
+    def __init__(self, *, result_sha256: str) -> None:
+        super().__init__("epoch_commit_receipt_failed_after_effect")
+        self.evidence_code = "epoch_commit_receipt_failed"
+        self.result_sha256 = _sha(result_sha256, "effect_result_sha256")
 
 
 class RuntimeWorldProvider(Protocol):
@@ -488,28 +498,42 @@ class EffectCommitBroker:
                         raise EffectCommitError("executor_observation_invalid")
                     observation.validate()
                 except Exception as exc:
+                    try:
+                        self._append_commit(
+                            lease=lease,
+                            world=world,
+                            session=session,
+                            committed_at_unix=now,
+                            outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
+                            result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
+                            reasons=("lease_consumed", "effect_outcome_unknown", "reconciliation_required")
+                            if isinstance(exc, ExecutionOutcomeUnknown)
+                            else ("lease_consumed", "effect_callback_failed"),
+                        )
+                    except Exception:
+                        if isinstance(exc, ExecutionOutcomeUnknown):
+                            raise exc from EffectCommitError("effect_commit_evidence_unavailable")
+                        raise
+                    if isinstance(exc, (EffectCommitError, ExecutionOutcomeUnknown)):
+                        raise
+                    raise EffectCommitError("effect_callback_failed") from exc
+
+                try:
                     self._append_commit(
                         lease=lease,
                         world=world,
                         session=session,
                         committed_at_unix=now,
-                        outcome="FAILED",
-                        result_sha256=canonical_sha256({"error_type": type(exc).__name__}),
-                        reasons=("lease_consumed", "effect_callback_failed"),
+                        outcome="SUCCEEDED",
+                        result_sha256=observation.result_sha256,
+                        reasons=("runtime_world_rechecked", "execution_session_rechecked", "source_capability_active", "lease_consumed", "effect_committed_under_fence"),
                     )
-                    if isinstance(exc, EffectCommitError):
-                        raise
-                    raise EffectCommitError("effect_callback_failed") from exc
-
-                self._append_commit(
-                    lease=lease,
-                    world=world,
-                    session=session,
-                    committed_at_unix=now,
-                    outcome="SUCCEEDED",
-                    result_sha256=observation.result_sha256,
-                    reasons=("runtime_world_rechecked", "execution_session_rechecked", "source_capability_active", "lease_consumed", "effect_committed_under_fence"),
-                )
+                except Exception:
+                    # The callback has already returned a validated success. A
+                    # receipt failure cannot erase its result or restore authority.
+                    raise EffectCommitEvidenceError(
+                        result_sha256=observation.result_sha256,
+                    ) from EffectCommitError("effect_commit_evidence_unavailable")
                 return observation
 
     def _append_commit(
@@ -638,9 +662,13 @@ class EpochBoundEffectRuntimeMediator(RuntimeMediator):
                 operation=operation,
                 capability_receipt_sha=capability["receipt_sha256"],
                 admission="ALLOW",
-                outcome="FAILED",
-                result_sha=canonical_sha256({"error_type": type(exc).__name__}),
-                reasons=("effect_commit_failed",),
+                outcome="UNKNOWN" if isinstance(exc, ExecutionOutcomeUnknown) else "FAILED",
+                result_sha=exc.result_sha256 if isinstance(exc, EffectCommitEvidenceError)
+                else canonical_sha256({"error_type": type(exc).__name__}),
+                reasons=("effect_succeeded", exc.evidence_code, "reconciliation_required")
+                if isinstance(exc, EffectCommitEvidenceError)
+                else ("effect_outcome_unknown", "reconciliation_required")
+                if isinstance(exc, ExecutionOutcomeUnknown) else ("effect_commit_failed",),
                 capability_id=capability.get("capability_id"),
                 scope_sha=scope_sha,
             )
@@ -706,7 +734,7 @@ def _sha(value: Any, name: str) -> str:
 
 __all__ = [
     "AUTHORITY", "COMMIT_SCHEMA", "EffectCommitAuthorizationReceipt", "EffectCommitBroker",
-    "EffectCommitError", "EffectCommitReceipt", "EpochBoundEffectRuntimeMediator",
+    "EffectCommitError", "EffectCommitEvidenceError", "EffectCommitReceipt", "EpochBoundEffectRuntimeMediator",
     "ExecutionSessionProvider", "FencedBoundRuntimeConfigBroker", "LEASE_SCHEMA",
     "MAX_LEASE_TTL_SECONDS", "RuntimeCommitFence", "RuntimeWorldProvider", "SESSION_SCHEMA",
     "TrustedExecutionSession", "TrustedRuntimeWorld", "build_session_document",

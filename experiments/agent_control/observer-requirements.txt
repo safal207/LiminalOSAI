@@ -1,0 +1,2 @@
+# Optional signed observer profile; existing unsigned roots do not import this.
+cryptography==50.0.2

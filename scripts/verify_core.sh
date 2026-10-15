@@ -30,8 +30,15 @@ make CC="$CC" CFLAGS="$STRICT_CFLAGS"
 printf '\n== Smoke checks ==\n'
 make CC="$CC" CFLAGS="$STRICT_CFLAGS" check
 
-printf '\n== Unit and contract tests ==\n'
-make CC="$CC" CFLAGS="$STRICT_CFLAGS" test
+if [[ -d sdk/liminal_agent_control ]]; then
+    printf '\n== C suites and both production CLI/controller contracts ==\n'
+    printf 'Complete Python discovery, including real owned Docker, is required by Governance Required Gate.\n'
+    make CC="$CC" CFLAGS="$STRICT_CFLAGS" test \
+        PYTHON_TESTS="tests/test_pulse_kernel_cli.py tests/test_liminal_substrate_cli.py"
+else
+    printf '\n== Unit and contract tests ==\n'
+    make CC="$CC" CFLAGS="$STRICT_CFLAGS" test
+fi
 
 printf '\n== Deterministic CLI smoke ==\n'
 pulse_log="$(mktemp)"

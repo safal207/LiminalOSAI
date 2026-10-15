@@ -1,0 +1,939 @@
+name: Agent control
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/liminal_agent_control/**'
+      - 'sdk/liminal_isolated_execution/**'
+      - 'sdk/liminal_process_tree/**'
+      - 'sdk/liminal_post_sandbox_contracts/**'
+      - 'sdk/liminal_runtime_mediation/**'
+      - 'adapters/docker/**'
+      - 'tests/test_agent_control*'
+      - 'scripts/run_agent_control_docker.py'
+      - 'scripts/reproduce_agent_control.py'
+      - 'scripts/verify_external_stop_evidence.py'
+      - 'scripts/verify_external_network_evidence.py'
+      - 'scripts/verify_external_command_evidence.py'
+      - 'scripts/verify_external_agent_evidence.py'
+      - 'scripts/verify_external_agent_receiver_evidence.py'
+      - 'scripts/prepare_owned_stack_validation.py'
+      - 'scripts/run_python_tests.py'
+      - 'scripts/verify_core.sh'
+      - 'scripts/reproduce_reinforcement_contract.py'
+      - 'scripts/verify_reinforcement_bundle.py'
+      - 'scripts/check_orientation_view.cjs'
+      - 'scripts/check_center_view.cjs'
+      - 'experiments/agent_control/**'
+      - 'docs/AGENT_CONTROL*'
+      - 'docs/OWNED_STACK_VALIDATION.md'
+      - 'tests/test_owned_stack_validation.py'
+      - '.github/workflows/agent-control.yml'
+      - '.github/workflows/governance-required-gate.yml'
+      - '.github/workflows/core-ci.yml'
+      - '.github/workflows/kernel-runtime-contract-ci.yml'
+      - 'Makefile'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  receiver-agent:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      LIMINAL_EXTERNAL_AGENT_RECEIVER_REQUIRE_DOCKER: '1'
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install pinned host signing dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/external-agent-receiver-venv"
+          "$RUNNER_TEMP/external-agent-receiver-venv/bin/python" -m pip --isolated install -r experiments/agent_control/observer-requirements.txt
+          echo "$RUNNER_TEMP/external-agent-receiver-venv/bin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/agent-control-receiver-fence"
+          echo "LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE=$RUNNER_TEMP/agent-control-receiver-fence/report.json" >> "$GITHUB_ENV"
+      - name: Resolve the pinned image and record actual Docker identity
+        run: |
+          WORKER_IMAGE=python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+          docker pull --platform linux/amd64 "$WORKER_IMAGE"
+          IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$WORKER_IMAGE")
+          echo "LIMINAL_EXTERNAL_AGENT_DOCKER_IMAGE=$IMAGE_ID" >> "$GITHUB_ENV"
+          docker image inspect "$IMAGE_ID" > "$RUNNER_TEMP/agent-control-receiver-fence/image.json"
+          docker version > "$RUNNER_TEMP/agent-control-receiver-fence/docker-version.txt"
+      - name: Require receiver fence, authority, gateway, coordinator and evidence regressions
+        run: >-
+          python3 scripts/run_python_tests.py
+          tests.test_agent_control_external_agent_receiver
+          tests.test_agent_control_external_agent_receiver_integration
+          tests.test_agent_control_external_agent_receiver_evidence.ReceiverPacketEvidenceTests
+      - name: Require real isolated agent and receiver commit fence ordering
+        run: >-
+          python3 scripts/run_python_tests.py
+          tests.test_agent_control_external_agent_receiver_runtime
+      - name: Require captured receiver evidence tamper regressions
+        run: |
+          python3 - <<'PY'
+          import os
+          import unittest
+          from pathlib import Path
+          assert Path(os.environ['LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE']).is_file(), 'Captured receiver report must exist'
+          suite = unittest.defaultTestLoader.loadTestsFromName('tests.test_agent_control_external_agent_receiver_evidence.ReceiverCaptureMutationTests')
+          assert suite.countTestCases() == 9, 'All nine capture checks must be discovered'
+          PY
+          python3 scripts/run_python_tests.py tests.test_agent_control_external_agent_receiver_evidence.ReceiverCaptureMutationTests
+      - name: Independently verify the receiver fence report at this clean revision
+        run: >-
+          python3 scripts/verify_external_agent_receiver_evidence.py
+          "$LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE"
+          --expected-source-sha "$EXPECTED_SOURCE_SHA"
+          > "$RUNNER_TEMP/agent-control-receiver-fence/verification.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-receiver-fence-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-receiver-fence/
+          if-no-files-found: error
+
+  isolated-agent:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      LIMINAL_EXTERNAL_AGENT_REQUIRE_DOCKER: '1'
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install pinned host signing dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/external-agent-venv"
+          "$RUNNER_TEMP/external-agent-venv/bin/python" -m pip --isolated install -r experiments/agent_control/observer-requirements.txt
+          echo "$RUNNER_TEMP/external-agent-venv/bin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/agent-control-isolated-agent"
+          echo "LIMINAL_EXTERNAL_AGENT_EVIDENCE=$RUNNER_TEMP/agent-control-isolated-agent/report.json" >> "$GITHUB_ENV"
+      - name: Resolve the pinned image and record actual Docker identity
+        run: |
+          WORKER_IMAGE=python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+          docker pull --platform linux/amd64 "$WORKER_IMAGE"
+          IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$WORKER_IMAGE")
+          echo "LIMINAL_EXTERNAL_AGENT_DOCKER_IMAGE=$IMAGE_ID" >> "$GITHUB_ENV"
+          docker image inspect "$IMAGE_ID" > "$RUNNER_TEMP/agent-control-isolated-agent/image.json"
+          docker version > "$RUNNER_TEMP/agent-control-isolated-agent/docker-version.txt"
+      - name: Require profile, STDIO, coordinator and independent evidence regressions
+        run: |
+          python3 - <<'PY'
+          import unittest
+          names = ['tests.test_agent_control_external_agent_authority',
+                   'tests.test_agent_control_external_agent_bridge',
+                   'tests.test_agent_control_external_agent_supervisor',
+                   'tests.test_agent_control_external_agent_coordinator',
+                   'tests.test_agent_control_external_agent_watcher_health',
+                   'tests.test_agent_control_external_agent_launch',
+                   'tests.test_agent_control_external_agent_channels',
+                   'tests.test_agent_control_external_agent_effect_gateway',
+                   'tests.test_agent_control_external_agent_evidence']
+          suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromName(name) for name in names)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.testsRun > 0 and not result.skipped and result.wasSuccessful(), 'Isolated-agent regressions must execute'
+          PY
+      - name: Require real isolated agent, dual external STOP and owned endpoint effects
+        run: |
+          python3 - <<'PY'
+          import unittest
+          suite = unittest.defaultTestLoader.loadTestsFromName('tests.test_agent_control_external_agent_runtime')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.testsRun > 0 and not result.skipped and result.wasSuccessful(), 'Actual Docker agent experiment must execute'
+          PY
+      - name: Independently verify the isolated agent report at this clean revision
+        run: >-
+          python3 scripts/verify_external_agent_evidence.py
+          "$LIMINAL_EXTERNAL_AGENT_EVIDENCE"
+          --expected-source-sha "$EXPECTED_SOURCE_SHA"
+          > "$RUNNER_TEMP/agent-control-isolated-agent/verification.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-isolated-agent-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-isolated-agent/
+          if-no-files-found: error
+
+  external-command:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      LIMINAL_EXTERNAL_COMMAND_REQUIRE_DOCKER: '1'
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install pinned host signing dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/external-command-venv"
+          "$RUNNER_TEMP/external-command-venv/bin/python" -m pip --isolated install -r experiments/agent_control/observer-requirements.txt
+          echo "$RUNNER_TEMP/external-command-venv/bin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/agent-control-external-command"
+          echo "LIMINAL_EXTERNAL_COMMAND_EVIDENCE=$RUNNER_TEMP/agent-control-external-command/report.json" >> "$GITHUB_ENV"
+      - name: Resolve the pinned fixture image and record actual Docker identity
+        run: |
+          WORKER_IMAGE=python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+          docker pull --platform linux/amd64 "$WORKER_IMAGE"
+          IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$WORKER_IMAGE")
+          echo "LIMINAL_EXTERNAL_COMMAND_DOCKER_IMAGE=$IMAGE_ID" >> "$GITHUB_ENV"
+          docker image inspect "$IMAGE_ID" > "$RUNNER_TEMP/agent-control-external-command/image.json"
+          docker version > "$RUNNER_TEMP/agent-control-external-command/docker-version.txt"
+      - name: Require command authority, supervisor and independent evidence regressions
+        run: |
+          python3 - <<'PY'
+          import unittest
+          names = ['tests.test_agent_control_external_command_authority',
+                   'tests.test_agent_control_external_command_supervisor',
+                   'tests.test_agent_control_external_command_service',
+                   'tests.test_agent_control_external_command_evidence']
+          suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromName(name) for name in names)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.testsRun > 0 and not result.skipped and result.wasSuccessful(), 'Command regressions must execute'
+          PY
+      - name: Require actual external STOP and owned Docker process lifecycle experiment
+        run: |
+          python3 - <<'PY'
+          import unittest
+          suite = unittest.defaultTestLoader.loadTestsFromName('tests.test_agent_control_external_command_runtime')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.testsRun > 0 and not result.skipped and result.wasSuccessful(), 'Real Docker command experiment must execute'
+          PY
+      - name: Independently verify command evidence at this exact clean revision
+        run: >-
+          python3 scripts/verify_external_command_evidence.py
+          "$LIMINAL_EXTERNAL_COMMAND_EVIDENCE"
+          --expected-source-sha "$EXPECTED_SOURCE_SHA"
+          > "$RUNNER_TEMP/agent-control-external-command/verification.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-external-command-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-external-command/
+          if-no-files-found: error
+
+  external-network:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install pinned endpoint signing dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/external-network-venv"
+          "$RUNNER_TEMP/external-network-venv/bin/python" -m pip --isolated install -r experiments/agent_control/observer-requirements.txt
+          echo "$RUNNER_TEMP/external-network-venv/bin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/agent-control-external-network"
+          echo "LIMINAL_EXTERNAL_NETWORK_EVIDENCE=$RUNNER_TEMP/agent-control-external-network/report.json" >> "$GITHUB_ENV"
+      - name: Endpoint proof, external authority and exact gateway regressions
+        run: >-
+          python3 -m unittest
+          tests/test_agent_control_external_network_authority.py
+          tests/test_agent_control_external_network_endpoint.py
+          tests/test_agent_control_external_network_gateway.py
+          tests/test_agent_control_external_network_evidence.py -v
+      - name: Require real controller, gateway and endpoint HTTP processes
+        run: |
+          python3 - <<'PY'
+          import unittest
+          suite = unittest.defaultTestLoader.loadTestsFromName('tests.test_agent_control_external_network_runtime')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.testsRun > 0 and not result.skipped and result.wasSuccessful(), 'Owned network experiment must execute'
+          PY
+      - name: Independently verify public network evidence at this clean revision
+        run: >-
+          python3 scripts/verify_external_network_evidence.py
+          "$LIMINAL_EXTERNAL_NETWORK_EVIDENCE"
+          --expected-source-sha "$EXPECTED_SOURCE_SHA"
+          > "$RUNNER_TEMP/agent-control-external-network/verification.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-external-network-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-external-network/
+          if-no-files-found: error
+
+  reinforcement:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install pinned evidence signing dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/reinforcement-venv"
+          "$RUNNER_TEMP/reinforcement-venv/bin/python" -m pip --isolated install -r experiments/agent_control/observer-requirements.txt
+          echo "$RUNNER_TEMP/reinforcement-venv/bin" >> "$GITHUB_PATH"
+      - name: Contract and independent adversarial regressions
+        run: >-
+          python3 -m unittest
+          tests/test_agent_control_reinforcement.py
+          tests/test_agent_control_reinforcement_adversarial.py
+          tests/test_agent_control_reinforcement_bundle.py -v
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: safal207/ContractGraph-QA
+          ref: 38755bb5f056ea6f9a1c5a2b0c52401fb1d70021
+          path: artifacts/contractgraph-oracle
+          persist-credentials: false
+      - name: Real external STOP evidence and scripted response preferences
+        run: >-
+          python3 scripts/reproduce_reinforcement_contract.py
+          --bundle "$RUNNER_TEMP/agent-control-reinforcement/bundle"
+          --expected-source-sha "$EXPECTED_SOURCE_SHA"
+          --contractgraph-root artifacts/contractgraph-oracle
+      - name: Verify byte inventory, evidence, source and assessment replay
+        run: >-
+          python3 scripts/verify_reinforcement_bundle.py
+          "$RUNNER_TEMP/agent-control-reinforcement/bundle"
+          --expected-source-sha "$EXPECTED_SOURCE_SHA"
+          --contractgraph-root artifacts/contractgraph-oracle
+          > "$RUNNER_TEMP/agent-control-reinforcement/verification.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-reinforcement-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-reinforcement/
+          if-no-files-found: error
+
+  external-stop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install pinned signing dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/external-stop-venv"
+          "$RUNNER_TEMP/external-stop-venv/bin/python" -m pip --isolated install -r experiments/agent_control/observer-requirements.txt
+          echo "$RUNNER_TEMP/external-stop-venv/bin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/agent-control-external-stop"
+          echo "LIMINAL_EXTERNAL_STOP_EVIDENCE=$RUNNER_TEMP/agent-control-external-stop/report.json" >> "$GITHUB_ENV"
+      - name: External authority, receiver races and signed checkpoint regressions
+        run: >-
+          python3 -m unittest
+          tests/test_agent_control_external_authority.py
+          tests/test_agent_control_external_checkpoint.py
+          tests/test_agent_control_external_receiver.py
+          tests/test_agent_control_external_stop_evidence.py -v
+      - name: Require actual separate-process STOP and rollback experiment
+        run: |
+          python3 - <<'PY'
+          import unittest
+          suite = unittest.defaultTestLoader.loadTestsFromName('tests.test_agent_control_external_stop_runtime')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.testsRun > 0 and not result.skipped and result.wasSuccessful(), 'Separate-process external STOP experiment must execute'
+          PY
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: safal207/ContractGraph-QA
+          ref: 38755bb5f056ea6f9a1c5a2b0c52401fb1d70021
+          path: artifacts/contractgraph-oracle
+          persist-credentials: false
+      - name: Independently verify public evidence and pinned trajectory oracle
+        run: >-
+          python3 scripts/verify_external_stop_evidence.py
+          "$LIMINAL_EXTERNAL_STOP_EVIDENCE"
+          --expected-source-sha "$EXPECTED_SOURCE_SHA"
+          --contractgraph-root artifacts/contractgraph-oracle
+          > "$RUNNER_TEMP/agent-control-external-stop/verification.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-external-stop-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-external-stop/
+          if-no-files-found: error
+
+  isolated-observers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install pinned host signing dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/isolated-observer-venv"
+          "$RUNNER_TEMP/isolated-observer-venv/bin/python" -m pip --isolated install -r experiments/agent_control/observer-requirements.txt
+          echo "$RUNNER_TEMP/isolated-observer-venv/bin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/agent-control-isolated-observers"
+          "$RUNNER_TEMP/isolated-observer-venv/bin/python" -m pip freeze > "$RUNNER_TEMP/agent-control-isolated-observers/host-dependencies.txt"
+      - name: Build observer image from pinned base and record immutable identity
+        run: |
+          docker build --platform linux/amd64 \
+            -f experiments/agent_control/observer.Dockerfile \
+            --iidfile "$RUNNER_TEMP/agent-control-isolated-observers/image-id.txt" \
+            experiments/agent_control
+          OBSERVER_IMAGE_ID=$(cat "$RUNNER_TEMP/agent-control-isolated-observers/image-id.txt")
+          echo "LIMINAL_OBSERVER_DOCKER_IMAGE=$OBSERVER_IMAGE_ID" >> "$GITHUB_ENV"
+          docker image inspect "$OBSERVER_IMAGE_ID" > "$RUNNER_TEMP/agent-control-isolated-observers/image.json"
+          docker version > "$RUNNER_TEMP/agent-control-isolated-observers/docker-version.txt"
+      - name: Source-binding and actual restricted-container regressions
+        run: >-
+          python3 -m unittest
+          tests/test_agent_control_observer_sources.py
+          tests/test_agent_control_observer_container.py
+          tests/test_agent_control_observer_container_gate.py
+          tests/test_agent_control_observer_registry.py
+          tests/test_agent_control_observer_lifecycle.py
+          tests/test_agent_control_receiver_source.py
+          tests/test_agent_control_source_issuer_profile.py
+          tests/test_agent_control_receiver_source_observer.py
+          tests/test_agent_control_receiver_source_service.py -v
+      - name: Required real observer controller-crash and lost-create-ACK regressions
+        env:
+          LIMINAL_OBSERVER_LIFECYCLE_EVIDENCE: ${{ runner.temp }}/agent-control-isolated-observers/lifecycle.json
+        run: |
+          python3 - <<'PY'
+          import unittest
+          suite = unittest.defaultTestLoader.loadTestsFromName('tests.test_agent_control_observer_lifecycle_runtime')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.testsRun == 2 and not result.skipped and result.wasSuccessful(), 'Real Docker lifecycle regressions must execute'
+          PY
+          python3 - "$LIMINAL_OBSERVER_LIFECYCLE_EVIDENCE" <<'PY'
+          import hashlib, json, os, sys
+          from pathlib import Path
+          from liminal_agent_control.multi_agent import _source_digests
+          report = json.load(open(sys.argv[1]))
+          assert len(report['cases']) == 2
+          hashes = _source_digests()
+          test_path = 'tests/test_agent_control_observer_lifecycle_runtime.py'
+          hashes[test_path] = hashlib.sha256(Path(test_path).read_bytes()).hexdigest()
+          for case in report['cases']:
+              assert case['source']['commit'] == os.environ['EXPECTED_SOURCE_SHA']
+              assert case['source']['dirty'] is False
+              assert case['source_files_sha256'] == hashes
+              assert case['image_id'] == os.environ['LIMINAL_OBSERVER_DOCKER_IMAGE']
+          PY
+      - name: Required signed receiver source and actual Docker effect boundaries
+        env:
+          LIMINAL_RECEIVER_SOURCE_EVIDENCE: ${{ runner.temp }}/agent-control-isolated-observers/receiver-source.json
+        run: |
+          python3 - <<'PY'
+          import unittest
+          suite = unittest.defaultTestLoader.loadTestsFromName('tests.test_agent_control_receiver_source_runtime')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.testsRun == 1 and not result.skipped and result.wasSuccessful(), 'Signed source Docker experiment must execute'
+          PY
+          python3 - "$LIMINAL_RECEIVER_SOURCE_EVIDENCE" <<'PY'
+          import hashlib, json, os, sys
+          from pathlib import Path
+          from liminal_agent_control.multi_agent import _source_digests
+          report = json.load(open(sys.argv[1]))
+          assert report['passed'] is True and all(report['checks'].values())
+          assert report['source']['commit'] == os.environ['EXPECTED_SOURCE_SHA']
+          assert report['source']['dirty'] is False
+          hashes = _source_digests()
+          test_path = 'tests/test_agent_control_receiver_source_runtime.py'
+          hashes[test_path] = hashlib.sha256(Path(test_path).read_bytes()).hexdigest()
+          assert report['source_files_sha256'] == hashes
+          assert report['image_id'] == os.environ['LIMINAL_OBSERVER_DOCKER_IMAGE']
+          assert len(report['outcomes']) == 8
+          PY
+      - name: Execute isolated observer sources and bind evidence
+        run: |
+          python3 -m liminal_agent_control.observer_container_demo \
+            --image "$LIMINAL_OBSERVER_DOCKER_IMAGE" \
+            --output "$RUNNER_TEMP/agent-control-isolated-observers/report.json"
+          python3 - "$RUNNER_TEMP/agent-control-isolated-observers/report.json" <<'PY'
+          import json, os, sys
+          from liminal_agent_control.multi_agent import _source_digests
+          report = json.load(open(sys.argv[1]))
+          assert report['passed'] is True and all(report['checks'].values())
+          assert report['source']['commit'] == os.environ['EXPECTED_SOURCE_SHA']
+          assert report['source']['dirty'] is False
+          assert report['source_digests'] == _source_digests()
+          assert report['image_id'] == os.environ['LIMINAL_OBSERVER_DOCKER_IMAGE']
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-isolated-observers-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-isolated-observers/
+          if-no-files-found: warn
+
+  signed-observers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install pinned optional signing dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/observer-venv"
+          "$RUNNER_TEMP/observer-venv/bin/python" -m pip --isolated install -r experiments/agent_control/observer-requirements.txt
+          echo "$RUNNER_TEMP/observer-venv/bin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/agent-control-observers"
+          "$RUNNER_TEMP/observer-venv/bin/python" -m pip freeze > "$RUNNER_TEMP/agent-control-observers/dependencies.txt"
+      - name: Signed identities, nonce races and process-boundary regressions
+        run: >-
+          python3 -m unittest
+          tests/test_agent_control_observer_auth.py
+          tests/test_agent_control_observer_process.py
+          tests/test_agent_control_observer_auth_gate.py -v
+      - name: Execute separate observer processes and bind source
+        run: |
+          python3 -m liminal_agent_control.observer_auth_demo --output "$RUNNER_TEMP/agent-control-observers/report.json"
+          python3 - "$RUNNER_TEMP/agent-control-observers/report.json" <<'PY'
+          import json, os, sys
+          from liminal_agent_control.multi_agent import _source_digests
+          report = json.load(open(sys.argv[1]))
+          assert report['passed'] is True and all(report['checks'].values())
+          assert report['source']['commit'] == os.environ['EXPECTED_SOURCE_SHA']
+          assert report['source']['dirty'] is False
+          assert report['source_digests'] == _source_digests()
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-observers-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-observers/
+          if-no-files-found: warn
+
+  orientation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Spatial-temporal admission, evidence and concurrency regressions
+        run: >-
+          python3 -m unittest
+          tests/test_agent_control_orientation_store.py
+          tests/test_agent_control_orientation_gate.py
+          tests/test_agent_control_orientation_demo.py -v
+      - name: Execute graph example and bind actual source files
+        run: |
+          python3 -m liminal_agent_control.orientation_demo \
+            --output "$RUNNER_TEMP/agent-control-orientation/report.json" \
+            --html "$RUNNER_TEMP/agent-control-orientation/trajectory.html"
+          python3 - "$RUNNER_TEMP/agent-control-orientation/report.json" <<'PY'
+          import json, os, sys
+          from liminal_agent_control.multi_agent import _source_digests
+          report = json.load(open(sys.argv[1]))
+          assert report['passed'] is True and all(report['checks'].values())
+          assert report['source']['commit'] == os.environ['EXPECTED_SOURCE_SHA']
+          assert report['source']['dirty'] is False
+          assert report['source_digests'] == _source_digests()
+          PY
+      - name: Inspect timeline and mobile graph in real Chromium
+        run: |
+          npm install --prefix "$RUNNER_TEMP/orientation-ui" --ignore-scripts --no-audit --no-fund playwright@1.62.1
+          export ORIENTATION_PLAYWRIGHT_MODULE="$RUNNER_TEMP/orientation-ui/node_modules/playwright"
+          export ORIENTATION_CHROME="$(command -v google-chrome)"
+          test -n "$ORIENTATION_CHROME"
+          node scripts/check_orientation_view.cjs \
+            "$RUNNER_TEMP/agent-control-orientation/trajectory.html" \
+            "$RUNNER_TEMP/agent-control-orientation" \
+            > "$RUNNER_TEMP/agent-control-orientation/browser-check.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-orientation-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-orientation/
+          if-no-files-found: warn
+
+  center-continuity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Center continuity and observer-ring effect-boundary regressions
+        run: >-
+          python3 -m unittest
+          tests/test_agent_control_center_continuity.py
+          tests/test_agent_control_observer_ring.py
+          tests/test_agent_control_center_gate.py
+          tests/test_agent_control_center_demo.py -v
+      - name: Execute center timeline example and bind actual source files
+        run: |
+          python3 -m liminal_agent_control.center_demo \
+            --output "$RUNNER_TEMP/agent-control-center/report.json" \
+            --html "$RUNNER_TEMP/agent-control-center/center.html"
+          python3 - "$RUNNER_TEMP/agent-control-center/report.json" <<'PY'
+          import json, os, sys
+          from liminal_agent_control.multi_agent import _source_digests
+          report = json.load(open(sys.argv[1]))
+          assert report['passed'] is True and all(report['checks'].values())
+          assert report['source']['commit'] == os.environ['EXPECTED_SOURCE_SHA']
+          assert report['source']['dirty'] is False
+          assert report['source_digests'] == _source_digests()
+          PY
+      - name: Inspect timeline and observer ring in real Chromium
+        run: |
+          npm install --prefix "$RUNNER_TEMP/center-ui" --ignore-scripts --no-audit --no-fund playwright@1.62.1
+          export ORIENTATION_PLAYWRIGHT_MODULE="$RUNNER_TEMP/center-ui/node_modules/playwright"
+          export ORIENTATION_CHROME="$(command -v google-chrome)"
+          test -n "$ORIENTATION_CHROME"
+          node scripts/check_center_view.cjs \
+            "$RUNNER_TEMP/agent-control-center/center.html" \
+            "$RUNNER_TEMP/agent-control-center" \
+            > "$RUNNER_TEMP/agent-control-center/browser-check.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-center-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-center/
+          if-no-files-found: warn
+
+  brakes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Durable shared authority, adapters and process-death tests
+        run: >-
+          python3 -m unittest
+          tests/test_agent_control_brakes_store.py
+          tests/test_agent_control_brakes_receiver.py
+          tests/test_agent_control_brakes_egress.py
+          tests/test_agent_control_brakes_watchdog.py -v
+      - name: Execute shared records and egress example at this revision
+        run: |
+          python3 -m liminal_agent_control.brakes_demo --output "$RUNNER_TEMP/agent-control-brakes/report.json"
+          python3 - "$RUNNER_TEMP/agent-control-brakes/report.json" <<'PY'
+          import json, os, sys
+          from liminal_agent_control.multi_agent import _source_digests
+          report = json.load(open(sys.argv[1]))
+          assert report['passed'] is True
+          assert report['source']['commit'] == os.environ['EXPECTED_SOURCE_SHA']
+          assert report['source']['dirty'] is False
+          assert report['source_digests'] == _source_digests()
+          assert [case['case_id'] for case in report['cases']] == ['shared_budget', 'shared_stop']
+          assert all(all(case['checks'].values()) for case in report['cases'])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-brakes-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-brakes/
+          if-no-files-found: warn
+
+  multi-agent:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Scripted multi-worker experiment and evidence mutation checks
+        run: >-
+          python3 -m unittest
+          tests/test_agent_control_multi_agent_scenarios.py
+          tests/test_agent_control_multi_agent_relay.py
+          tests/test_agent_control_multi_agent_checks.py
+          tests/test_agent_control_multi_agent_evaluation.py -v
+      - name: Run and verify current-head multi-worker evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/agent-control-multi-agent" "$RUNNER_TEMP/agent-control-keys"
+          python3 -m liminal_agent_control.multi_agent run \
+            --output-root "$RUNNER_TEMP/agent-control-multi-agent/runs" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/multi-agent.key" \
+            > "$RUNNER_TEMP/agent-control-multi-agent/run-result.json"
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          from liminal_agent_control.multi_agent import verify_bundle
+          root = Path(sys.argv[1])
+          public = root / 'agent-control-multi-agent'
+          result = json.loads((public / 'run-result.json').read_text())
+          verification = verify_bundle(Path(result['bundle']),
+              (root / 'agent-control-keys/multi-agent.key').read_bytes(),
+              expected_report_sha256=result['report_sha256'])
+          (public / 'verification.json').write_text(json.dumps(verification, indent=2) + '\n')
+          print(json.dumps(result['checks'], indent=2))
+          assert result['source']['dirty'] is False, result['source']
+          assert result['source']['commit'] == os.environ['EXPECTED_SOURCE_SHA'], result['source']
+          assert verification['valid'], verification
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-multi-agent-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-multi-agent/
+          if-no-files-found: warn
+
+  local:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install pinned signing dependency for deterministic agent tests
+        run: |
+          python3 -m venv "$RUNNER_TEMP/local-observer-venv"
+          "$RUNNER_TEMP/local-observer-venv/bin/python" -m pip --isolated install -r experiments/agent_control/observer-requirements.txt
+          echo "$RUNNER_TEMP/local-observer-venv/bin" >> "$GITHUB_PATH"
+      - name: C contracts and deterministic agent unit tests
+        run: |
+          make test-c
+          python3 scripts/run_python_tests.py \
+            tests.test_agent_control_authority \
+            tests.test_agent_control_evaluation \
+            tests.test_agent_control_supervisor_registry \
+            tests.test_agent_control_runtime.RuntimeProtocolTests \
+            tests.test_agent_control_runtime.RuntimeCleanupTests \
+            tests.test_agent_control_runtime.DockerObservationRaceTests \
+            tests.test_agent_control_runtime.MatchedQueueProtocolTests \
+            tests.test_agent_control_fault_runtime.FaultRuntimeTests
+      - name: Deterministic A/B/C and external-key verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/agent-control-evidence" "$RUNNER_TEMP/agent-control-keys"
+          python3 -m liminal_agent_control.evaluation run \
+            --mode deterministic-local \
+            --output-root "$RUNNER_TEMP/agent-control-evidence" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/local.key" \
+            > "$RUNNER_TEMP/local-result.json"
+          BUNDLE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$RUNNER_TEMP/local-result.json")
+          python3 -m liminal_agent_control.evaluation verify "$BUNDLE" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/local.key"
+          cp "$RUNNER_TEMP/local-result.json" "$RUNNER_TEMP/agent-control-evidence/run-result.json"
+      - name: Independently score the export with pinned CML
+        shell: bash
+        run: |
+          set -euo pipefail
+          CML_SOURCE="$RUNNER_TEMP/cml-source"
+          git init "$CML_SOURCE"
+          git -C "$CML_SOURCE" remote add origin https://github.com/safal207/Causal-Memory-Layer.git
+          git -C "$CML_SOURCE" fetch --depth=1 origin 4046bfae936abde5d9566fded6eaaa8a302561f3
+          git -C "$CML_SOURCE" checkout --detach FETCH_HEAD
+          git -C "$CML_SOURCE" rev-parse HEAD > "$RUNNER_TEMP/agent-control-evidence/cml-revision.txt"
+          python3 -m venv "$RUNNER_TEMP/cml-scorer-venv"
+          "$RUNNER_TEMP/cml-scorer-venv/bin/python" -m pip install 'PyYAML==6.0.3'
+          "$RUNNER_TEMP/cml-scorer-venv/bin/python" -m pip freeze > "$RUNNER_TEMP/agent-control-evidence/cml-dependencies.txt"
+          PYTHONPATH="$CML_SOURCE" "$RUNNER_TEMP/cml-scorer-venv/bin/python" - "$RUNNER_TEMP" <<'PY'
+          from collections import Counter
+          import json, sys
+          from pathlib import Path
+          from cml.integrations.agent_boundary import score_evaluation_export
+          root = Path(sys.argv[1])
+          controller = json.loads((root / 'local-result.json').read_text())
+          key = (root / 'agent-control-keys/local.key').read_bytes()
+          report = json.loads((Path(controller['bundle']) / 'report.json').read_text())
+          expectations = json.loads(Path(controller['expectations_file']).read_text())
+          score = score_evaluation_export(report, expectations,
+              trusted_keys={'receiver-hmac-v1': key},
+              expected_receiver_id=None, now=controller['collected_at'], max_age_seconds=30)
+          (root / 'agent-control-evidence/cml-score.json').write_text(json.dumps(score, indent=2) + '\n')
+          counts = dict(Counter(case['verdict'] for case in score['cases']))
+          print('Independent CML verdicts:', counts)
+          assert counts == {'PASS': 9, 'UNKNOWN': 14, 'FAIL': 10}, counts
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-local-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-evidence/
+          if-no-files-found: warn
+
+  docker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Resolve and record the worker image
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/agent-control-docker" "$RUNNER_TEMP/agent-control-keys"
+          WORKER_IMAGE=python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+          docker pull --platform linux/amd64 "$WORKER_IMAGE"
+          IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$WORKER_IMAGE")
+          echo "LIMINAL_AGENT_CONTROL_DOCKER_IMAGE=$IMAGE_ID" >> "$GITHUB_ENV"
+          docker image inspect "$IMAGE_ID" > "$RUNNER_TEMP/agent-control-docker/image.json"
+          docker version > "$RUNNER_TEMP/agent-control-docker/docker-version.txt"
+          git rev-parse HEAD > "$RUNNER_TEMP/agent-control-docker/source-revision.txt"
+      - name: Real container lifecycle, descendants and negative cases
+        env:
+          LIMINAL_AGENT_CONTROL_RECOVERY_EVIDENCE: ${{ runner.temp }}/agent-control-docker/supervisor-recovery.json
+          LIMINAL_AGENT_CONTROL_WATCHDOG_EVIDENCE: ${{ runner.temp }}/agent-control-docker/independent-watchdog.json
+        run: python3 -m unittest tests/test_agent_control_runtime.py tests/test_agent_control_fault_runtime.py tests/test_agent_control_brakes_watchdog.py -v
+      - name: Separate receiver process and worker container
+        run: |
+          python3 scripts/run_agent_control_docker.py \
+            --image "$LIMINAL_AGENT_CONTROL_DOCKER_IMAGE" --fixture honest \
+            --output "$RUNNER_TEMP/agent-control-docker/separate-receiver.json"
+      - name: Docker C integration evidence and verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m liminal_agent_control.evaluation run --mode docker \
+            --image "$LIMINAL_AGENT_CONTROL_DOCKER_IMAGE" \
+            --output-root "$RUNNER_TEMP/agent-control-docker/runs" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/docker.key" \
+            > "$RUNNER_TEMP/docker-result.json"
+          BUNDLE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$RUNNER_TEMP/docker-result.json")
+          python3 -m liminal_agent_control.evaluation verify "$BUNDLE" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/docker.key"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert len(r["cases"]) == 6 and all(c["status"] == "PASS" and c["runtime"]["containment"]["verified"] for c in r["cases"]), r["checker_failures"]' "$BUNDLE/report.json"
+          cp "$RUNNER_TEMP/docker-result.json" "$RUNNER_TEMP/agent-control-docker/run-result.json"
+      - name: Matched Docker A/B/C queued-request experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m liminal_agent_control.evaluation run --mode docker-abc \
+            --image "$LIMINAL_AGENT_CONTROL_DOCKER_IMAGE" \
+            --output-root "$RUNNER_TEMP/agent-control-docker/matched-runs" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/matched.key" \
+            > "$RUNNER_TEMP/matched-result.json"
+          BUNDLE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$RUNNER_TEMP/matched-result.json")
+          python3 -m liminal_agent_control.evaluation verify "$BUNDLE" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/matched.key"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert len(r["cases"]) == 3 and {c["configuration"] for c in r["cases"]} == {"A", "B", "C"} and all(c["status"] == "PASS" for c in r["cases"]), r["checker_failures"]' "$BUNDLE/report.json"
+          cp "$RUNNER_TEMP/matched-result.json" "$RUNNER_TEMP/agent-control-docker/matched-result.json"
+      - name: Registered Docker fault experiment with independent receiver evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m liminal_agent_control.evaluation run --mode docker-faults \
+            --image "$LIMINAL_AGENT_CONTROL_DOCKER_IMAGE" \
+            --output-root "$RUNNER_TEMP/agent-control-docker/fault-runs" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/faults.key" \
+            > "$RUNNER_TEMP/faults-result.json"
+          BUNDLE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$RUNNER_TEMP/faults-result.json")
+          python3 -m liminal_agent_control.evaluation verify "$BUNDLE" \
+            --receipt-key-file "$RUNNER_TEMP/agent-control-keys/faults.key"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert len(r["cases"]) == 6 and all(c["status"] == "PASS" for c in r["cases"]) and r["required_execution_completed"], r["checker_failures"]' "$BUNDLE/report.json"
+          cp "$RUNNER_TEMP/faults-result.json" "$RUNNER_TEMP/agent-control-docker/faults-result.json"
+      - name: Score real Docker faults with the pinned CML component
+        shell: bash
+        run: |
+          set -euo pipefail
+          CML_SOURCE="$RUNNER_TEMP/cml-faults-source"
+          git init "$CML_SOURCE"
+          git -C "$CML_SOURCE" fetch --depth=1 https://github.com/safal207/Causal-Memory-Layer.git 4046bfae936abde5d9566fded6eaaa8a302561f3
+          git -C "$CML_SOURCE" checkout --detach FETCH_HEAD
+          test "$(git -C "$CML_SOURCE" rev-parse HEAD^{tree})" = bff5aafd2e9930c00540f34e24c2316249439664
+          python3 -m venv "$RUNNER_TEMP/cml-faults-venv"
+          "$RUNNER_TEMP/cml-faults-venv/bin/python" -m pip --isolated install \
+            --index-url https://pypi.org/simple --only-binary=:all: --require-hashes \
+            -r experiments/agent_control/reproduction-requirements.txt
+          PYTHONPATH="$CML_SOURCE" "$RUNNER_TEMP/cml-faults-venv/bin/python" - "$RUNNER_TEMP" <<'PY'
+          from collections import Counter
+          import json, sys
+          from pathlib import Path
+          from cml.integrations.agent_boundary import score_evaluation_export
+          root = Path(sys.argv[1])
+          controller = json.loads((root / 'faults-result.json').read_text())
+          report = json.loads((Path(controller['bundle']) / 'report.json').read_text())
+          expectations = json.loads(Path(controller['expectations_file']).read_text())
+          key = (root / 'agent-control-keys/faults.key').read_bytes()
+          score = score_evaluation_export(report, expectations,
+              trusted_keys={'receiver-hmac-v1': key}, expected_receiver_id=None,
+              now=controller['collected_at'], max_age_seconds=30)
+          (root / 'agent-control-docker/cml-faults-score.json').write_text(json.dumps(score, indent=2) + '\n')
+          counts = dict(Counter(case['verdict'] for case in score['cases']))
+          print('CML Docker fault verdicts:', counts)
+          assert counts == {'PASS': 3, 'UNKNOWN': 2, 'FAIL': 1}, counts
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-docker-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-docker/
+          if-no-files-found: warn
+
+  reproduction:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Fresh frozen sources, hash-pinned dependencies and required Docker
+        run: |
+          python3 scripts/reproduce_agent_control.py \
+            --destination "$RUNNER_TEMP/agent-control-reproduction" \
+            --profile all --pull-image
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: agent-control-reproduction-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/agent-control-reproduction/public/
+          if-no-files-found: warn

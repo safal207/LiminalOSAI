@@ -4,7 +4,13 @@ on:
   pull_request:
     paths:
       - 'sdk/liminal_egress_gateway/**'
+      - 'sdk/liminal_capability_broker/**'
+      - 'sdk/liminal_epoch_bound_capability/**'
+      - 'adapters/network/**'
       - 'tests/test_egress_gateway_phase2.py'
+      - 'tests/test_egress_admission_order.py'
+      - 'tests/test_pinned_http_transport.py'
+      - 'tests/test_runtime_mediation_v1_3.py'
       - 'docs/EGRESS_GATEWAY_PHASE2.md'
       - 'Makefile'
       - '.github/workflows/egress-gateway-phase2-ci.yml'
@@ -31,7 +37,11 @@ jobs:
       - name: Run Phase 2 adversarial tests
         run: |
           set -euo pipefail
-          python3 -m unittest tests/test_egress_gateway_phase2.py -v 2>&1 | tee reports/egress-gateway-phase2/phase2-tests.log
+          python3 -m unittest tests/test_egress_gateway_phase2.py tests/test_egress_admission_order.py tests/test_pinned_http_transport.py -v 2>&1 | tee reports/egress-gateway-phase2/phase2-tests.log
+      - name: Verify mediation, epoch and objective integration
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests/test_runtime_mediation_v1_3.py tests/test_epoch_bound_capability.py tests/test_objective_integrity_guard.py -v 2>&1 | tee reports/egress-gateway-phase2/integration-tests.log
       - name: Re-run Capability Broker tests
         run: |
           set -euo pipefail
@@ -66,9 +76,9 @@ jobs:
           broker=CapabilityBroker()
           cap=CapabilityContract.build(capability_id='cap:net',capability_type='network.connect_domain',subject_id='agent:worker',issuer_id='issuer:test',scope={'domains':['api.example.com'],'protocols':['https'],'ports':[443]},issued_at_unix=100,not_before_unix=100,expires_at_unix=200,max_uses=2,delegable=False,parent_capability_id=None,policy_sha256=policy)
           broker.admit(cap.as_document(),at_unix=105)
-          good=EgressGateway(broker=broker,resolver=lambda h:['93.184.216.34'],transport=lambda r:TransportResponse(200,{},'c'*64))
+          good=EgressGateway(broker=broker,resolver=lambda h:['93.184.216.34'],transport=lambda r:TransportResponse(200,{},'c'*64),clock=lambda:120)
           assert good.execute(req)['decision']=='ALLOW'
-          bad=EgressGateway(broker=broker,resolver=lambda h:['127.0.0.1'],transport=lambda r:TransportResponse(200,{},'c'*64))
+          bad=EgressGateway(broker=broker,resolver=lambda h:['127.0.0.1'],transport=lambda r:TransportResponse(200,{},'c'*64),clock=lambda:120)
           try: bad.execute(req)
           except EgressBlocked: pass
           else: raise SystemExit('private DNS address did not block')

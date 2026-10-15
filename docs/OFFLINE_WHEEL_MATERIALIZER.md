@@ -98,11 +98,13 @@ counts and trusted input roots.
 ## Docker receipt bridge
 
 `WheelMaterializingDockerExecutor` uses the shared `run_docker_plan` lifecycle
-with the hardened Docker argv and a fresh host-assigned session name. It captures
-one JSON line with a 64 KiB stdout limit enforced during reading; workload stderr
-is discarded. Timeout or overflow stops the client, removes the exact container
-and verifies absence. Normal completion also requires an absence check; cleanup
-or survivor-verification failure cannot produce a successful receipt.
+with hardened Docker arguments, an inert create step and an acknowledged immutable
+container ID. It captures one JSON line with a 64 KiB stdout limit enforced during
+reading; workload stderr is discarded. Timeout or overflow stops the client and
+attempts exact-ID removal and an absence check on the same daemon. Unacknowledged
+creation or failed verification remains unknown. Normal completion requires an
+observed terminal workload state and verified removal; cleanup failure cannot
+produce a successful receipt.
 
 The bridge validates the materialization receipt against the exact plan arguments.
 Raw stdout is discarded after verification. The `ExecutionObservation` contains
@@ -138,3 +140,11 @@ The host staging process, immutable installer image, Docker/container runtime an
 kernel remain trusted infrastructure. A future layer can add signed provenance
 such as Sigstore/TUF-style evidence before staging without weakening this
 offline-first execution boundary.
+
+## Uncertain execution and recovery
+
+The wheel backend shares the isolated executor's inert create, immutable-ID start, bounded output and daemon-bound cleanup lifecycle. It preserves `ExecutionOutcomeUnknown` through `WheelDockerOutcomeUnknown`, with the trusted session identity, phase and cleanup state available directly on the exception. Exit zero with a missing, malformed or unbound receipt is `UNKNOWN`: successful installation has not been verified. Pre-dispatch validation failures and an observed nonzero installer exit remain failures.
+
+The optional trusted `session_observer` records identity before create and before start. See the [session lifecycle and recorder contract](ISOLATED_EXECUTION_BROKER.md#session-lifecycle). Runtime consumers must reconcile an unknown result before retrying; removing the container does not reconstruct its materialization receipt. The durable effect fence retains its reservation when the effect is unknown. Existing successful materialization receipt hashes are unchanged.
+
+The owned-daemon failure scenarios in the isolation workflow are separate from wheel content verification. Both the [failure lifecycle run 38538316272](https://github.com/safal207/LiminalOSAI/actions/runs/38538316272) and [wheel content verification run 38538316125](https://github.com/safal207/LiminalOSAI/actions/runs/38538316125) passed for PR head `5aa119b03eed5189726dceb7b01bdf96ba488a94`. These pull-request runs retain their actual tested merge checkout and image identity. The earlier pinned wheel run above applies only to its recorded revision.

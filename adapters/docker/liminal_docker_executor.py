@@ -3,22 +3,21 @@
 
 The model-facing SDK never receives Docker/container authority or raw host PIDs.
 This trusted adapter assigns opaque session identities, can expose a bounded
-process-tree backend to the canonical containment supervisor, and guarantees
-that timeout cleanup verifies the named container no longer exists.
+process-tree backend to the canonical containment supervisor, and retains immutable daemon/container identities for bounded reconciliation.
+Unacknowledged requests never establish a successful cleanup claim.
 """
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
-import os
+from dataclasses import dataclass, replace
+import json
 from pathlib import Path
 import re
 import secrets
-import selectors
 import subprocess
 import sys
 import time
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -32,20 +31,36 @@ from sdk.liminal_process_tree_containment import (
     ProcessTreeContainmentSupervisor,
 )
 from sdk.liminal_runtime_mediation import ExecutionObservation
+from sdk.liminal_runtime_mediation import ExecutionOutcomeUnknown
+from adapters.docker._bounded_cli import OutputLimitExceeded, run_cli
 
 _CONTAINER = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
 ZERO_SHA256 = "0" * 64
+_CONTAINER_ID = re.compile(r"^[0-9a-f]{64}$")
+_INSPECT_FORMAT = ('{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Image}},'
+                   '"session":{{json (index .Config.Labels "org.liminal.session")}},'
+                   '"plan":{{json (index .Config.Labels "org.liminal.plan")}},'
+                   '"status":{{json .State.Status}},"running":{{json .State.Running}},'
+                   '"exit_code":{{json .State.ExitCode}}}')
 
 
 class DockerExecutionError(RuntimeError):
+    def __init__(self, message: str, *, session=None, phase=None, cleanup_state="UNKNOWN"):
+        super().__init__(message)
+        self.session = session
+        self.phase = phase
+        self.cleanup_state = cleanup_state
+
+
+class DockerReconciliationRequired(DockerExecutionError, ExecutionOutcomeUnknown):
     pass
 
 
-class DockerExecutionTimeout(DockerExecutionError):
+class DockerExecutionTimeout(DockerExecutionError, ExecutionOutcomeUnknown):
     pass
 
 
-class DockerOutputLimitError(DockerExecutionError):
+class DockerOutputLimitError(DockerExecutionError, ExecutionOutcomeUnknown):
     pass
 
 
@@ -54,6 +69,20 @@ class DockerRunResult:
     session_id: str
     returncode: int
     stdout: bytes
+    container_id: str
+    daemon_id: str
+
+
+@dataclass(frozen=True)
+class DockerSessionIdentity:
+    session_id: str
+    plan_sha256: str
+    image_id: str
+    daemon_id: str
+    container_id: str | None = None
+
+    def as_document(self) -> dict[str, Any]:
+        return dict(self.__dict__)
 
 
 def _validate_container_name(value: str) -> str:
@@ -102,8 +131,14 @@ class DockerProcessTreeBackend:
     def __init__(self, *, session_id: str, docker_binary: str = "docker") -> None:
         self.session_id = _validate_container_name(session_id)
         self.docker_binary = docker_binary
+        self._daemon_identity = _daemon_id(docker_binary)
+        observed = _inspect_object(self.session_id, docker_binary)
+        if observed is None or observed.get("name") != "/" + self.session_id:
+            raise DockerExecutionError("cannot attach to an unobserved execution session")
+        self._container_id = observed["id"]
         self.backend_binding_sha256 = canonical_sha256(
-            {"backend": "docker-process-tree-v1", "session_id": self.session_id}
+            {"backend": "docker-process-tree-v2", "session_id": self.session_id,
+             "container_id": self._container_id, "daemon_id": self._daemon_identity}
         )
         self._raw_to_opaque: dict[str, str] = {}
         self._parents: dict[str, str | None] = {}
@@ -141,16 +176,8 @@ class DockerProcessTreeBackend:
         self._require_session(session_id)
         before = self.snapshot(session_id)
         live_count = sum(node["state"] != "terminated" for node in before["nodes"])
-        proc = subprocess.run(
-            [self.docker_binary, "pause", self.session_id],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=10,
-            check=False,
-            shell=False,
-        )
+        proc = run_cli([self.docker_binary, "pause", self._container_id], timeout=10)
+        self._require_daemon()
         if proc.returncode != 0:
             raise DockerExecutionError("docker pause failed for governed execution session")
         frozen_nodes = [dict(node, state="frozen") for node in before["nodes"]]
@@ -160,24 +187,21 @@ class DockerProcessTreeBackend:
         self._require_session(session_id)
         before = self.snapshot(session_id)
         live_count = sum(node["state"] != "terminated" for node in before["nodes"])
-        _remove_container_verified(self.session_id, docker_binary=self.docker_binary)
+        self._require_daemon()
+        _remove_container_verified(self._container_id, docker_binary=self.docker_binary)
+        self._require_daemon()
         self._terminated = True
         return self._action("terminate", live_count, self._tombstones())
 
     def _observe_live_nodes(self) -> list[dict[str, Any]]:
-        inspect = subprocess.run(
-            [self.docker_binary, "inspect", "--format", "{{.State.Pid}} {{.State.Running}} {{.State.Paused}}", self.session_id],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        self._require_daemon()
+        inspect = run_cli(
+            [self.docker_binary, "inspect", "--format", "{{.State.Pid}} {{.State.Running}} {{.State.Paused}}", self._container_id],
             timeout=10,
-            check=False,
-            shell=False,
         )
         if inspect.returncode != 0:
             raise DockerExecutionError("docker inspect failed for governed execution session")
-        fields = inspect.stdout.strip().split()
+        fields = inspect.stdout.decode("ascii").strip().split()
         if len(fields) != 3 or not fields[0].isdigit() or fields[1] not in {"true", "false"} or fields[2] not in {"true", "false"}:
             raise DockerExecutionError("docker inspect returned invalid process state")
         root_raw = fields[0]
@@ -190,19 +214,11 @@ class DockerProcessTreeBackend:
         # accepted syntax differs across runner images. Parse the default table
         # by its PID/PPID headers instead; raw host PIDs remain inside this
         # trusted adapter and never enter model-facing receipts.
-        top = subprocess.run(
-            [self.docker_binary, "top", self.session_id],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=10,
-            check=False,
-            shell=False,
-        )
+        top = run_cli([self.docker_binary, "top", self._container_id], timeout=10, stdout_limit=64 * 1024)
+        self._require_daemon()
         if top.returncode != 0:
             raise DockerExecutionError("docker top failed for governed execution session")
-        lines = [line for line in top.stdout.splitlines() if line.strip()]
+        lines = [line for line in top.stdout.decode("utf-8").splitlines() if line.strip()]
         if len(lines) < 2:
             raise DockerExecutionError("docker top returned no process rows")
         header = lines[0].split()
@@ -299,7 +315,14 @@ class DockerProcessTreeBackend:
         return {**body, "evidence_sha256": canonical_sha256(body)}
 
     def _container_exists(self) -> bool:
-        return _container_exists(self.session_id, docker_binary=self.docker_binary)
+        self._require_daemon()
+        exists = _container_exists(self._container_id, docker_binary=self.docker_binary)
+        self._require_daemon()
+        return exists
+
+    def _require_daemon(self) -> None:
+        if _daemon_id(self.docker_binary) != self._daemon_identity:
+            raise DockerExecutionError("attached execution daemon identity changed")
 
     def _require_session(self, session_id: str) -> None:
         if session_id != self.session_id:
@@ -307,13 +330,17 @@ class DockerProcessTreeBackend:
 
 
 class DockerExecutor:
-    def __init__(self, docker_binary: str = "docker") -> None:
+    def __init__(self, docker_binary: str = "docker", *,
+                 session_observer: Callable[[DockerSessionIdentity], None] | None = None) -> None:
         if not isinstance(docker_binary, str) or not docker_binary.strip():
             raise DockerExecutionError("docker_binary must be non-empty")
+        if session_observer is not None and not callable(session_observer):
+            raise DockerExecutionError("session_observer must be callable")
         self.docker_binary = docker_binary
+        self.session_observer = session_observer
 
     def __call__(self, plan: IsolatedExecutionPlan) -> ExecutionObservation:
-        proc = run_docker_plan(plan, docker_binary=self.docker_binary)
+        proc = run_docker_plan(plan, docker_binary=self.docker_binary, session_observer=self.session_observer)
         return ExecutionObservation.success({
             "backend": "docker",
             "plan_sha256": plan.plan_sha256,
@@ -326,25 +353,79 @@ class DockerExecutor:
         })
 
 
-def _bounded_stdout(proc: subprocess.Popen[bytes], *, deadline: float, maximum: int) -> bytes:
-    """Drain at most the allowed bytes plus one overflow byte before aborting."""
-    if proc.stdout is None:
-        raise DockerExecutionError("missing bounded stdout pipe")
-    output = bytearray()
-    with selectors.DefaultSelector() as selector:
-        selector.register(proc.stdout, selectors.EVENT_READ)
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise subprocess.TimeoutExpired("governed docker session", 0)
-            if not selector.select(remaining):
-                raise subprocess.TimeoutExpired("governed docker session", 0)
-            chunk = os.read(proc.stdout.fileno(), min(65536, maximum + 1 - len(output)))
-            if not chunk:
-                return bytes(output)
-            output.extend(chunk)
-            if len(output) > maximum:
-                raise DockerOutputLimitError("isolated container stdout exceeded its byte limit")
+def _daemon_id(docker_binary: str) -> str:
+    try:
+        result = run_cli([docker_binary, "info", "--format", "{{.ID}}"], timeout=10, stdout_limit=1024)
+        identity = result.stdout.decode("utf-8").strip()
+    except (OSError, subprocess.TimeoutExpired, OutputLimitExceeded, UnicodeDecodeError) as exc:
+        raise DockerExecutionError("Docker daemon identity unavailable") from exc
+    if result.returncode != 0 or not identity or len(identity) > 256:
+        raise DockerExecutionError("Docker daemon identity unavailable")
+    return identity
+
+
+def _same_daemon(identity: DockerSessionIdentity, docker_binary: str) -> None:
+    if _daemon_id(docker_binary) != identity.daemon_id:
+        raise DockerExecutionError("Docker daemon identity changed; reconciliation required")
+
+
+def _inspect_object(reference: str, docker_binary: str) -> dict[str, Any] | None:
+    result = run_cli([docker_binary, "inspect", "--format", _INSPECT_FORMAT, reference], timeout=10, stdout_limit=8192)
+    if result.returncode != 0:
+        if _is_not_found(result.stderr.decode("utf-8", errors="replace")):
+            return None
+        raise DockerExecutionError("Docker container observation unavailable")
+    try:
+        observed = json.loads(result.stdout)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise DockerExecutionError("invalid Docker container observation") from exc
+    if not isinstance(observed, dict) or not _CONTAINER_ID.fullmatch(str(observed.get("id", ""))):
+        raise DockerExecutionError("invalid immutable Docker container ID")
+    return observed
+
+
+def _validate_owned_object(identity: DockerSessionIdentity, observed: dict[str, Any]) -> None:
+    if (observed.get("name") != "/" + identity.session_id
+            or observed.get("image") != identity.image_id
+            or observed.get("session") != identity.session_id
+            or observed.get("plan") != identity.plan_sha256
+            or (identity.container_id is not None and observed["id"] != identity.container_id)):
+        raise DockerExecutionError("Docker resource ownership mismatch")
+
+
+def reconcile_docker_session(identity: DockerSessionIdentity, *, docker_binary: str = "docker") -> dict[str, Any]:
+    """Remove only an observed owned immutable ID, never a replacement name.
+
+    An unacknowledged create remains UNKNOWN even when presently absent or when
+    one late-created inert object was removed: a pending request is not cancelled
+    by an absence observation. Recovery never starts the object.
+    """
+    _validate_container_name(identity.session_id)
+    if identity.container_id is not None and not _CONTAINER_ID.fullmatch(identity.container_id):
+        raise DockerExecutionError("invalid reconciliation container ID")
+    try:
+        _same_daemon(identity, docker_binary)
+        reference = identity.container_id or identity.session_id
+        observed = _inspect_object(reference, docker_binary)
+        target_id = identity.container_id
+        if observed is not None:
+            _validate_owned_object(identity, observed)
+            target_id = observed["id"]
+            removal = run_cli([docker_binary, "rm", "-f", target_id], timeout=15)
+            if removal.returncode != 0 and not _is_not_found(removal.stderr.decode("utf-8", errors="replace")):
+                raise DockerExecutionError("failed to terminate governed execution session")
+            _same_daemon(identity, docker_binary)
+            if _inspect_object(target_id, docker_binary) is not None:
+                raise DockerExecutionError("governed execution session survived forced removal")
+        _same_daemon(identity, docker_binary)
+        return {
+            "session": identity.as_document(), "observed_container_id": target_id,
+            "cleanup_state": "VERIFIED_ABSENT" if identity.container_id is not None else "UNKNOWN",
+            "creation_acknowledged": identity.container_id is not None,
+        }
+    except Exception as exc:
+        raise DockerReconciliationRequired("Docker cleanup outcome is unknown", session=identity,
+                                           phase="CLEANUP", cleanup_state="UNKNOWN") from exc
 
 
 def run_docker_plan(
@@ -352,46 +433,84 @@ def run_docker_plan(
     *,
     docker_binary: str = "docker",
     stdout_limit: int | None = None,
+    session_observer: Callable[[DockerSessionIdentity], None] | None = None,
 ) -> DockerRunResult:
-    """Run one named session, with bounded output and verified terminal cleanup.
-
-    Workload stderr is discarded and stdout is either discarded or drained into
-    a bounded buffer. A client timeout, output overflow, interruption or failed
-    survivor check always attempts forced removal of this exact session. Cleanup
-    errors propagate; they must never be represented as successful containment.
-    """
+    """Create inertly, bind immutable identity, then start and reconcile by ID."""
+    plan.validate()
     if stdout_limit is not None and (isinstance(stdout_limit, bool) or not isinstance(stdout_limit, int) or stdout_limit < 1):
         raise DockerExecutionError("stdout_limit must be a positive byte count")
-    session_id = _new_session_id(plan)
-    argv = build_docker_argv(plan, docker_binary=docker_binary, container_name=session_id)
-    proc = subprocess.Popen(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL if stdout_limit is None else subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        shell=False,
-    )
+    if session_observer is not None and not callable(session_observer):
+        raise DockerExecutionError("session_observer must be callable")
+    # Failure before any create request is a configuration/transport failure,
+    # never evidence that a container or workload was launched.
+    session = DockerSessionIdentity(_new_session_id(plan), plan.plan_sha256, plan.image_id, _daemon_id(docker_binary))
+    argv = build_docker_argv(plan, docker_binary=docker_binary, container_name=session.session_id)
+    argv[1:3] = ["create", "--restart", "no", "--label", "org.liminal.session=" + session.session_id,
+                 "--label", "org.liminal.plan=" + session.plan_sha256]
+    if session_observer is not None:
+        session_observer(session)
     deadline = time.monotonic() + plan.timeout_seconds
+    phase = "CREATE"
     try:
-        output = b"" if stdout_limit is None else _bounded_stdout(proc, deadline=deadline, maximum=stdout_limit)
-        returncode = proc.wait(timeout=max(0, deadline - time.monotonic()))
-        # Client exit alone does not establish that the daemon removed the job.
-        if _container_exists(session_id, docker_binary=docker_binary):
-            raise DockerExecutionError("completed docker run left a surviving execution session")
-        return DockerRunResult(session_id, returncode, output)
+        created = run_cli(argv, timeout=max(0.001, min(10, deadline - time.monotonic())), stdout_limit=1024)
+        container_id = created.stdout.decode("ascii").strip()
+        if created.returncode != 0 or not _CONTAINER_ID.fullmatch(container_id):
+            raise DockerExecutionError("Docker create was not acknowledged with an immutable ID")
+        session = replace(session, container_id=container_id)
+        if session_observer is not None:
+            session_observer(session)
+        _same_daemon(session, docker_binary)
+        observed = _inspect_object(container_id, docker_binary)
+        if observed is None:
+            raise DockerExecutionError("created Docker resource is unavailable")
+        _validate_owned_object(session, observed)
+        if observed.get("status") != "created" or observed.get("running") is not False:
+            raise DockerExecutionError("created Docker resource is not inert")
+        phase = "START"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired("governed Docker session", plan.timeout_seconds)
+        started = run_cli([docker_binary, "start", "--attach", container_id], timeout=remaining,
+                          stdout_limit=stdout_limit or 0, stderr_limit=0)
+        phase = "OBSERVE"
+        _same_daemon(session, docker_binary)
+        observed = _inspect_object(container_id, docker_binary)
+        if observed is None:
+            raise DockerExecutionError("workload terminal state is unavailable")
+        _validate_owned_object(session, observed)
+        exit_code = observed.get("exit_code")
+        if (observed.get("running") is not False or observed.get("status") != "exited"
+                or isinstance(exit_code, bool) or not isinstance(exit_code, int)
+                or started.returncode < 0 or exit_code != started.returncode):
+            raise DockerExecutionError("Docker client result does not establish workload completion")
+        phase = "CLEANUP"
+        cleanup = reconcile_docker_session(session, docker_binary=docker_binary)
+        if cleanup["cleanup_state"] != "VERIFIED_ABSENT":
+            raise DockerExecutionError("Docker cleanup is unresolved")
+        return DockerRunResult(session.session_id, exit_code, started.stdout, container_id, session.daemon_id)
     except BaseException as exc:
         try:
-            if proc.poll() is None:
-                proc.kill()
-            proc.wait(timeout=5)
-        finally:
-            _remove_container_verified(session_id, docker_binary=docker_binary)
-        if isinstance(exc, subprocess.TimeoutExpired):
-            raise DockerExecutionTimeout("isolated container timed out; process tree removed") from exc
-        raise
-    finally:
-        if proc.stdout is not None:
-            proc.stdout.close()
+            cleanup = reconcile_docker_session(session, docker_binary=docker_binary)
+            cleanup_state = cleanup["cleanup_state"]
+        except Exception:
+            cleanup_state = "UNKNOWN"
+        # Even verified removal cannot reconstruct a lost workload outcome.
+        # Transport interruption never means that the admitted action had no effect.
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        if cleanup_state == "UNKNOWN" or phase in {"CREATE", "OBSERVE", "CLEANUP"}:
+            error = DockerReconciliationRequired("Docker execution outcome requires reconciliation",
+                                                 session=session, phase=phase, cleanup_state=cleanup_state)
+        elif isinstance(exc, subprocess.TimeoutExpired):
+            error = DockerExecutionTimeout("isolated container timed out; process tree removed",
+                                           session=session, phase=phase, cleanup_state=cleanup_state)
+        elif isinstance(exc, OutputLimitExceeded):
+            error = DockerOutputLimitError("isolated container stdout exceeded its byte limit",
+                                          session=session, phase=phase, cleanup_state=cleanup_state)
+        else:
+            error = DockerReconciliationRequired("Docker execution outcome requires reconciliation",
+                                                 session=session, phase=phase, cleanup_state=cleanup_state)
+        raise error from exc
 
 
 def build_process_tree_supervisor(*, session_id: str, docker_binary: str = "docker") -> ProcessTreeContainmentSupervisor:
@@ -410,38 +529,16 @@ def _is_not_found(stderr: str) -> bool:
 
 
 def _container_exists(session_id: str, *, docker_binary: str = "docker") -> bool:
-    proc = subprocess.run(
-        [docker_binary, "inspect", _validate_container_name(session_id)],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=10,
-        check=False,
-        shell=False,
-    )
-    if proc.returncode == 0:
-        return True
-    if _is_not_found(proc.stderr):
-        return False
-    raise DockerExecutionError("docker inspect failed during survivor verification")
+    return _inspect_object(_validate_container_name(session_id), docker_binary) is not None
 
 
-def _remove_container_verified(session_id: str, *, docker_binary: str = "docker") -> None:
-    name = _validate_container_name(session_id)
-    proc = subprocess.run(
-        [docker_binary, "rm", "-f", name],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=15,
-        check=False,
-        shell=False,
-    )
-    if proc.returncode != 0 and not _is_not_found(proc.stderr):
+def _remove_container_verified(container_id: str, *, docker_binary: str = "docker") -> None:
+    if not isinstance(container_id, str) or not _CONTAINER_ID.fullmatch(container_id):
+        raise DockerExecutionError("verified removal requires a full container ID")
+    proc = run_cli([docker_binary, "rm", "-f", container_id], timeout=15)
+    if proc.returncode != 0 and not _is_not_found(proc.stderr.decode("utf-8", errors="replace")):
         raise DockerExecutionError("failed to terminate governed execution session")
-    if _container_exists(name, docker_binary=docker_binary):
+    if _container_exists(container_id, docker_binary=docker_binary):
         raise DockerExecutionError("governed execution session survived forced removal")
 
 

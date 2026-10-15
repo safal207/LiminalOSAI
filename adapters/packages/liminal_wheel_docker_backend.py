@@ -8,12 +8,13 @@ verifies it, and returns only digest evidence to RuntimeMediator.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable
 
 from adapters.docker.liminal_docker_executor import (
     DockerExecutionError,
     DockerExecutionTimeout,
     DockerOutputLimitError,
+    DockerSessionIdentity,
     run_docker_plan,
 )
 from adapters.packages.liminal_wheel_materializer import (
@@ -26,13 +27,21 @@ from adapters.packages.liminal_wheel_materializer import (
 )
 from sdk.liminal_isolated_execution import IsolatedExecutionPlan
 from sdk.liminal_package_install_broker import INSTALLER_EXECUTABLE
-from sdk.liminal_runtime_mediation import ExecutionObservation
+from sdk.liminal_runtime_mediation import ExecutionObservation, ExecutionOutcomeUnknown
 
 MAX_RECEIPT_STDOUT_BYTES = 64 * 1024
 
 
 class WheelDockerBackendError(RuntimeError):
     pass
+
+
+class WheelDockerOutcomeUnknown(WheelDockerBackendError, ExecutionOutcomeUnknown):
+    def __init__(self, message: str, *, session=None, phase=None, cleanup_state="UNKNOWN"):
+        super().__init__(message)
+        self.session = session
+        self.phase = phase
+        self.cleanup_state = cleanup_state
 
 
 def _flag_value(argv: tuple[str, ...], flag: str) -> str:
@@ -73,52 +82,66 @@ def _validate_plan_contract(plan: IsolatedExecutionPlan) -> dict[str, Any]:
 
 
 class WheelMaterializingDockerExecutor:
-    def __init__(self, docker_binary: str = "docker") -> None:
+    def __init__(self, docker_binary: str = "docker", *,
+                 session_observer: Callable[[DockerSessionIdentity], None] | None = None) -> None:
         if not isinstance(docker_binary, str) or not docker_binary.strip():
             raise WheelDockerBackendError("docker_binary_must_be_nonempty")
         self.docker_binary = docker_binary
+        self.session_observer = session_observer
 
     def __call__(self, plan: IsolatedExecutionPlan) -> ExecutionObservation:
         contract = _validate_plan_contract(plan)
         try:
-            proc = run_docker_plan(plan, docker_binary=self.docker_binary, stdout_limit=MAX_RECEIPT_STDOUT_BYTES)
+            proc = run_docker_plan(plan, docker_binary=self.docker_binary, stdout_limit=MAX_RECEIPT_STDOUT_BYTES,
+                                   session_observer=self.session_observer)
         except DockerExecutionTimeout as exc:
-            raise WheelDockerBackendError("wheel_materialization_container_timeout") from exc
+            raise WheelDockerOutcomeUnknown("wheel_materialization_container_timeout", session=exc.session,
+                                            phase=exc.phase, cleanup_state=exc.cleanup_state) from exc
         except DockerOutputLimitError as exc:
-            raise WheelDockerBackendError("wheel_materialization_receipt_too_large") from exc
+            raise WheelDockerOutcomeUnknown("wheel_materialization_receipt_too_large", session=exc.session,
+                                            phase=exc.phase, cleanup_state=exc.cleanup_state) from exc
         except DockerExecutionError as exc:
+            if isinstance(exc, ExecutionOutcomeUnknown):
+                raise WheelDockerOutcomeUnknown("wheel_materialization_container_lifecycle_failed", session=exc.session,
+                                                phase=exc.phase, cleanup_state=exc.cleanup_state) from exc
             raise WheelDockerBackendError("wheel_materialization_container_lifecycle_failed") from exc
         if proc.returncode != 0:
             raise WheelDockerBackendError("wheel_materialization_container_failed")
         try:
-            text = proc.stdout.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise WheelDockerBackendError("wheel_materialization_receipt_not_utf8") from exc
-        lines = [line for line in text.splitlines() if line]
-        if len(lines) != 1:
-            raise WheelDockerBackendError("wheel_materialization_receipt_line_count_invalid")
-        try:
-            receipt = json.loads(lines[0])
-        except json.JSONDecodeError as exc:
-            raise WheelDockerBackendError("wheel_materialization_receipt_invalid_json") from exc
-        if not isinstance(receipt, dict):
-            raise WheelDockerBackendError("wheel_materialization_receipt_invalid_json")
-        verify_receipt(receipt)
-        if receipt["artifact_sha256"] != contract["artifact_sha256"]:
-            raise WheelDockerBackendError("wheel_materialization_artifact_binding_mismatch")
-        if receipt["staged_manifest_sha256"] != contract["manifest_sha256"]:
-            raise WheelDockerBackendError("wheel_materialization_manifest_binding_mismatch")
-        if receipt["dependency_plan_sha256"] != contract["dependency_plan_sha256"]:
-            raise WheelDockerBackendError("wheel_materialization_dependency_binding_mismatch")
-        expected_coordinate = canonical_sha256({
-            "registry": contract["registry"],
-            "package_name": contract["package_name"],
-            "version": contract["version"],
-        })
-        if receipt["package_coordinate_sha256"] != expected_coordinate:
-            raise WheelDockerBackendError("wheel_materialization_coordinate_binding_mismatch")
-        if receipt["outcome"] != "SUCCEEDED":
-            raise WheelDockerBackendError("wheel_materialization_outcome_failed")
+            try:
+                text = proc.stdout.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise WheelDockerBackendError("wheel_materialization_receipt_not_utf8") from exc
+            lines = [line for line in text.splitlines() if line]
+            if len(lines) != 1:
+                raise WheelDockerBackendError("wheel_materialization_receipt_line_count_invalid")
+            try:
+                receipt = json.loads(lines[0])
+            except json.JSONDecodeError as exc:
+                raise WheelDockerBackendError("wheel_materialization_receipt_invalid_json") from exc
+            if not isinstance(receipt, dict):
+                raise WheelDockerBackendError("wheel_materialization_receipt_invalid_json")
+            verify_receipt(receipt)
+            if receipt["artifact_sha256"] != contract["artifact_sha256"]:
+                raise WheelDockerBackendError("wheel_materialization_artifact_binding_mismatch")
+            if receipt["staged_manifest_sha256"] != contract["manifest_sha256"]:
+                raise WheelDockerBackendError("wheel_materialization_manifest_binding_mismatch")
+            if receipt["dependency_plan_sha256"] != contract["dependency_plan_sha256"]:
+                raise WheelDockerBackendError("wheel_materialization_dependency_binding_mismatch")
+            expected_coordinate = canonical_sha256({
+                "registry": contract["registry"],
+                "package_name": contract["package_name"],
+                "version": contract["version"],
+            })
+            if receipt["package_coordinate_sha256"] != expected_coordinate:
+                raise WheelDockerBackendError("wheel_materialization_coordinate_binding_mismatch")
+            if receipt["outcome"] != "SUCCEEDED":
+                raise WheelDockerBackendError("wheel_materialization_outcome_failed")
+        except Exception as exc:
+            identity = DockerSessionIdentity(proc.session_id, plan.plan_sha256, plan.image_id,
+                                             proc.daemon_id, proc.container_id)
+            raise WheelDockerOutcomeUnknown("wheel_materialization_receipt_unverified", session=identity,
+                                            phase="RECEIPT", cleanup_state="VERIFIED_ABSENT") from exc
         return ExecutionObservation.success({
             "backend": "wheel-materializing-docker",
             "plan_sha256": plan.plan_sha256,
@@ -133,4 +156,4 @@ class WheelMaterializingDockerExecutor:
         })
 
 
-__all__ = ["MAX_RECEIPT_STDOUT_BYTES", "WheelDockerBackendError", "WheelMaterializingDockerExecutor"]
+__all__ = ["MAX_RECEIPT_STDOUT_BYTES", "WheelDockerBackendError", "WheelDockerOutcomeUnknown", "WheelMaterializingDockerExecutor"]
