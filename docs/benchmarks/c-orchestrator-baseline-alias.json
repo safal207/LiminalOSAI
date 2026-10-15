@@ -1,0 +1,87 @@
+{
+  "schema": "liminal-c-baseline-alias-v1",
+  "reviewed_parent_revision": "bc7cea17d06b527f9af3040f0b042d700d10f9e5",
+  "validation_code_tree_before_evidence": "9566ac9749bb835efd45bd03c6f7c4831500ea3d",
+  "candidate_core_tree_sha": "82a9c2584d58010fa6c60b4da219d3f25215df99",
+  "controller_sha256": "1c6b31c0de3277ebcf887f3b9c4924e830cb8498b510d6b9d0cb17343a3a01b5",
+  "controller_test_sha256": "8c0e36909679c43a621fe57934f3738bc49fd6119435134edf10b1471546098d",
+  "c_build_input_count": 108,
+  "c_build_inputs_match_prior": true,
+  "c_build_input_record": {
+    "path": "docs/benchmarks/c-orchestrator-review-fixes.json",
+    "bytes": 55021,
+    "sha256": "5384f59c75638f33036871f2082b50a3749f44857274e802a61f33f505918d14"
+  },
+  "comparison_case_record": {
+    "path": "docs/benchmarks/c-orchestrator-case-cleanup.json",
+    "bytes": 35634,
+    "sha256": "d3deba9eb6fa96d4e38ec281d8fffc6a2d68a84fc4f8564d7b385d3aebe2e618"
+  },
+  "candidate_binaries": {
+    "pulse_kernel": {
+      "bytes": 167376,
+      "sha256": "1fe464b43cf82082ea915e67048482eb840670c2ea02bddbc479784345affb0f"
+    },
+    "liminal_core": {
+      "bytes": 144376,
+      "sha256": "17eb46eebff689e19b1ce5e9ac62a78b004d777f092f2087928f46e389f91132"
+    }
+  },
+  "profile": "linux-fixed-clock-seeded-no-sleep-v1",
+  "exact_case_count": 42,
+  "exact_cases_match": true,
+  "fresh_candidate_capture": {
+    "bytes": 32738,
+    "sha256": "9672d70c0bfce99d40ceb38f297666e164150499fa45de1e7571d3a14874ea14"
+  },
+  "case_set_sha256": "b510187d6f2eddec650b67fef5107acaeb78ef5e7a00f74fc208dd1bf546e366",
+  "validation": {
+    "command": [
+      "make",
+      "validate",
+      "CC=gcc"
+    ],
+    "python_summary": {
+      "discovered": 1035,
+      "errors": 0,
+      "expected_failures": 0,
+      "failures": 0,
+      "schema": "liminal-python-validation-v1",
+      "skipped": 0,
+      "status": "PASS",
+      "tests_run": 1035,
+      "unexpected_successes": 0
+    },
+    "c_executables": 9,
+    "log": {
+      "bytes": 161590,
+      "sha256": "475e0cef86d0f23594d71c029447f097b44f7484f42e3a07bb61d29da5f4b450"
+    }
+  },
+  "regression_evidence": {
+    "c-baseline-alias-proof.json": {
+      "bytes": 96,
+      "sha256": "b45c0bd2258d081f7562ca697fa2ea014c0ba5f76fa281024e9689500d9d768d"
+    },
+    "c-baseline-alias-red.log": {
+      "bytes": 1001,
+      "sha256": "12c39d6870c1902f635d5fbf659591ae78571ccd9613d140f847d5cf94e886cf"
+    },
+    "c-baseline-alias-green.log": {
+      "bytes": 1280,
+      "sha256": "63dd467d2c9d54f16aa3aec55792909d90208e9f8950af8a1ed5d4209f522177"
+    }
+  },
+  "observed_before_fix": {
+    "same_inode": true,
+    "different_resolved_paths": true,
+    "exit": 1,
+    "baseline_overwritten": true
+  },
+  "limits": [
+    "The alias regression uses real filesystem hard links and a stubbed capture result to check rejection before execution and writes.",
+    "The separate 42-case characterization invokes actual built C binaries under fixed clocks/seeds and no-op sleeps.",
+    "No resource measurements or C architecture changes are introduced by this guard-only correction; historical records stay frozen.",
+    "Published-head CI is separate from this local full validation and must be verified on the final head."
+  ]
+}

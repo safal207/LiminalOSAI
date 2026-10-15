@@ -11,6 +11,8 @@ TARGET  := build/pulse_kernel
 SUBSTRATE_TARGET := build/liminal_core
 
 CORE_SRCS   := core/pulse_kernel.c core/runtime/pulse_kernel_entry.c core/runtime/kernel_context.c \
+               core/runtime/pulse_options.c \
+               core/runtime/pulse_loop.c core/runtime/runtime_trace.c \
                core/runtime/kernel_cli_guard.c \
                core/runtime/kernel_runtime_utils.c core/runtime/kernel_sequence.c core/runtime/kernel_sequence_cli.c \
                core/trs_filter.c core/trs_adapt.c core/erb.c core/astro_sync.c core/consent_gate.c \
@@ -20,6 +22,8 @@ ANTICIPATION_SRCS := anticipation/v2.c
 INTROSPECT_SRCS := src/introspect.c src/harmony.c src/dream_coupler.c
 TUNE_SRCS := tune/autotune.c
 SUBSTRATE_SRCS := core/liminal_substrate.c core/trs_filter.c core/trs_adapt.c core/erb.c core/astro_sync.c core/consent_gate.c \
+                   core/runtime/substrate_options.c \
+                   core/runtime/substrate_state.c core/runtime/runtime_trace.c \
                    core/runtime/kernel_cli_guard.c core/runtime/kernel_runtime_utils.c \
                    core/dream_replay.c core/synaptic_bridge.c core/kiss_cascade.c core/vse.c core/flow_equilibrium.c core/qel.c empathic/field.c memory/emotion_memory.c \
                    memory/soil.c bus/resonant.c council/inner.c coherence/field.c awareness/bridge.c $(AFFINITY_SRCS) $(ANTICIPATION_SRCS)
@@ -52,7 +56,7 @@ LONG_TRACE_JSON := $(LONG_TRACE_DIR)/liminal_core_long_run.json
 # Empty means automatic discovery. A focused local run may supply module names
 # or test paths; validate always uses full discovery independently of this value.
 PYTHON_TESTS ?=
-C_TEST_NAMES := consent_gate collective_memory collective_graph anticipation_v2 kernel_runtime kernel_context qel vse
+C_TEST_NAMES := consent_gate collective_memory collective_graph anticipation_v2 kernel_runtime kernel_context qel vse runtime_boundaries
 C_TEST_BINS := $(addprefix build/tests/test_,$(C_TEST_NAMES))
 C_TEST_OBJS := $(addprefix tests/test_,$(addsuffix .o,$(C_TEST_NAMES)))
 ALL_OBJS += $(C_TEST_OBJS)
@@ -131,6 +135,9 @@ build/tests/test_qel: tests/test_qel.o core/qel.o | build/tests
 
 build/tests/test_vse: tests/test_vse.o core/vse.o | build/tests
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -Wl,--wrap=malloc,--wrap=free,--wrap=rand
+
+build/tests/test_runtime_boundaries: tests/test_runtime_boundaries.o core/runtime/pulse_loop.o core/runtime/substrate_state.o core/runtime/runtime_trace.o core/runtime/pulse_options.o core/runtime/substrate_options.o synchrony/weave.o affinity/core.o core/erb.o memory/soil.o | build/tests
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 test-c: $(C_TEST_BINS)
 ifeq ($(OS),Windows_NT)

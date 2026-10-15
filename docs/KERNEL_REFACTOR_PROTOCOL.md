@@ -4,7 +4,17 @@ LiminalOSAI contains a large C11 runtime with many interacting modules. Kernel d
 
 ## Current baseline
 
-The repository now has tested runtime-contract primitives for strict numeric parsing, safe delay scaling, canonical stage ordering, and deterministic trace parsing. Those primitives are not yet wired into `core/pulse_kernel.c`; the monolith remains the production source of truth until an explicit characterization-backed wiring change lands.
+The production entrypoints use the shared numeric argument guard. Semantic
+parsers and their option schemas now live in `core/runtime/pulse_options.*` and
+`core/runtime/substrate_options.*`, with the original bodies removed from the
+orchestrators. The actual pulse scheduler, caller-owned substrate transitions
+and selected trace writers are also extracted and linked into production.
+
+This is a behavior-preserving relocation, rather than a complete semantic
+parser migration or a fully reentrant `KernelContext` conversion. Characterized
+legacy semantics, including ignored unknown options, remain explicit exceptions
+until a dedicated migration changes their tests and compatibility contract.
+See [C orchestrator boundaries](C_ORCHESTRATOR_BOUNDARIES.md).
 
 ## Non-negotiable rules
 
