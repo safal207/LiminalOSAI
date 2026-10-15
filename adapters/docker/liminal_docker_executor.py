@@ -111,8 +111,6 @@ def build_docker_argv(
     if container_name is not None:
         out += ["--name", _validate_container_name(container_name)]
     out += [
-        "--entrypoint", entrypoint,
-        "--log-driver", "none",
         "--network", p.network_mode,
         "--read-only",
         "--cap-drop", "ALL",
@@ -124,6 +122,8 @@ def build_docker_argv(
         "--tmpfs", p.tmpfs,
         "--workdir", "/workspace",
         "--mount", f"type=bind,src={plan.host_workspace},dst=/workspace,readonly",
+        "--entrypoint", entrypoint,
+        "--log-driver", "none",
         plan.image_id,
         *plan.argv,
     ]

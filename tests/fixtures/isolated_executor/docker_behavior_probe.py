@@ -42,7 +42,6 @@ DOCKERFILE = '''ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 USER root
 RUN mkdir /liminal-writable && chmod 0777 /liminal-writable
-WORKDIR /workspace
 USER 65534:65534
 ENTRYPOINT ["python3", "-c", "raise SystemExit(73)"]
 '''

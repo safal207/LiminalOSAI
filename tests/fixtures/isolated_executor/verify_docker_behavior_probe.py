@@ -113,10 +113,11 @@ def verify_case(case, name, variant, report, worker):
         require(option(strict, key) == value, "strict builder protection missing " + key)
     require(strict.count("--read-only") == 1 and "no-new-privileges:true" in strict, "strict root/capability protection missing")
     exact_strict = ["docker", "run", "--rm", "--name", session,
-        "--entrypoint", "", "--log-driver", "none", "--network", "none", "--read-only",
+        "--network", "none", "--read-only",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--user", "65534:65534",
         "--pids-limit", "64", "--memory", "256m", "--cpus", "1.0", "--tmpfs", PROFILE["tmpfs"],
         "--workdir", "/workspace", "--mount", "type=bind,src=" + workspace + ",dst=/workspace,readonly",
+        "--entrypoint", "", "--log-driver", "none",
         report["image_id"], *expected_command]
     require(strict == exact_strict, "generic strict builder has extra or missing arguments")
     launch = expected_control(strict, name, report["network_lab"]["name"]) if relaxed else list(strict)
