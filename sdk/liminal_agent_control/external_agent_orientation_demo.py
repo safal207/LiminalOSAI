@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any
@@ -67,6 +68,36 @@ def _orientation_snapshot(path: Path) -> dict[str, Any]:
                   for name in ORIENTATION_TABLES}
     return {"observation": "actual readonly parent orientation SQLite inventory",
             "tables": tables, "observed_at": time.time()}
+
+
+def _write_failure_diagnostics(error: BaseException, case: dict | None) -> None:
+    """Preserve bounded public lifecycle facts without inventing a report PASS."""
+    current = {} if case is None else case.get("last_inventory", {})
+    grants = [{key: item.get(key) for key in ("action_id", "status", "reservation_id", "callback_phase", "callback_result")}
+              for item in current.get("grants", [])[:8]]
+    # Grant state embeds the action; retain its exact public action identifier.
+    for item, raw in zip(grants, current.get("grants", [])[:8]):
+        item["action_id"] = raw.get("action", {}).get("action_id")
+    packet = {"schema": "liminal-external-agent-orientation-failure-v1", "status": "FAIL",
+        "source": _source(), "exception_type": type(error).__name__, "reason": str(error)[:1000],
+        "case_id": None if case is None else case["name"],
+        "lifecycle_results": {} if case is None else case.get("lifecycle_results", {}),
+        "last_reconcile_create": None if case is None else case.get("last_reconcile_create"),
+        "commands": [{key: item.get(key) for key in ("command_id", "container_id", "create_confirmed", "closing", "cleanup_complete")}
+                     for item in current.get("commands", [])[:4]],
+        "grant_callbacks": grants, "actual_docker_calls": current.get("docker_calls", [])[:8],
+        "coordinator_state": current.get("coordinator", {}).get("state", {}).get("state"),
+        "bridge": {key: current.get("bridge", {}).get(key) for key in
+                   ("bridge_status", "callback_finished", "fenced", "outstanding_effect_calls")},
+        "observation": "actual owned host public snapshot before failure cleanup; no Docker PASS or terminal inference",
+        "execution_authorized": False}
+    destination = os.environ.get("LIMINAL_EXTERNAL_AGENT_ORIENTATION_EVIDENCE")
+    if destination:
+        path = Path(destination).with_name("failure.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(path, packet)
+    print(json.dumps({key: packet[key] for key in ("schema", "status", "source", "case_id", "reason", "lifecycle_results", "last_reconcile_create")},
+                     sort_keys=True, allow_nan=False), file=sys.stderr, flush=True)
 
 
 def _prepare_transition(context: dict, action: dict, *, revision: int, edge_id: str) -> None:
@@ -282,6 +313,7 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                 pairs("effect", current["gateway"]["authority_evidence"])
                 pairs("endpoint", [pair for pair in current["gateway"]["endpoint_evidence"]
                                    if pair["request"]["role"] == "gateway"])
+            case["last_inventory"] = deepcopy(current)
             return current
 
         def wait_inventory(case: dict, predicate: Any, *, include_gateway: bool = True) -> dict:
@@ -292,6 +324,28 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                     return current
                 time.sleep(0.03)
             raise ControlError("AGENT_ORIENTATION_RUNTIME_CASE_TIMEOUT:" + case["name"])
+
+        def wait_created(case: dict, action_id: str) -> tuple[dict, dict]:
+            # A completed CREATE callback is not positive daemon observation.
+            # The supervisor's query-only reconciliation performs that actual
+            # inspect/configuration check and persists create_confirmed.
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                observed = case["host"].call("reconcile_command", action_id=action_id)
+                case["last_reconcile_create"] = deepcopy(observed)
+                current = host_inventory(case)
+                if current["commands"] and current["commands"][0]["create_confirmed"]:
+                    return current, observed
+                if observed.get("status") in {"DENIED", "ERROR"}:
+                    raise ControlError("AGENT_ORIENTATION_RUNTIME_CREATE_RECONCILE_REJECTED:" + observed.get("reason", ""))
+                for grant in current["grants"]:
+                    callback = grant.get("callback_result")
+                    if (grant["action"]["action_id"] == action_id and grant["callback_phase"] == "FINISHED"
+                            and type(callback) is dict and (callback.get("error") is not None
+                                or callback.get("returncode") not in (None, 0))):
+                        raise ControlError("AGENT_ORIENTATION_RUNTIME_CREATE_CALLBACK_FAILED:" + str(callback.get("error") or callback.get("returncode")))
+                time.sleep(0.03)
+            raise ControlError("AGENT_ORIENTATION_RUNTIME_CREATE_NOT_CONFIRMED:" + case["name"])
 
         def docker_snapshot(container_id: str, *, configuration: bool = False) -> dict:
             answer = docker.command(["inspect", container_id])
@@ -406,6 +460,7 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                 orientation_before = _orientation_snapshot(directory / "orientation.sqlite")
                 supervisor_before = host_inventory(case)
                 lifecycle_actions, lifecycle_grants, results = {}, {}, {}
+                case["lifecycle_results"] = results
                 for stage in ("CREATE", "START"):
                     options = {}
                     if stage == "START":
@@ -420,8 +475,11 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                         raise ControlError("AGENT_ORIENTATION_RUNTIME_LIFECYCLE_AUTHORIZATION_FAILED")
                     lifecycle_actions[stage.lower()], lifecycle_grants[stage.lower()] = action, grant
                     results[stage.lower()] = case["host"].call("launch", action=action)
+                    if results[stage.lower()].get("status") in {"DENIED", "ERROR"}:
+                        host_inventory(case)
+                        raise ControlError("AGENT_ORIENTATION_RUNTIME_LIFECYCLE_REJECTED:" + stage + ":" + results[stage.lower()].get("reason", ""))
                     if stage == "CREATE":
-                        current = wait_inventory(case, lambda value: value["commands"] and value["commands"][0]["create_confirmed"])
+                        current, results["reconcile_create"] = wait_created(case, action["action_id"])
                         case["container_id"] = current["commands"][0]["container_id"]
                         owned_ids.add(case["container_id"])
                         configuration_observation = docker_snapshot(case["container_id"], configuration=True)
@@ -506,6 +564,9 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                 live_hosts.remove(case)
             checkpoints = {branch: authority_call(branch, "admin", "checkpoints") for branch in ("command", "effect")}
             final_endpoint = endpoint_snapshot()
+        except BaseException as error:
+            _write_failure_diagnostics(error, live_hosts[-1] if live_hosts else None)
+            raise
         finally:
             cleanup_error = None
             for case in live_hosts:
