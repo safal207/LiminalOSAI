@@ -181,19 +181,29 @@ def verify_case(case, name, variant, report, worker):
         require(output.get("connected") is relaxed and output.get("response") == (TOKEN if relaxed else None)
                 and output.get("errno") == (None if relaxed else 101), "network behavior/control sensitivity failed")
         if relaxed:
-            endpoint = terminal.get("NetworkSettings", {}).get("Networks", {}).get(report["network_lab"]["name"], {})
-            # Exited endpoint IP may already be released; actual create config and successful token bind destination.
-            require(isinstance(endpoint, dict), "network endpoint observation missing")
+            networks = terminal.get("NetworkSettings", {}).get("Networks")
+            name = report["network_lab"]["name"]
+            require(isinstance(networks, dict) and set(networks) == {name}, "network endpoint membership missing or unexpected")
+            endpoint = networks[name]
+            # The exited endpoint IP is released; Docker retains its owning NetworkID.
+            require(isinstance(endpoint, dict) and endpoint.get("NetworkID") == report["network_create"],
+                    "network endpoint does not belong to the owned control network")
     elif name == "seccomp":
         require(type(output.get("seccomp")) is int and output["seccomp"] == (0 if relaxed else 2), "seccomp process mode/control sensitivity failed")
     elif name in {"entrypoint", "logging"}:
         require(output.get("marker") == "liminal-attached-stdout-v1", "attached stdout was lost")
     if name == "logging":
-        logs = case.get("docker_logs", {})
+        logs = case.get("docker_logs")
+        require(isinstance(logs, dict) and set(logs) == {"returncode", "stdout", "stderr"}
+                and type(logs["returncode"]) is int and isinstance(logs["stdout"], str)
+                and isinstance(logs["stderr"], str), "Docker logs result is incomplete or malformed")
         if relaxed:
-            require(logs.get("returncode") == 0 and logs.get("stdout") == case["stdout"], "log-retaining control is insensitive")
+            require(logs["returncode"] == 0 and logs["stdout"] == case["stdout"] and logs["stderr"] == "",
+                    "log-retaining control is insensitive or failed")
         else:
-            require(logs.get("stdout") == "", "none-driver unexpectedly retained readable daemon output")
+            require(logs["returncode"] == 1 and logs["stdout"] == ""
+                    and logs["stderr"].strip() == "Error response from daemon: configured logging driver does not support reading",
+                    "none-driver read denial is unobserved or an unrelated Docker error")
     return cid
 
 

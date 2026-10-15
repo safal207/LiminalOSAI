@@ -194,7 +194,51 @@ policy, arbitrary outbound-network isolation, or kernel exploit resistance.
 
 The direct process-tree adapter rereads the actual tree after pause and rejects
 running nodes or changed lineage. The public containment supervisor retains its
-own independent post-action snapshot and comparison.
+own independent post-action snapshot and comparison. A successful pause followed
+by an unreadable or changed tree is an incomplete freeze, even though the
+container may already be paused. The adapter attempts verified removal of the
+same immutable container on the pinned daemon and still raises the original
+freeze failure. Failed removal leaves recovery unresolved; that attempt cannot
+produce a containment receipt. No recovery path unpauses the workload.
+
+A later retry can attest an already-frozen tree without issuing a duplicate
+pause. After verified removal, a fresh daemon-identity check can reuse the prior
+verified absence of that immutable container to attest all previously observed
+processes as terminated. This terminal path does not repeat container inspection;
+it allows the supervisor to complete its normal freeze/quiesce protocol with
+zero live processes. A missing child in
+one live process-table read is not by itself proof of termination. Cleanup does
+not refund authority, erase the earlier failure, or prove that no effect occurred.
+
+### Causal graph across state, evidence and time
+
+| Space | Bound state | Required link |
+| --- | --- | --- |
+| Intent | Contain one authorized execution session | Session, daemon and immutable container identity |
+| Project | Adapter action and supervisor receipt | Actual observation hashes and unchanged lineage checks |
+| Runtime | Running, paused or absent container | Fresh live observations; terminal history requires verified removal and a current daemon binding |
+| Time | Before action, after action, recovery, retry | Each conclusion uses observations from that transition |
+
+```mermaid
+flowchart TD
+    A["t0: bound running tree"] -->|"pause exact container"| B["t1: pause acknowledged"]
+    B -->|"fresh observation matches"| C["t2: frozen tree attested"]
+    C -->|"supervisor verifies and terminates"| D["absence verified"]
+    B -->|"read fails or lineage changes"| E["t2: freeze result unknown"]
+    E -->|"remove same pinned container"| F{"absence verified?"}
+    F -->|"no"| G["error; no receipt"]
+    F -->|"yes"| H["original error retained; terminated history"]
+    H -->|"t3: verify same daemon; reuse absence proof"| I["zero-live freeze and quiesce"]
+    I --> D
+```
+
+The graph separates physical state from what the observer can establish. An
+unavailable Docker daemon cannot be interpreted as an absent container; likewise
+a failed log query cannot establish disabled log retention, and a missing network
+endpoint cannot establish membership in the owned control network. These are
+evidence failures at distinct edges, not interchangeable passing checks. A valid
+receipt establishes the bounded observed transition, not future immunity to
+container-runtime or kernel vulnerabilities.
 
 ## Explicit nonclaims
 

@@ -77,6 +77,8 @@ def fixture():
             exited = copy.deepcopy(inspect)
             exit_code = 73 if relaxed and name == "entrypoint" else 0
             exited["State"].update(Status="exited", Running=False, ExitCode=exit_code)
+            if name == "network" and relaxed:
+                exited["NetworkSettings"] = {"Networks": {NETWORK: {"NetworkID": report["network_create"], "IPAddress": ""}}}
             output = {"uid": 65534, "mode": name}
             if name in {"root_write", "workspace_write"}:
                 output.update(written=relaxed, errno=None if relaxed else 30)
@@ -95,7 +97,8 @@ def fixture():
                 "returncode": exit_code, "stdout": stdout,
                 "absence": {"returncode": 1, "stderr": "Error: No such container: " + cid, "stdout": ""}}
             if name == "logging":
-                case["docker_logs"] = {"returncode": 0 if relaxed else 1, "stdout": stdout if relaxed else "", "stderr": ""}
+                case["docker_logs"] = {"returncode": 0 if relaxed else 1, "stdout": stdout if relaxed else "",
+                    "stderr": "" if relaxed else "Error response from daemon: configured logging driver does not support reading\n"}
             report["cases"][name][variant] = case
             report["cleanup"]["workloads"].append({"container_id": cid, "absence_returncode": 1, "absence_stderr": "No such container"})
     return report
@@ -188,6 +191,41 @@ class DockerBehaviorEvidenceTests(unittest.TestCase):
         report["network_lab"]["server"]["Name"] = "/unrelated-server"
         with self.assertRaisesRegex(ValueError, "server name mismatch"):
             self.verify(report)
+
+    def test_rejects_missing_or_conflicting_terminal_network_membership(self):
+        for mutation in ("settings-missing", "network-missing", "wrong-network-id", "extra-network"):
+            with self.subTest(mutation=mutation):
+                report = fixture()
+                terminal = report["cases"]["network"]["control"]["exited"]
+                if mutation == "settings-missing":
+                    terminal.pop("NetworkSettings")
+                elif mutation == "network-missing":
+                    terminal["NetworkSettings"]["Networks"] = {}
+                elif mutation == "wrong-network-id":
+                    terminal["NetworkSettings"]["Networks"][NETWORK]["NetworkID"] = "0" * 64
+                else:
+                    terminal["NetworkSettings"]["Networks"]["unrelated-network"] = {"NetworkID": "0" * 64}
+                with self.assertRaisesRegex(ValueError, "network endpoint"):
+                    self.verify(report)
+
+    def test_rejects_incomplete_or_unrelated_docker_logs_results(self):
+        for mutation in ("result-missing", "daemon-unavailable", "boolean-rc", "unexpected-success", "control-stderr"):
+            with self.subTest(mutation=mutation):
+                report = fixture()
+                strict = report["cases"]["logging"]["strict"]
+                if mutation == "result-missing":
+                    strict["docker_logs"] = {"stdout": ""}
+                elif mutation == "daemon-unavailable":
+                    strict["docker_logs"]["stderr"] = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+                elif mutation == "boolean-rc":
+                    strict["docker_logs"]["returncode"] = True
+                elif mutation == "unexpected-success":
+                    strict["docker_logs"]["returncode"] = 0
+                    strict["docker_logs"]["stderr"] = ""
+                else:
+                    report["cases"]["logging"]["control"]["docker_logs"]["stderr"] = "Error response from daemon: unrelated error"
+                with self.assertRaises(ValueError):
+                    self.verify(report)
 
     def test_rejects_missing_actual_config_and_captured_stdout(self):
         for mutation in ("root", "entrypoint", "logs", "stdout", "source-omission", "privileged", "incomplete", "extra-argv"):
