@@ -509,12 +509,21 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
                     time.sleep(0.03)
                 else:
                     raise ControlError("AGENT_ORIENTATION_RUNTIME_FINAL_STOP_NOT_CONFIRMED")
-                results["final_stop"] = result
+                # A live watcher may persist a newer signed status snapshot
+                # after this RPC returns. Preserve this actual earlier fact,
+                # but bind final evidence only after the watcher has joined.
+                results["pre_freeze_reconcile_result"] = deepcopy(result)
                 frozen = case["host"].call("freeze_orientation_probe")
                 if frozen.get("status") != "FIXTURE_FROZEN":
                     raise ControlError("AGENT_ORIENTATION_RUNTIME_CAPTURE_NOT_FROZEN:" + frozen.get("reason", ""))
                 results["capture_freeze"] = frozen
                 final = host_inventory(case)
+                aggregate = final["coordinator"]["state"]["aggregate"]
+                if (final["coordinator"]["watcher_alive"] is not False
+                        or type(aggregate) is not dict
+                        or aggregate.get("status") != ("STOP_PENDING" if name == "stop_after_begin" else "STOPPED")):
+                    raise ControlError("AGENT_ORIENTATION_RUNTIME_FROZEN_AGGREGATE_INVALID")
+                results["final_stop"] = deepcopy(aggregate)
                 after = endpoint_snapshot()
                 orientation_after = _orientation_snapshot(directory / "orientation.sqlite")
                 command_state = authority_call("command", "admin", "status", root_id=command_root)
