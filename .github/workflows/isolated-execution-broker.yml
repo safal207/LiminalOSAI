@@ -13,6 +13,9 @@ on:
       - 'tests/test_isolated_execution_broker.py'
       - 'tests/test_docker_adapter_lifecycle.py'
       - 'tests/test_docker_failure_evidence.py'
+      - 'tests/test_docker_profile_hardening.py'
+      - 'tests/test_docker_behavior_evidence.py'
+      - 'tests/test_isolated_execution_workspace_paths.py'
       - 'tests/test_uncertain_effect_outcomes.py'
       - 'tests/test_process_tree_active_containment.py'
       - 'tests/fixtures/isolated_executor/**'
@@ -33,7 +36,7 @@ jobs:
           persist-credentials: false
 
       - name: Run isolated execution broker tests
-        run: python3 -m unittest tests/test_isolated_execution_broker.py -v
+        run: python3 scripts/run_python_tests.py tests.test_isolated_execution_broker tests.test_isolated_execution_workspace_paths tests.test_docker_profile_hardening tests.test_docker_behavior_evidence
 
       - name: Check bounded lifecycle failures and uncertainty propagation
         run: python3 -m unittest tests.test_docker_adapter_lifecycle tests.test_docker_failure_evidence tests.test_uncertain_effect_outcomes -v
@@ -89,6 +92,27 @@ jobs:
       - name: Run real container isolation negative probes
         run: python3 adapters/docker/liminal_docker_executor.py --self-test "$IMAGE_ID" "$GITHUB_WORKSPACE"
 
+      - name: Exercise actual behavior and deliberately weakened controls
+        run: |
+          WORKER_IMAGE=python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+          docker pull --platform linux/amd64 "$WORKER_IMAGE"
+          BEHAVIOR_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$WORKER_IMAGE")
+          REVISION=$(git rev-parse HEAD)
+          python3 tests/fixtures/isolated_executor/docker_behavior_probe.py \
+            --image "$BEHAVIOR_IMAGE_ID" --revision "$REVISION" \
+            --output "$RUNNER_TEMP/docker-behavior-evidence/report.json"
+          python3 tests/fixtures/isolated_executor/verify_docker_behavior_probe.py \
+            "$RUNNER_TEMP/docker-behavior-evidence/report.json" --revision "$REVISION" --base-image "$BEHAVIOR_IMAGE_ID" \
+            > "$RUNNER_TEMP/docker-behavior-evidence/verification.json"
+
+      - name: Upload behavior and negative-control evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: docker-broker-behavior-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/docker-behavior-evidence/
+          if-no-files-found: error
+
       - name: Run governed container execution end to end
         run: |
           python3 - <<'PY'
@@ -102,6 +126,7 @@ jobs:
           P = 'a' * 64
           scope = {
               'executables': ['/bin/true'],
+              'images': [os.environ['IMAGE_ID']],
               'working_directory': '/workspace',
               'argument_profile': 'isolated_ci_fixture',
           }

@@ -85,8 +85,11 @@ if args[0] == "inspect":
         sys.stderr.write("Error: No such container: " + reference)
         sys.exit(1)
     obj = json.loads(path.read_text())
+    if obj.get("paused") and behavior.get("paused_inspect_fails"):
+        sys.stderr.write("synthetic post-pause observation failure")
+        sys.exit(1)
     if "{{.State.Pid}}" in " ".join(args):
-        print("123 true false")
+        print("123 " + str(obj["running"]).lower() + " " + str(obj.get("paused", False)).lower())
     else:
         print(json.dumps(obj))
     sys.exit(0)
@@ -97,9 +100,18 @@ if args[0] == "rm":
     path.unlink(missing_ok=True)
     sys.exit(0)
 if args[0] == "top":
-    print("UID PID PPID CMD\nroot 123 1 fixture")
+    obj = json.loads(path.read_text())
+    rows = "UID PID PPID CMD\nroot 123 1 fixture"
+    if behavior.get("tree_child"):
+        child_pid = behavior.get("paused_child_pid", 124) if obj.get("paused") else 124
+        rows += "\nroot " + str(child_pid) + " 123 child"
+    print(rows)
     sys.exit(0)
 if args[0] == "pause":
+    if not behavior.get("pause_noop"):
+        obj = json.loads(path.read_text())
+        obj["paused"] = True
+        path.write_text(json.dumps(obj))
     sys.exit(0)
 if args[0] == "start":
     if not path.exists():
@@ -347,6 +359,45 @@ class DockerAdapterLifecycleTests(unittest.TestCase):
         self.assertTrue(actions)
         self.assertTrue(all(call[-1] == identity.container_id for call in actions))
 
+    def test_freeze_binds_action_to_fresh_observed_frozen_tree(self):
+        self.configure(tree_child=True)
+        identity, _ = self.owned_object()
+        backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+        before = backend.snapshot(identity.session_id)
+        action = backend.freeze(identity.session_id)
+        after = backend.snapshot(identity.session_id)
+        self.assertEqual(len(before["nodes"]), 2)
+        self.assertTrue(all(node["state"] == "running" for node in before["nodes"]))
+        self.assertTrue(all(node["state"] == "frozen" for node in after["nodes"]))
+        self.assertEqual(action["result_tree_sha256"], after["tree_sha256"])
+        self.assertEqual(action["affected_count"], 2)
+        pause_index = next(i for i, call in enumerate(self.calls()) if call[0] == "pause")
+        self.assertTrue(any(call[0] == "top" for call in self.calls()[pause_index + 1:]))
+
+    def test_pause_exit_zero_without_frozen_observation_is_not_freeze_success(self):
+        self.configure(pause_noop=True)
+        identity, _ = self.owned_object()
+        backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+        with self.assertRaisesRegex(DockerExecutionError, "not observed frozen"):
+            backend.freeze(identity.session_id)
+        self.assertEqual(backend.snapshot(identity.session_id)["nodes"][0]["state"], "running")
+
+    def test_post_pause_observation_failure_is_not_freeze_success(self):
+        self.configure(paused_inspect_fails=True)
+        identity, _ = self.owned_object()
+        backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+        with self.assertRaises(DockerExecutionError):
+            backend.freeze(identity.session_id)
+        self.assertTrue(json.loads((self.root / "objects" / identity.container_id).read_text())["paused"])
+        self.assertFalse(any(call[0] == "rm" for call in self.calls()))
+
+    def test_post_pause_changed_process_lineage_is_not_freeze_success(self):
+        self.configure(tree_child=True, paused_child_pid=125)
+        identity, _ = self.owned_object()
+        backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+        with self.assertRaisesRegex(DockerExecutionError, "lineage changed"):
+            backend.freeze(identity.session_id)
+
     def test_verified_removal_rejects_mutable_names_and_short_ids_before_cli(self):
         identity, _ = self.owned_object()
         (self.root / "objects" / identity.container_id).unlink()
@@ -364,16 +415,17 @@ class DockerAdapterLifecycleTests(unittest.TestCase):
         from sdk.liminal_post_sandbox_contracts import CapabilityContract
         from sdk.liminal_runtime_mediation import RuntimeMediator
         from tests.test_isolated_execution_broker import operation, P, SCOPE
+        plan = self.plan()
+        scope = {**SCOPE, "images": [plan.image_id]}
         capability = CapabilityContract.build(
             capability_id="cap:uncertain", capability_type="process.execute", subject_id="agent:a",
-            issuer_id="human:owner", scope=SCOPE, issued_at_unix=10, not_before_unix=10,
+            issuer_id="human:owner", scope=scope, issued_at_unix=10, not_before_unix=10,
             expires_at_unix=500, max_uses=1, delegable=False, parent_capability_id=None, policy_sha256=P)
         broker = CapabilityBroker("broker:uncertain")
         broker.admit(capability.as_document(), at_unix=20)
         isolated = IsolatedExecutionBroker(mediator=RuntimeMediator(broker=broker),
                                           backend=DockerExecutor(str(self.binary)))
-        plan = self.plan()
-        op = operation(plan, operation_id=plan.operation_id)
+        op = operation(plan, operation_id=plan.operation_id, scope=scope)
         self.configure(client_crash=True, removal_fails=True)
         receipt = isolated.execute(operation=op, plan=plan)
         verify_receipt(receipt)

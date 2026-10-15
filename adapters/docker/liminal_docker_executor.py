@@ -96,13 +96,23 @@ def build_docker_argv(
     *,
     docker_binary: str = "docker",
     container_name: str | None = None,
+    entrypoint: str = "",
 ) -> list[str]:
+    """Build a trusted launch; an empty entrypoint executes the exact plan argv.
+
+    Fixed host-owned worker profiles may explicitly supply their interpreter.
+    This override is adapter configuration, never model-supplied plan data.
+    """
     plan.validate()
+    if not isinstance(entrypoint, str) or "\x00" in entrypoint:
+        raise DockerExecutionError("invalid trusted entrypoint override")
     p = plan.profile
     out = [docker_binary, "run", "--rm"]
     if container_name is not None:
         out += ["--name", _validate_container_name(container_name)]
     out += [
+        "--entrypoint", entrypoint,
+        "--log-driver", "none",
         "--network", p.network_mode,
         "--read-only",
         "--cap-drop", "ALL",
@@ -180,8 +190,20 @@ class DockerProcessTreeBackend:
         self._require_daemon()
         if proc.returncode != 0:
             raise DockerExecutionError("docker pause failed for governed execution session")
-        frozen_nodes = [dict(node, state="frozen") for node in before["nodes"]]
-        return self._action("freeze", live_count, frozen_nodes)
+        after = self.snapshot(session_id)
+        lineage = lambda nodes: {
+            node["process_id"]: (node["parent_process_id"], node["identity_sha256"])
+            for node in nodes
+        }
+        if (before["root_process_id"] != after["root_process_id"]
+                or lineage(before["nodes"]) != lineage(after["nodes"])):
+            raise DockerExecutionError("trusted process lineage changed during freeze")
+        after_states = {node["process_id"]: node["state"] for node in after["nodes"]}
+        if any(after_states[node["process_id"]] !=
+               ("terminated" if node["state"] == "terminated" else "frozen")
+               for node in before["nodes"]):
+            raise DockerExecutionError("governed execution session was not observed frozen")
+        return self._action("freeze", live_count, after["nodes"])
 
     def terminate(self, session_id: str) -> dict[str, Any]:
         self._require_session(session_id)

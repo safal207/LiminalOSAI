@@ -428,6 +428,7 @@ class PackageInstallBroker:
                 kind="process.execute",
                 scope={
                     "executables": [INSTALLER_EXECUTABLE],
+                    "images": [binding.installer_image_id],
                     "working_directory": "/workspace",
                     "argument_profile": ARGUMENT_PROFILE,
                 },

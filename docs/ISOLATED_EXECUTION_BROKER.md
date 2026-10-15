@@ -21,6 +21,8 @@ process.execute request
 
 The trusted Docker adapter launches a validated immutable image ID with:
 
+- an explicitly cleared image ENTRYPOINT, so the exact plan argv is executed;
+- `--log-driver none`, preventing workload log retention by the daemon;
 - `--network none`
 - `--read-only`
 - `--cap-drop ALL`
@@ -49,14 +51,34 @@ The runtime operation's `payload_sha256` must equal the digest derived from the 
 ```text
 immutable image ID
 + argv digest
-+ host workspace digest
++ host workspace path-string digest
 + timeout
 + isolation profile digest
 → plan_sha256
 → payload_sha256
 ```
 
-Changing image, arguments, workspace or isolation profile after authorization therefore invalidates the execution request before backend dispatch.
+Changing the image ID, arguments, workspace **path string** or isolation profile
+after authorization invalidates the execution request before backend dispatch.
+The legacy field `host_workspace_sha256` hashes the canonical path string. It
+does **not** hash directory contents, resolve filesystem aliases or bind an
+immutable filesystem snapshot. Files or symlink targets can change without
+changing this digest. This generic profile requires a trusted host writer and a
+stable workspace throughout authorization and execution. A one-time `realpath`
+or tree hash alone would still leave a check/use race; adversarial host writers
+require a separately governed immutable staging/snapshot design.
+
+Container operations also require `scope.images`, a nonempty allow-list of
+immutable image IDs. The requested image list must be a subset of the actual
+grant, and the plan image must occur in the requested list. A payload digest
+cannot supply this authorization. Existing image-less container grants fail
+closed and must be reissued with explicit image scope. Generic noncontainer
+`process.execute` operations keep their existing scope contract.
+
+Fixed G03 worker profiles explicitly select their trusted `python3` ENTRYPOINT;
+their argv consists of interpreter arguments. Their effective ENTRYPOINT and
+daemon log configuration remain independently checked. This profile-specific
+configuration is never a model-controlled plan field.
 
 ## Output boundary
 
@@ -156,6 +178,23 @@ The isolation CI workflow builds a minimal fixture image and checks that the con
 6. only the loopback network interface under `network=none`.
 
 These are observations of runtime configuration, not live outbound-network or filesystem-write attempts.
+
+The separate `docker_behavior_probe.py` campaign exercises actual bounded
+behavior, with an intentionally weakened control for each of six checks:
+inherited ENTRYPOINT, daemon logging, root-filesystem writes, workspace writes,
+TCP to a disposable internal-network listener, and active seccomp filtering.
+The independent verifier checks raw argv, immutable image lineage, container
+inspection, attached output, exit state and cleanup. The `none` logging case
+also requires attached stdout to remain readable. Weakened argv mutations are
+diagnostic controls in this disposable campaign. The production builder exposes
+no model-controlled weakening options; trusted adapter authority remains part
+of the security boundary.
+This does not establish PID/memory exhaustion resistance, the exact seccomp
+policy, arbitrary outbound-network isolation, or kernel exploit resistance.
+
+The direct process-tree adapter rereads the actual tree after pause and rejects
+running nodes or changed lineage. The public containment supervisor retains its
+own independent post-action snapshot and comparison.
 
 ## Explicit nonclaims
 

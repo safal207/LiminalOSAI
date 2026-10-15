@@ -130,6 +130,7 @@ def main() -> int:
             scope={
                 "argument_profile": ARGUMENT_PROFILE,
                 "executables": [INSTALLER_EXECUTABLE],
+                "images": [args.image_id],
                 "working_directory": "/workspace",
             },
             issued_at_unix=100,

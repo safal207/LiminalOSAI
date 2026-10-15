@@ -1026,10 +1026,9 @@ def _run_matched_arm(arm: str, *, image: str, broker_db_path: str | Path, receiv
         bridge.observer_required = True
         bridge.observer = lambda: controller.inspect_session(session_id)
         try:
-            argv = build_docker_argv(plan, docker_binary=docker_binary, container_name=session_id)
+            argv = build_docker_argv(plan, docker_binary=docker_binary, container_name=session_id, entrypoint="python3")
             argv[1:3] = ["create", "--interactive"]
             image_index = argv.index(image)
-            argv[image_index:image_index] = ["--entrypoint", "python3", "--log-driver", "none"]
             for key, value in ownership_labels(record).items():
                 image_index = argv.index(image)
                 argv[image_index:image_index] = ["--label", f"{key}={value}"]
@@ -1186,10 +1185,9 @@ def _run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int,
         registered = True
         report["registered_before_start"] = True
         try:
-            argv = build_docker_argv(plan, docker_binary=docker_binary, container_name=session_id)
+            argv = build_docker_argv(plan, docker_binary=docker_binary, container_name=session_id, entrypoint="python3")
             argv[1:3] = ["create", "--interactive"]  # Retain stopped container for host observation.
             image_index = argv.index(image)
-            argv[image_index:image_index] = ["--entrypoint", "python3", "--log-driver", "none"]
             for key, value in ownership_labels(record).items():
                 image_index = argv.index(image)
                 argv[image_index:image_index] = ["--label", f"{key}={value}"]

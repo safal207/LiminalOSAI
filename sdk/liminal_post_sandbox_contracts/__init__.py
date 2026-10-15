@@ -75,6 +75,7 @@ AUTHORITY = {
 
 _IDENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,191}$")
 _SHA = re.compile(r"^[0-9a-f]{64}$")
+_IMAGE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _DOMAIN = re.compile(r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$")
 
@@ -158,7 +159,7 @@ def validate_scope(capability_type: str, value: Any) -> dict[str, Any]:
     allowed_by_type = {
         "repository.read": {"repository", "refs", "paths"},
         "repository.write": {"repository", "refs", "paths"},
-        "process.execute": {"executables", "working_directory", "argument_profile"},
+        "process.execute": {"executables", "working_directory", "argument_profile", "images"},
         "package.install": {"registries", "packages"},
         "network.open": {"protocols"},
         "network.connect_domain": {"domains", "protocols", "ports"},
@@ -180,6 +181,13 @@ def validate_scope(capability_type: str, value: Any) -> dict[str, Any]:
             if not _REPO.fullmatch(repo):
                 raise ContractError("scope.repository must use owner/name form")
             result[key] = repo
+        elif key == "images":
+            if not isinstance(item, list) or not item:
+                raise ContractError("scope.images must be a non-empty array")
+            images = [_string(image, "scope.images[]") for image in item]
+            if len(images) != len(set(images)) or any(not _IMAGE.fullmatch(image) for image in images):
+                raise ContractError("scope.images must contain unique immutable sha256 image IDs")
+            result[key] = sorted(images)
         elif key == "domains":
             if not isinstance(item, list) or not item:
                 raise ContractError("scope.domains must be a non-empty array")

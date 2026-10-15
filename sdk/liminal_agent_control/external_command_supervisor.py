@@ -412,10 +412,10 @@ class ExternalCommandSupervisor:
     def _create_argv(self, command: dict) -> list[str]:
         plan = self._plan(command["spec"])
         argv = build_docker_argv(plan, docker_binary=self.controller.docker_binary,
-                                container_name=command["registry_record"]["session_id"])
+                                container_name=command["registry_record"]["session_id"], entrypoint="python3")
         argv[1:3] = ["create", "--interactive"]
         index = argv.index(plan.image_id)
-        extra = ["--entrypoint", "python3", "--log-driver", "none"]
+        extra = []
         for key, value in ownership_labels(command["registry_record"]).items():
             extra += ["--label", f"{key}={value}"]
         argv[index:index] = extra
