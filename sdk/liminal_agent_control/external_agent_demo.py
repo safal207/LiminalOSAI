@@ -241,11 +241,27 @@ def _service(config_file: Path) -> int:
         Path(configuration["endpoint"]["request_key_file"]).read_bytes(), configuration["endpoint"]["pin"],
         timeout=20, **endpoint_options)
     binding = configuration["run_binding"]
+    orientation_context = None
+    orientation_options = {}
+    coordinator_type = ExternalAgentCoordinator
+    if "orientation_probe" in configuration:
+        from .external_agent_orientation_demo import _initialize_service_orientation
+        from .external_agent_orientation_feedback import (
+            ObservedOrientationAgentBridge, ObservedOrientationCoordinator, ObservedOrientationFencedEffectGateway,
+        )
+        orientation_context = _initialize_service_orientation(configuration, directory, binding)
+        orientation_options["orientation_guard"] = orientation_context["guard"]
+        gateway_type, bridge_type = ObservedOrientationFencedEffectGateway, ObservedOrientationAgentBridge
+        coordinator_type = ObservedOrientationCoordinator
     gateway = gateway_type(directory / "gateway.sqlite", run_binding=binding,
         gateway_id=configuration["gateway_id"],
         external_controller=effect_receiver, endpoint_client=endpoint,
         operator_key=Path(configuration["gateway_operator_key_file"]).read_bytes(),
-        worker_key=Path(configuration["gateway_worker_key_file"]).read_bytes(), create=True)
+        worker_key=Path(configuration["gateway_worker_key_file"]).read_bytes(), create=True,
+        **orientation_options)
+    if orientation_context is not None:
+        from .external_agent_orientation_demo import _service_before_dispatch
+        gateway.before_dispatch_hook = lambda *values: _service_before_dispatch(orientation_context, *values)
     holder: dict[str, Any] = {"coordinator": None, "supervisor": None, "launch_gate": None}
 
     def fence_check():
@@ -260,6 +276,9 @@ def _service(config_file: Path) -> int:
 
     def before_proposal(index: int, _action: dict, _bridge: Any):
         holder["launch_gate"].assert_ready()
+        if orientation_context is not None:
+            from .external_agent_orientation_demo import _service_before_proposal
+            _service_before_proposal(orientation_context, index, _action, _bridge)
         # The worker actually queued the second frame before this host barrier.
         # Fencing is durable and independent of the worker's claims.
         if configuration["case_id"] == "queued_after_stop" and index == 2:
@@ -305,7 +324,7 @@ def _service(config_file: Path) -> int:
         bridge_configuration=bridge.configuration(), create=True, launch_gate=launch_gate)
     holder["supervisor"] = supervisor
     coordinator_options = {"receiver_fence_client": endpoint} if receiver_fence else {}
-    coordinator = ExternalAgentCoordinator(directory / "coordinator.sqlite", run_binding=binding,
+    coordinator = coordinator_type(directory / "coordinator.sqlite", run_binding=binding,
         supervisor=supervisor, command_admin_client=command_admin, effect_admin_client=effect_admin,
         effect_gateway=gateway, bridge=bridge, create=True, watcher_interval=0.4, start_watcher=True,
         **coordinator_options)
@@ -329,6 +348,9 @@ def _service(config_file: Path) -> int:
             result["endpoint_operator_evidence"] = [pair for pair in endpoint.evidence
                 if pair["request"]["role"] == "operator"]
         result["bridge_configuration"] = bridge.configuration()
+        if orientation_context is not None:
+            result["orientation_probe"] = {"configuration": deepcopy(orientation_context["configuration"]),
+                "events": deepcopy(orientation_context["events"]), "execution_authorized": False}
         return result
 
     class Handler(BaseHTTPRequestHandler):
@@ -367,6 +389,33 @@ def _service(config_file: Path) -> int:
                     # parent SQL capture. It makes no watcher-crash claim.
                     coordinator.close()
                     result = {"status": "FIXTURE_FROZEN", "execution_authorized": False}
+                elif operation == "probe_observe" and orientation_context is not None:
+                    if set(payload) != {"action", "authorization", "reservation_id", "receipt"}:
+                        raise ControlError("AGENT_ORIENTATION_RUNTIME_OBSERVATION_FIELDS")
+                    try:
+                        result = gateway.orientation_observer.observe_committed(**payload)
+                    except Exception as exc:
+                        result = {"status": "ERROR", "reason": str(exc)[:300],
+                                  "exception_type": type(exc).__name__, "execution_authorized": False}
+                    orientation_context["events"].append({"kind": "UNTRUSTED_RECEIPT_SUBMITTED_TO_HOST_OBSERVER",
+                        "request": deepcopy(payload), "result": deepcopy(result), "observed_at": time.time(),
+                        "execution_authorized": False})
+                elif operation == "freeze_orientation_probe" and orientation_context is not None:
+                    current = supervisor.inventory()
+                    if (payload or not coordinator.fence_state()["closed"]
+                            or current["bridge"]["callback_finished"] is not True
+                            or any(item["callback_phase"] != "FINISHED" for item in current["grants"])):
+                        raise ControlError("AGENT_ORIENTATION_RUNTIME_CAPTURE_REQUIRES_CLOSED_CALLBACKS")
+                    # Unlike legacy terminal capture, the STOP-after-BEGIN
+                    # scenario intentionally retains an unresolved reservation.
+                    # Join only this fixture watcher; never certify STOPPED.
+                    coordinator._watcher_stop.set()
+                    if coordinator._watcher is not None:
+                        coordinator._watcher.join(5)
+                        if coordinator._watcher.is_alive():
+                            raise ControlError("AGENT_ORIENTATION_RUNTIME_WATCHER_STILL_RUNNING")
+                    result = {"status": "FIXTURE_FROZEN", "aggregate_status": coordinator.inventory()["state"]["state"],
+                              "execution_authorized": False}
                 elif operation == "faults":
                     if set(payload) - {"observation_unavailable"}:
                         raise ControlError("AGENT_RUNTIME_FAULT_INVALID")

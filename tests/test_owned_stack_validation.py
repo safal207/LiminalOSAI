@@ -192,6 +192,8 @@ class OwnedStackValidationTests(unittest.TestCase):
         self.owned_sources()
         initial = b'{ "synthetic_capture": "preparation", "nonce": 1 }\n'
         final = b'{"synthetic_capture":"full-discovery","nonce":2}\n'
+        orientation_initial = b'{"synthetic_orientation":"preparation","nonce":3}\n'
+        orientation_final = b'{"synthetic_orientation":"full-discovery","nonce":4}\n'
         checked = []
         def command(argv, **kwargs):
             args = list(map(str, argv))
@@ -207,6 +209,9 @@ class OwnedStackValidationTests(unittest.TestCase):
                 Path(args[args.index("--iidfile") + 1]).write_text("sha256:" + "c" * 64)
             if "tests/test_agent_control_external_agent_receiver_runtime.py" in args:
                 Path(kwargs["env"]["LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE"]).write_bytes(initial)
+            if "tests/test_agent_control_external_agent_orientation_runtime.py" in args:
+                self.assertEqual(kwargs["env"]["LIMINAL_EXTERNAL_AGENT_ORIENTATION_REQUIRE_DOCKER"], "1")
+                Path(kwargs["env"]["LIMINAL_EXTERNAL_AGENT_ORIENTATION_EVIDENCE"]).write_bytes(orientation_initial)
             if len(args) > 1 and args[1].endswith("verify_external_agent_receiver_evidence.py"):
                 snapshot = Path(args[2])
                 self.assertEqual(snapshot.name, "receiver-preparation.json")
@@ -217,11 +222,27 @@ class OwnedStackValidationTests(unittest.TestCase):
                 # preparation consumer must still use the preserved byte copy.
                 (snapshot.parent / "receiver.json").write_bytes(final)
                 checked.append("verifier")
-            if "-c" in args or PREPARE.CAPTURE_CLASS in args:
+            if PREPARE.CAPTURE_CLASS_CHECK in args or PREPARE.CAPTURE_CLASS in args:
                 snapshot = Path(kwargs["env"]["LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE"])
                 self.assertEqual(snapshot.name, "receiver-preparation.json")
                 self.assertEqual(snapshot.read_bytes(), initial)
                 checked.append("presence" if "-c" in args else "strict-nine")
+            if len(args) > 1 and args[1].endswith("verify_external_agent_orientation_evidence.py"):
+                snapshot = Path(args[2])
+                self.assertEqual(snapshot.name, "orientation-preparation.json")
+                self.assertEqual(snapshot.read_bytes(), orientation_initial)
+                self.assertEqual(args[args.index("--expected-report-sha256") + 1],
+                                 hashlib.sha256(orientation_initial).hexdigest())
+                self.assertEqual(args[args.index("--expected-source-sha") + 1], "a" * 40)
+                self.assertEqual(args[args.index("--expected-image") + 1], "sha256:" + "b" * 64)
+                self.assertEqual(Path(kwargs["output"].name).name, "orientation-preparation-verification.json")
+                (snapshot.parent / "orientation.json").write_bytes(orientation_final)
+                checked.append("orientation-verifier")
+            if PREPARE.ORIENTATION_CAPTURE_CLASS_CHECK in args or PREPARE.ORIENTATION_CAPTURE_CLASS in args:
+                snapshot = Path(kwargs["env"]["LIMINAL_EXTERNAL_AGENT_ORIENTATION_EVIDENCE"])
+                self.assertEqual(snapshot.name, "orientation-preparation.json")
+                self.assertEqual(snapshot.read_bytes(), orientation_initial)
+                checked.append("orientation-presence" if "-c" in args else "strict-six")
             return None
         with patch.object(PREPARE, "command", side_effect=command):
             result = PREPARE.prepare(self.root, self.output)
@@ -233,7 +254,16 @@ class OwnedStackValidationTests(unittest.TestCase):
         live = Path(result["environment"]["LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE"])
         self.assertEqual(live.name, "receiver.json")
         self.assertEqual(live.read_bytes(), final)
-        self.assertEqual(checked, ["verifier", "presence", "strict-nine"])
+        orientation_snapshot = self.output / manifest["orientation_preparation_capture"]
+        self.assertEqual(orientation_snapshot.read_bytes(), orientation_initial)
+        self.assertEqual(orientation_snapshot.stat().st_mode & 0o222, 0)
+        self.assertEqual(manifest["orientation_preparation_sha256"], hashlib.sha256(orientation_initial).hexdigest())
+        self.assertEqual(manifest["orientation_capture_tests"], 6)
+        orientation_live = Path(result["environment"]["LIMINAL_EXTERNAL_AGENT_ORIENTATION_EVIDENCE"])
+        self.assertEqual(orientation_live.name, "orientation.json")
+        self.assertEqual(orientation_live.read_bytes(), orientation_final)
+        self.assertEqual(checked, ["verifier", "presence", "strict-nine",
+                                   "orientation-verifier", "orientation-presence", "strict-six"])
         self.assertEqual(result["status"], "READY_FOR_VALIDATION")
 
     def test_capture_snapshot_is_bounded_nonempty_and_never_overwrites_evidence(self):
@@ -305,6 +335,41 @@ class OwnedStackValidationTests(unittest.TestCase):
             capture_output=True, text=True, timeout=10, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("all nine", result.stderr)
+
+    def test_orientation_capture_check_requires_six_explicit_tests_in_fresh_process(self):
+        package = self.directory / "tests"
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        (package / "test_agent_control_external_agent_orientation_evidence.py").write_text(
+            "import unittest\nclass OrientationCaptureEvidenceTests(unittest.TestCase):\n"
+            "    def test_only_one(self): pass\n")
+        capture = self.directory / "capture.json"
+        capture.write_text(json.dumps({"synthetic": True}))
+        result = subprocess.run(
+            [sys.executable, "-c", PREPARE.ORIENTATION_CAPTURE_CLASS_CHECK], cwd=self.directory,
+            env={**os.environ, "PYTHONPATH": str(self.directory),
+                 "LIMINAL_EXTERNAL_AGENT_ORIENTATION_EVIDENCE": str(capture)},
+            capture_output=True, text=True, timeout=10, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("all six", result.stderr)
+
+    def test_full_gate_keeps_orientation_final_capture_separate_and_after_discovery(self):
+        workflow = (ROOT / ".github/workflows/governance-required-gate.yml").read_text()
+        baseline = workflow.index("run: make validate")
+        postcheck = workflow.index("- name: Verify final observed orientation capture after full discovery")
+        scope = workflow.index("- name: Declared gate scope")
+        self.assertLess(baseline, postcheck)
+        self.assertLess(postcheck, scope)
+        step = workflow[postcheck:scope]
+        self.assertIn('"$LIMINAL_EXTERNAL_AGENT_ORIENTATION_EVIDENCE"', step)
+        self.assertIn('--expected-image "$LIMINAL_EXTERNAL_AGENT_DOCKER_IMAGE"', step)
+        self.assertIn('--expected-source-sha "$EXPECTED_SOURCE_SHA"', step)
+        self.assertIn("orientation-final-verification.json", step)
+        self.assertIn("exec(ORIENTATION_CAPTURE_CLASS_CHECK)", step)
+        self.assertIn(PREPARE.ORIENTATION_CAPTURE_CLASS, step)
+        self.assertNotIn("orientation-preparation.json", step)
+        self.assertNotIn("continue-on-error", step)
+        self.assertNotIn("||", step)
 
 
 if __name__ == "__main__":
