@@ -59,6 +59,12 @@ Examples of security-critical workflow families currently present in the reposit
 
 Use a repository Ruleset targeting the default branch if available. Otherwise use classic branch protection with equivalent settings.
 
+Required-workflow enforcement is a separate organization- or enterprise-level
+ruleset capability; it is not provided by a repository ruleset or classic branch
+protection. If that capability is unavailable, require emitted job contexts only
+after the workflows are configured to run on every pull request. The current
+path-filtered Core CI workflow does not yet satisfy that prerequisite.
+
 ### Pull request gate
 
 - Require a pull request before merging.
@@ -72,12 +78,26 @@ Use a repository Ruleset targeting the default branch if available. Otherwise us
 - Require status checks before merging.
 - Require the branch to be up to date before merging, unless a merge queue/ruleset provides an equivalent exact-head guarantee.
 - Require `Governance Required Gate` on every pull request targeting `main`.
-- Enforce all three Core CI jobs listed above. A ruleset-required Core workflow
-  runs on every pull request, regardless of its ordinary event path filters.
-- For specialized workflows, choose unconditional required-workflow enforcement,
-  or implement and verify the always-emitted applicability gate before requiring
-  it. Do not treat required-workflow rules as honoring path filters, and do not
-  make a sometimes-absent job context globally required.
+- The current `governance-required-gate.yml` has no `merge_group` trigger, so use
+  the up-to-date-branch option above. Before enabling a merge queue, add
+  `merge_group` to every required Actions workflow, validate its event/source
+  handling and prove the required checks are emitted for the actual merge group.
+  Existing PR or push checks do not establish queue readiness.
+- Preserve enforcement of all three Core CI jobs listed above. Where an
+  organization or enterprise required-workflow rule is available, requiring
+  Core CI runs it on every pull request regardless of ordinary event filters.
+  With a repository ruleset or classic protection, first configure Core CI to
+  run on every pull request, then require its three job contexts. Do not require
+  its currently path-filtered contexts globally before that change.
+- For specialized workflows, choose organization/enterprise unconditional
+  required-workflow enforcement where available, or implement and verify the
+  always-emitted applicability gate before requiring it. Do not treat
+  required-workflow rules as honoring path filters, and do not make a
+  sometimes-absent job context globally required.
+
+These are prerequisites, not claims that the current repository configuration
+already meets the target state. See GitHub's [merge-queue check requirements](https://docs.github.com/en/enterprise-cloud@latest/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#status-checks-with-github-actions-and-a-merge-queue)
+and [ruleset workflow availability](https://docs.github.com/en/enterprise-cloud@latest/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#require-workflows-to-pass-before-merging).
 
 The baseline centralizes generic repository regression coverage. Specialized
 workflows retain their focused assertions, real Docker probes, signed fixtures,
