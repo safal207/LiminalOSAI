@@ -11,6 +11,7 @@ on:
       - tools/chatgpt_portable_action_receipt.py
       - tests/test_chatgpt_portable_action_receipt.py
       - Makefile
+      - 'scripts/check_forbidden.py'
   workflow_dispatch:
 
 permissions:
@@ -45,13 +46,6 @@ jobs:
           set -euo pipefail
           python3 -m unittest tests/test_chatgpt_portable_action_receipt.py -v \
             2>&1 | tee reports/portable-receipt/unit-tests.log
-
-      - name: Run full repository regression
-        shell: bash
-        run: |
-          set -euo pipefail
-          make test 2>&1 | tee reports/portable-receipt/full-stack-tests.log
-          make test-repo 2>&1 | tee reports/portable-receipt/repo-hygiene.log
 
       - name: Generate full portable receipt fixture
         shell: bash
@@ -165,9 +159,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ! grep -R --binary-files=without-match -n 'BEGIN PRIVATE KEY' reports/portable-receipt
-          ! grep -R --binary-files=without-match -n 'secret-token-value' reports/portable-receipt
-          ! grep -R --binary-files=without-match -n 'visible intent redacted by digest' reports/portable-receipt
+          python3 scripts/check_forbidden.py -- -R --binary-files=without-match -n 'BEGIN PRIVATE KEY' reports/portable-receipt
+          python3 scripts/check_forbidden.py -- -R --binary-files=without-match -n 'secret-token-value' reports/portable-receipt
+          python3 scripts/check_forbidden.py -- -R --binary-files=without-match -n 'visible intent redacted by digest' reports/portable-receipt
           python3 - <<'PY'
           import json
           from pathlib import Path

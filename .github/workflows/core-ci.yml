@@ -2,7 +2,7 @@ name: LiminalOSAI Core CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'agent/**']
     paths:
       - .github/workflows/core-ci.yml
       - .gitignore
@@ -67,5 +67,12 @@ jobs:
           make clean
           make CC=gcc CFLAGS="$SAN_CFLAGS" LDFLAGS="$SAN_LDFLAGS"
           make CC=gcc CFLAGS="$SAN_CFLAGS" LDFLAGS="$SAN_LDFLAGS" check
-          make CC=gcc CFLAGS="$SAN_CFLAGS" LDFLAGS="$SAN_LDFLAGS" test
+          if [ -d sdk/liminal_agent_control ]; then
+            echo "Sanitizer scope: all C suites and both production CLI/controller contracts."
+            echo "Complete Python and owned Docker validation remains in Governance Required Gate."
+            make CC=gcc CFLAGS="$SAN_CFLAGS" LDFLAGS="$SAN_LDFLAGS" test \
+              PYTHON_TESTS="tests/test_pulse_kernel_cli.py tests/test_liminal_substrate_cli.py"
+          else
+            make CC=gcc CFLAGS="$SAN_CFLAGS" LDFLAGS="$SAN_LDFLAGS" test
+          fi
           python3 -m unittest tests/test_repo_hygiene.py -v

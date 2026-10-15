@@ -46,6 +46,10 @@ class AtomicFileReplaceError(RuntimeError):
     pass
 
 
+class _ReplacementOutcomeUnknown(AtomicFileReplaceError):
+    """Replacement was attempted, but its final state was not verified."""
+
+
 def _authority_document() -> dict[str, Any]:
     return dict(_AUTHORITY_ITEMS)
 
@@ -143,10 +147,12 @@ class AtomicFileReplacer:
             )
             return self._receipt(**common, outcome="SUCCEEDED", error_type_sha256=None)
         except Exception as exc:
+            uncertain = isinstance(exc, _ReplacementOutcomeUnknown)
+            error = exc.__cause__ if uncertain and exc.__cause__ is not None else exc
             return self._receipt(
                 **common,
-                outcome="FAILED",
-                error_type_sha256=canonical_sha256({"error_type": type(exc).__name__}),
+                outcome="UNKNOWN" if uncertain else "FAILED",
+                error_type_sha256=canonical_sha256({"error_type": type(error).__name__}),
             )
 
     def _replace_under_root(
@@ -172,6 +178,7 @@ class AtomicFileReplacer:
         opened: list[int] = [root_fd]
         parent_fd = root_fd
         temp_name: str | None = None
+        replacement_attempted = False
         try:
             for component in components[:-1]:
                 next_fd = os.open(component, os.O_RDONLY | directory | nofollow, dir_fd=parent_fd)
@@ -229,6 +236,9 @@ class AtomicFileReplacer:
             if second_before != expected_before_sha256:
                 raise AtomicFileReplaceError("stale_before_digest")
 
+            # Once replacement is attempted, an exception cannot establish that
+            # no effect happened. The consumed lease must never imply safe retry.
+            replacement_attempted = True
             os.replace(temp_name, leaf, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
             temp_name = None
             os.fsync(parent_fd)
@@ -250,6 +260,10 @@ class AtomicFileReplacer:
                 raise AtomicFileReplaceError("privileged_mode_bits_present")
             if observed_uid != original_uid or observed_gid != original_gid:
                 raise AtomicFileReplaceError("post_replace_ownership_mismatch")
+        except Exception as exc:
+            if replacement_attempted:
+                raise _ReplacementOutcomeUnknown("replacement_requires_reconciliation") from exc
+            raise
         finally:
             if temp_name is not None:
                 try:

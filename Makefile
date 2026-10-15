@@ -1,4 +1,6 @@
 CC      := gcc
+.DEFAULT_GOAL := all
+PYTHON  ?= python3
 INCLUDES += -Iinclude
 CFLAGS  := -std=c11 -Wall -Wextra -pedantic -Os $(INCLUDES)
 LDFLAGS := -lm
@@ -9,6 +11,7 @@ TARGET  := build/pulse_kernel
 SUBSTRATE_TARGET := build/liminal_core
 
 CORE_SRCS   := core/pulse_kernel.c core/runtime/pulse_kernel_entry.c core/runtime/kernel_context.c \
+               core/runtime/kernel_cli_guard.c \
                core/runtime/kernel_runtime_utils.c core/runtime/kernel_sequence.c core/runtime/kernel_sequence_cli.c \
                core/trs_filter.c core/trs_adapt.c core/erb.c core/astro_sync.c core/consent_gate.c \
                core/neural_resonance.c core/kiss_cascade.c core/vse.c core/flow_equilibrium.c core/qel.c
@@ -17,6 +20,7 @@ ANTICIPATION_SRCS := anticipation/v2.c
 INTROSPECT_SRCS := src/introspect.c src/harmony.c src/dream_coupler.c
 TUNE_SRCS := tune/autotune.c
 SUBSTRATE_SRCS := core/liminal_substrate.c core/trs_filter.c core/trs_adapt.c core/erb.c core/astro_sync.c core/consent_gate.c \
+                   core/runtime/kernel_cli_guard.c core/runtime/kernel_runtime_utils.c \
                    core/dream_replay.c core/synaptic_bridge.c core/kiss_cascade.c core/vse.c core/flow_equilibrium.c core/qel.c empathic/field.c memory/emotion_memory.c \
                    memory/soil.c bus/resonant.c council/inner.c coherence/field.c awareness/bridge.c $(AFFINITY_SRCS) $(ANTICIPATION_SRCS)
 MEM_SRCS    := memory/soil.c memory/emotion_memory.c
@@ -45,69 +49,16 @@ LONG_TRACE_LOG := $(LONG_TRACE_DIR)/liminal_core_long_run.log
 LONG_TRACE_SUMMARY := $(LONG_TRACE_DIR)/liminal_core_long_run.txt
 LONG_TRACE_JSON := $(LONG_TRACE_DIR)/liminal_core_long_run.json
 
-PYTHON_TESTS := \
-	tests/test_liminal_evidence_advisor.py \
-	tests/test_chatgpt_liminal_adapter.py \
-	tests/test_chatgpt_conversation_normalizer.py \
-	tests/test_chatgpt_live_session_exporter.py \
-	tests/test_chatgpt_session_recorder.py \
-	tests/test_chatgpt_host_adapter.py \
-	tests/test_chatgpt_github_agent_bridge.py \
-	tests/test_chatgpt_connected_github_runtime.py \
-	tests/test_chatgpt_github_transaction_orchestrator.py \
-	tests/test_chatgpt_github_transaction_policy.py \
-	tests/test_chatgpt_signed_governance_capsule.py \
-	tests/test_chatgpt_identity_attestation.py \
-	tests/test_chatgpt_portable_action_receipt.py \
-	tests/test_post_sandbox_phase0_contracts.py \
-	tests/test_capability_broker_phase1.py \
-	tests/test_egress_gateway_phase2.py \
-	tests/test_egress_admission_order.py \
-	tests/test_pinned_http_transport.py \
-	tests/test_agent_control_authority.py \
-	tests/test_agent_control_orientation_store.py \
-	tests/test_agent_control_orientation_gate.py \
-	tests/test_agent_control_orientation_demo.py \
-	tests/test_agent_control_center_continuity.py \
-	tests/test_agent_control_observer_ring.py \
-	tests/test_agent_control_center_gate.py \
-	tests/test_agent_control_center_demo.py \
-	tests/test_agent_control_observer_auth.py \
-	tests/test_agent_control_observer_process.py \
-	tests/test_agent_control_observer_auth_gate.py \
-	tests/test_agent_control_observer_sources.py \
-	tests/test_agent_control_observer_container.py \
-	tests/test_agent_control_observer_container_gate.py \
-	tests/test_agent_control_observer_registry.py \
-	tests/test_agent_control_observer_lifecycle.py \
-	tests/test_agent_control_observer_lifecycle_runtime.py \
-	tests/test_agent_control_receiver_source.py \
-	tests/test_agent_control_source_issuer_profile.py \
-	tests/test_agent_control_receiver_source_observer.py \
-	tests/test_agent_control_receiver_source_service.py \
-	tests/test_agent_control_receiver_source_runtime.py \
-	tests/test_agent_control_brakes_store.py \
-	tests/test_agent_control_brakes_receiver.py \
-	tests/test_agent_control_brakes_egress.py \
-	tests/test_agent_control_brakes_watchdog.py \
-	tests/test_agent_control_runtime.py \
-	tests/test_agent_control_supervisor_registry.py \
-	tests/test_agent_control_evaluation.py \
-	tests/test_agent_control_reproduction.py \
-	tests/test_agent_control_fault_runtime.py \
-	tests/test_agent_control_fault_evaluation.py \
-	tests/test_agent_control_multi_agent_scenarios.py \
-	tests/test_agent_control_multi_agent_relay.py \
-	tests/test_agent_control_multi_agent_checks.py \
-	tests/test_agent_control_multi_agent_evaluation.py \
-	tests/test_trace_visualizer.py \
-	tests/test_pulse_kernel_cli.py \
-	tests/test_trcp_simulator.py \
-	tests/test_trcp_codex_review.py \
-	tests/test_trcp_evidence_replay.py \
-	tests/test_trcp_contract_consumer.py \
-	tests/test_trcp_external_consumer.py \
-	tests/test_trcp_adapter_sdk.py
+# Empty means automatic discovery. A focused local run may supply module names
+# or test paths; validate always uses full discovery independently of this value.
+PYTHON_TESTS ?=
+C_TEST_NAMES := consent_gate collective_memory collective_graph anticipation_v2 kernel_runtime kernel_context qel vse
+C_TEST_BINS := $(addprefix build/tests/test_,$(C_TEST_NAMES))
+C_TEST_OBJS := $(addprefix tests/test_,$(addsuffix .o,$(C_TEST_NAMES)))
+ALL_OBJS += $(C_TEST_OBJS)
+DEPS := $(sort $(ALL_OBJS:.o=.d))
+
+-include $(DEPS)
 
 all: $(TARGET) $(SUBSTRATE_TARGET)
 
@@ -126,44 +77,80 @@ $(SUBSTRATE_TARGET): $(SUBSTRATE_OBJS)
 	$(CC) $(CFLAGS) $(SUBSTRATE_OBJS) -o $@ $(LDFLAGS)
 
 core/pulse_kernel.o: core/pulse_kernel.c
-	$(CC) $(CFLAGS) -Dmain=pulse_kernel_core_main -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -Dmain=pulse_kernel_core_main -c $< -o $@
+
+tests/%.o: tests/%.c
+	$(CC) $(CFLAGS) -Icore/runtime -MMD -MP -c $< -o $@
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
 clean:
 ifeq ($(OS),Windows_NT)
 	@if exist $(TARGET) del /Q $(TARGET) 2>nul
 	@if exist $(SUBSTRATE_TARGET) del /Q $(SUBSTRATE_TARGET) 2>nul
-	@for %%f in ($(ALL_OBJS)) do @if exist %%f del /Q %%f 2>nul
+	@for %%f in ($(ALL_OBJS) $(DEPS) $(C_TEST_BINS)) do @if exist %%f del /Q %%f 2>nul
 else
-	rm -f $(ALL_OBJS) $(TARGET) $(SUBSTRATE_TARGET)
+	rm -f $(ALL_OBJS) $(DEPS) $(TARGET) $(SUBSTRATE_TARGET) $(C_TEST_BINS)
 endif
 
-.PHONY: all clean check test test-repo verify-core rebirth report report-metabolic long-run-diagnostics trcp-test trcp-sdk-test trcp-sim trcp-replay trcp-external
+.PHONY: all clean check test test-c test-python test-python-all test-repo validate verify-core rebirth report report-metabolic long-run-diagnostics trcp-test trcp-sdk-test trcp-sim trcp-replay trcp-external
 
 check: $(TARGET) $(SUBSTRATE_TARGET)
 	@echo "🧪 Running smoke checks..."
 	@$(TARGET) --dry-run --limit=2
 	@$(SUBSTRATE_TARGET) --substrate --limit=2 --trace >/dev/null
 
-test: $(TARGET)
-	@mkdir -p build/tests
-	$(CC) $(CFLAGS) tests/test_consent_gate.c core/consent_gate.c -o build/tests/test_consent_gate $(LDFLAGS)
-	$(CC) $(CFLAGS) tests/test_collective_memory.c collective/memory.c -o build/tests/test_collective_memory $(LDFLAGS)
-	$(CC) $(CFLAGS) tests/test_anticipation_v2.c anticipation/v2.c -o build/tests/test_anticipation_v2 $(LDFLAGS)
-	$(CC) $(CFLAGS) -Icore/runtime tests/test_kernel_runtime.c core/runtime/kernel_runtime_utils.c core/runtime/kernel_sequence.c core/runtime/kernel_sequence_cli.c -o build/tests/test_kernel_runtime $(LDFLAGS)
-	$(CC) $(CFLAGS) -Icore/runtime tests/test_kernel_context.c core/runtime/kernel_context.c core/runtime/kernel_sequence.c -o build/tests/test_kernel_context $(LDFLAGS)
-	@echo "🧪 Running unit tests..."
-	@build/tests/test_consent_gate
-	@build/tests/test_collective_memory
-	@build/tests/test_anticipation_v2
-	@build/tests/test_kernel_runtime
-	@build/tests/test_kernel_context
-	@python3 -m unittest $(PYTHON_TESTS) -v
+build/tests:
+ifeq ($(OS),Windows_NT)
+	@powershell -NoProfile -Command "Set-Variable -Name ErrorActionPreference -Value Stop; if (-not (Test-Path 'build/tests' -PathType Container)) { New-Item -ItemType Directory -Path 'build/tests' | Out-Null }"
+else
+	@mkdir -p $@
+endif
+
+build/tests/test_consent_gate: tests/test_consent_gate.o core/consent_gate.o | build/tests
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+build/tests/test_collective_memory: tests/test_collective_memory.o collective/memory.o | build/tests
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+build/tests/test_collective_graph: tests/test_collective_graph.o collective/graph.o | build/tests
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -Wl,--wrap=calloc,--wrap=free
+
+build/tests/test_anticipation_v2: tests/test_anticipation_v2.o anticipation/v2.o | build/tests
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+build/tests/test_kernel_runtime: tests/test_kernel_runtime.o core/runtime/kernel_runtime_utils.o core/runtime/kernel_sequence.o core/runtime/kernel_sequence_cli.o | build/tests
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+build/tests/test_kernel_context: tests/test_kernel_context.o core/runtime/kernel_context.o core/runtime/kernel_sequence.o | build/tests
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+build/tests/test_qel: tests/test_qel.o core/qel.o | build/tests
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -Wl,--wrap=fflush
+
+build/tests/test_vse: tests/test_vse.o core/vse.o | build/tests
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -Wl,--wrap=malloc,--wrap=free,--wrap=rand
+
+test-c: $(C_TEST_BINS)
+ifeq ($(OS),Windows_NT)
+	@powershell -NoProfile -Command "Set-Variable -Name ErrorActionPreference -Value Stop; $(foreach c_test_binary,$(C_TEST_BINS),& './$(c_test_binary)'; if ((Get-Variable -Name LASTEXITCODE -ValueOnly) -ne 0) { exit (Get-Variable -Name LASTEXITCODE -ValueOnly) };)"
+else
+	@set -e; for test_binary in $(C_TEST_BINS); do "$$test_binary"; done
+endif
+
+test-python: all
+	@$(PYTHON) scripts/run_python_tests.py $(PYTHON_TESTS)
+
+test-python-all: all
+	@$(PYTHON) scripts/run_python_tests.py
+
+test: test-c test-python
+
+validate: check test-c test-python-all
 
 test-repo:
-	@python3 -m unittest tests/test_repo_hygiene.py -v
+	@$(PYTHON) scripts/run_python_tests.py tests/test_repo_hygiene.py
 
 trcp-test:
 	@python3 -m unittest tests/test_trcp_simulator.py tests/test_trcp_codex_review.py tests/test_trcp_evidence_replay.py tests/test_trcp_contract_consumer.py tests/test_trcp_external_consumer.py tests/test_trcp_adapter_sdk.py -v

@@ -8,6 +8,7 @@ on:
       - Makefile
       - tools/liminal_evidence_advisor.py
       - tests/test_liminal_evidence_advisor.py
+      - scripts/run_python_tests.py
   workflow_dispatch:
 
 permissions:
@@ -26,7 +27,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build, check, and test exact head
+      - name: Build and test advisor integration subject
         shell: bash
         run: |
           set -euo pipefail
@@ -34,7 +35,7 @@ jobs:
           git rev-parse HEAD | tee reports/head-sha.txt
           make 2>&1 | tee reports/build.log
           make check 2>&1 | tee reports/check.log
-          make test 2>&1 | tee reports/test.log
+          python3 scripts/run_python_tests.py tests/test_liminal_evidence_advisor.py 2>&1 | tee reports/test.log
 
       - name: Run bounded advisor fixture
         shell: bash

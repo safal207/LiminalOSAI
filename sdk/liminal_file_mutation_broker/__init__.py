@@ -366,7 +366,7 @@ class FileMutationBroker:
                 raise FileMutationError("unknown_lease")
             if lease.consumed:
                 raise FileMutationError("lease_replayed")
-            if now > lease.expires_at_unix:
+            if now >= lease.expires_at_unix:
                 raise FileMutationError("lease_expired")
             if now < lease.issued_at_unix:
                 raise FileMutationError("clock_regression")

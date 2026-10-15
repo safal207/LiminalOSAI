@@ -1,6 +1,7 @@
 # Generated build outputs
 /build/
 *.o
+*.d
 *.obj
 *.a
 *.so

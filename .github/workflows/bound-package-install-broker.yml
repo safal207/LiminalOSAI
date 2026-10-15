@@ -11,6 +11,7 @@ on:
       - 'sdk/liminal_runtime_mediation/**'
       - 'sdk/liminal_post_sandbox_contracts/**'
       - '.github/workflows/bound-package-install-broker.yml'
+      - 'scripts/check_forbidden.py'
 
 permissions:
   contents: read
@@ -54,8 +55,8 @@ jobs:
         run: |
           set -euo pipefail
           test -d sdk/liminal_package_install_broker
-          ! grep -R -nE '(^|[[:space:]])(import|from)[[:space:]]+(os|pathlib|shutil|tempfile|subprocess|socket)([[:space:].]|$)' sdk/liminal_package_install_broker
-          ! grep -R -nE '(__import__|importlib\.import_module|pip([[:space:]."]|$)|npm([[:space:]."]|$)|apt(-get)?([[:space:]."]|$))' sdk/liminal_package_install_broker
+          python3 scripts/check_forbidden.py -- -R -nE '(^|[[:space:]])(import|from)[[:space:]]+(os|pathlib|shutil|tempfile|subprocess|socket)([[:space:].]|$)' sdk/liminal_package_install_broker
+          python3 scripts/check_forbidden.py -- -R -nE '(__import__|importlib\.import_module|pip([[:space:]."]|$)|npm([[:space:]."]|$)|apt(-get)?([[:space:]."]|$))' sdk/liminal_package_install_broker
 
       - name: Verify package authority boundary
         run: |
@@ -75,9 +76,3 @@ jobs:
           assert AUTHORITY['ephemeral_tmpfs_materialization'] is True
           assert AUTHORITY['installed_package_execution'] is False
           PY
-
-      - name: Build production kernel fixture
-        run: make
-
-      - name: Run full repository regression
-        run: python3 -m unittest discover -s tests -p 'test_*.py'

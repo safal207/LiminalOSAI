@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .authority import ControlError, canonical_bytes, connect, digest, validate_id
+from .authority import ControlError, canonical_bytes, connect, digest, require_key, validate_id
 from .external_agent_protocol import AGENT_FIXTURE_SHA256, AGENT_PROFILE, validate_agent_action, verify_agent_receipt
 from .external_authority import validate_authority_pin
 from .external_authority_service import HTTPExternalAuthorityClient
@@ -94,11 +94,15 @@ class ExternalAgentCoordinator:
     def __init__(self, db_path: str | Path, *, run_binding: dict, supervisor: Any,
                  command_admin_client: HTTPExternalAuthorityClient,
                  effect_admin_client: HTTPExternalAuthorityClient, effect_gateway: Any, bridge: Any,
-                 create: bool = True, watcher_interval: float = 0.1, start_watcher: bool = True):
+                 create: bool = True, watcher_interval: float = 0.1, start_watcher: bool = True,
+                 receiver_fence_client: Any = None):
         self.db_path = Path(db_path).absolute()
         self.run_binding = validate_run_binding(run_binding)
         self.supervisor, self.bridge, self.effect_gateway = supervisor, bridge, effect_gateway
         self.command_admin_client, self.effect_admin_client = command_admin_client, effect_admin_client
+        self.receiver_fence_client = receiver_fence_client
+        self._receiver_fence_ack = None
+        self._receiver_fence_ack_lock = threading.RLock()
         if type(watcher_interval) not in (int, float) or not math.isfinite(watcher_interval) or not 0.01 <= watcher_interval <= 5:
             raise ControlError("AGENT_WATCHER_INTERVAL_INVALID")
         self.watcher_interval = float(watcher_interval)
@@ -165,16 +169,30 @@ class ExternalAgentCoordinator:
         if (canonical_bytes(bridge_binding) != canonical_bytes(expected)
                 or canonical_bytes(self.bridge.configuration().get("actions")) != canonical_bytes(binding["effect_actions"])):
             raise ControlError("AGENT_COORDINATOR_BRIDGE_BINDING_MISMATCH")
-        return canonical_bytes({"schema": "liminal-agent-coordinator-store-v1", "profile": AGENT_PROFILE,
+        gateway_configuration = json.loads(self.effect_gateway._configuration())
+        if (gateway_configuration.get("receiver_fence", {}).get("required") is True
+                and self.receiver_fence_client is None):
+            raise ControlError("AGENT_COORDINATOR_RECEIVER_CLIENT_REQUIRED")
+        configuration = {"schema": "liminal-agent-coordinator-store-v1", "profile": AGENT_PROFILE,
             "run_binding": binding, "run_binding_digest": digest(binding),
             "bridge_configuration_digest": digest(self.bridge.configuration()),
-            "effect_gateway_configuration": json.loads(self.effect_gateway._configuration()),
+            "effect_gateway_configuration": gateway_configuration,
             "command_authority_url": clients[0].url, "effect_authority_url": clients[1].url,
             "command_admin_key_digest": hashlib.sha256(clients[0].request_key).hexdigest(),
-            "effect_admin_key_digest": hashlib.sha256(clients[1].request_key).hexdigest()}).decode()
+            "effect_admin_key_digest": hashlib.sha256(clients[1].request_key).hexdigest()}
+        if self.receiver_fence_client is not None:
+            from .external_agent_receiver import HTTPReceiverFenceClient
+            receiver = self.receiver_fence_client
+            if (not isinstance(receiver, HTTPReceiverFenceClient)
+                    or receiver is not self.effect_gateway.endpoint_client
+                    or canonical_bytes(receiver.pin()) != canonical_bytes(binding["endpoint_pin"])):
+                raise ControlError("AGENT_COORDINATOR_RECEIVER_BINDING_MISMATCH")
+            configuration["receiver_fence"] = {"required": True, "url": receiver.url,
+                "pin": receiver.pin(), "operator_key_digest": hashlib.sha256(require_key(receiver.operator_key)).hexdigest()}
+        return canonical_bytes(configuration).decode()
 
-    def _connection(self):
-        if self._closed or not self.db_path.is_file() or any(path.is_symlink() for path in (self.db_path, *self.db_path.parents)):
+    def _connection(self, *, read_completed: bool = False):
+        if (self._closed and not read_completed) or not self.db_path.is_file() or any(path.is_symlink() for path in (self.db_path, *self.db_path.parents)):
             raise ControlError("AGENT_COORDINATOR_STATE_MISSING")
         db = connect(self.db_path, create=False)
         try:
@@ -288,8 +306,12 @@ class ExternalAgentCoordinator:
             self._close_local(reason)
         except Exception as exc:
             return self._emergency_contain("DURABLE_COORDINATOR_UNAVAILABLE", exc)
+        failures = []
+        try:
+            self._stop_receiver()
+        except Exception as exc:
+            failures.append({"branch": "receiver_fence", "reason": _reason(exc)})
         with self._operation_lock:
-            failures = []
             for branch, client in (("command", self.command_admin_client), ("effect", self.effect_admin_client)):
                 try:
                     result = client.stop(self.run_binding[branch]["root_id"])
@@ -297,6 +319,33 @@ class ExternalAgentCoordinator:
                 except Exception as exc:
                     failures.append({"branch": branch, "reason": _reason(exc)})
             return self._reconcile_closed(failures)
+
+    def _stop_receiver(self) -> None:
+        """Obtain a receiver ACK before aggregate STOP can become terminal.
+
+        A G02 coordinator has no receiver participant. G03 uses the endpoint's
+        independently keyed control route; no gateway lock is acquired here.
+        """
+        if self.receiver_fence_client is None:
+            return
+        from .external_agent_receiver_protocol import verify_receiver_fence
+        binding = self.run_binding["effect"]
+        result = self.receiver_fence_client.stop(binding["root_id"], epoch=binding["epoch"])
+        pair = self.receiver_fence_client.last_call_evidence()
+        fence = result.get("fence", result)
+        if (not verify_receiver_fence(fence, self.run_binding["endpoint_pin"])
+                or fence["root_id"] != binding["root_id"] or fence["epoch"] != binding["epoch"]):
+            raise ControlError("AGENT_RECEIVER_STOP_ACK_INVALID")
+        if (pair is None or pair["request"]["operation"] != "stop"
+                or pair["request"]["role"] != "operator"
+                or pair["request"]["payload"] != {"root_id": binding["root_id"], "epoch": binding["epoch"]}
+                or canonical_bytes(pair["response"]["result"]) != canonical_bytes(result)):
+            raise ControlError("AGENT_RECEIVER_STOP_EVIDENCE_INVALID")
+        with self._receiver_fence_ack_lock:
+            if self._receiver_fence_ack is not None and canonical_bytes(self._receiver_fence_ack) != canonical_bytes(fence):
+                raise ControlError("AGENT_RECEIVER_STOP_ACK_CHANGED")
+            self._receiver_fence_ack = json.loads(canonical_bytes(fence))
+        self._event("RECEIVER_STOP", result=result, pair=pair)
 
     def _emergency_contain(self, reason: str, error: BaseException) -> dict:
         """Independent best efforts when coordinator journaling is unavailable.
@@ -321,6 +370,12 @@ class ExternalAgentCoordinator:
                 cleanup = self.supervisor.cleanup(self._command_id)
             except BaseException as exc:
                 failures.append({"branch": "owned_cleanup", "reason": _reason(exc)})
+        # An unavailable journal cannot certify aggregate STOP. Attempt the
+        # independent containment steps before a possibly slow receiver RPC.
+        try:
+            self._stop_receiver()
+        except BaseException as exc:
+            failures.append({"branch": "receiver_fence", "reason": _reason(exc)})
         return {"schema": "liminal-agent-stop-aggregate-v1", "run_id": self.run_binding["run_id"],
             "run_binding_digest": digest(self.run_binding), "status": "UNKNOWN", "admission_closed": True,
             "reason": reason, "cleanup": cleanup, "failures": failures, "authority_observations": [],
@@ -383,7 +438,10 @@ class ExternalAgentCoordinator:
             failures.append({"branch": "supervisor_observation", "reason": _reason(exc)})
         known = command is not None and effect is not None
         local_quiescent = cleanup.get("process_quiescent") is True and callbacks_finished and bridge_finished and cli_reaped
-        if not known or self._state()["watcher_failed"]:
+        with self._receiver_fence_ack_lock:
+            receiver_ack = json.loads(canonical_bytes(self._receiver_fence_ack))
+        receiver_verified = self.receiver_fence_client is None or receiver_ack is not None
+        if not known or self._state()["watcher_failed"] or not receiver_verified:
             status = "UNKNOWN"
         elif command["admission_closed"] is not True or effect["admission_closed"] is not True:
             status = "UNKNOWN"
@@ -407,6 +465,9 @@ class ExternalAgentCoordinator:
             "attach_cli_reaped": cli_reaped, "lifecycle_receipts_verified": lifecycle_verified,
             "failures": failures, "observed_at": time.time(), "execution_authorized": False,
             "business_effects": "ENDPOINT_RECEIPTS_ONLY", "model_calls": 0}
+        if self.receiver_fence_client is not None:
+            aggregate["receiver_fence"] = receiver_ack
+            aggregate["receiver_fence_verified"] = receiver_verified
         self._update(state="STOPPED" if status == "STOPPED" else "CLOSING", aggregate=aggregate)
         return aggregate
 
@@ -490,11 +551,15 @@ class ExternalAgentCoordinator:
         self._watcher = threading.Thread(target=self._watch, name="liminal-agent-host-watcher", daemon=True)
         self._watcher.start()
 
-    def inventory(self) -> dict:
-        with self._connection() as db:
+    def inventory(self, *, completed: bool = False) -> dict:
+        if type(completed) is not bool or completed and self.receiver_fence_client is None:
+            raise ControlError("AGENT_COMPLETED_RECEIVER_CAPTURE_REQUIRED")
+        with self._connection(read_completed=completed) as db:
             db.execute("BEGIN")
             state = json.loads(db.execute("SELECT state_json FROM agent_coordinator_run WHERE singleton=1").fetchone()[0])
             events = [json.loads(row[0]) for row in db.execute("SELECT event_json FROM agent_coordinator_events ORDER BY sequence")]
+        if self._closed and state["state"] != "STOPPED":
+            raise ControlError("AGENT_COMPLETED_CAPTURE_NOT_STOPPED")
         return {"profile": AGENT_PROFILE, "run_binding": _copy(self.run_binding), "run_binding_digest": digest(self.run_binding),
                 "state": state, "events": events, "watcher_alive": bool(self._watcher and self._watcher.is_alive()),
                 "execution_authorized": False}

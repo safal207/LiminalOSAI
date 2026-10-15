@@ -67,7 +67,7 @@ def build_channel_inventory(*, spec: Any, run_binding: Any, bridge_configuration
     bridge_digest = digest(item["bridge_configuration"])
     gate = "exact-host-grant-and-fresh-external-BEGIN"
     watcher = "bound-live-fresh-host-watchdog"
-    return {
+    channels = {
         "worker_network": {"mode": "DENIED", "boundary": "docker-network-none"},
         "worker_workspace": {"mode": "READ_ONLY", "mount": _copy(spec["workspace_mount"]),
                              "fixture_sha256": spec["fixture_sha256"]},
@@ -96,6 +96,14 @@ def build_channel_inventory(*, spec: Any, run_binding: Any, bridge_configuration
             "maximum_health_age_seconds": WATCHDOG_MAX_AGE_SECONDS, "reconciliation_dispatches_effects": False},
         "external_model_mcp_host_shell_delegation": {"mode": "DENIED", "supported_routes": []},
     }
+    route = item["bridge_configuration"]["effect_gateway_configuration"]
+    if route.get("schema") == "liminal-receiver-fenced-effect-gateway-store-v1":
+        channels["host_receiver_fence_control"] = {"mode": "TRUSTED_CONTROL",
+            "endpoint_url": item["endpoint_url"], "endpoint_pin": _copy(binding["endpoint_pin"]),
+            "role": "operator", "agent_credentials": False,
+            "contract_digest": digest(route["receiver_fence"]),
+            "linearization": "RECEIVER_SQLITE_TRANSACTION"}
+    return channels
 
 
 def _callable_identity(value: Any) -> tuple:
@@ -167,7 +175,7 @@ class ClosedChannelLaunchGate:
             raise ControlError("AGENT_LAUNCH_ROUTE_BINDING_MISMATCH")
         if (self._coordinator is not None
                 and item["bridge_configuration"]["effect_gateway_configuration"].get("schema")
-                    == "liminal-closed-channel-effect-gateway-store-v1"
+                    in ("liminal-closed-channel-effect-gateway-store-v1", "liminal-receiver-fenced-effect-gateway-store-v1")
                 and getattr(gateway, "launch_gate", None) is not self):
             raise ControlError("AGENT_LAUNCH_EFFECT_GATE_BINDING_MISMATCH")
         for name, branch, role, url in (
@@ -202,10 +210,14 @@ class ClosedChannelLaunchGate:
             "endpoint": ("commit", "query"),
         }
         if json.loads(self._inputs_bytes)["bridge_configuration"]["effect_gateway_configuration"].get("schema") \
-                == "liminal-closed-channel-effect-gateway-store-v1":
+                in ("liminal-closed-channel-effect-gateway-store-v1", "liminal-receiver-fenced-effect-gateway-store-v1"):
             route_names["coordinator"] += ("close_admission",)
             route_names["gateway"] += ("_before_endpoint_commit", "bind_launch_gate")
             route_names["bridge"] += ("inventory",)
+        if json.loads(self._inputs_bytes)["bridge_configuration"]["effect_gateway_configuration"].get("schema") \
+                == "liminal-receiver-fenced-effect-gateway-store-v1":
+            route_names["coordinator"] += ("_stop_receiver",)
+            route_names["endpoint"] += ("stop",)
         routes = {(name, method): _callable_identity(getattr(objects[name], method, None))
             for name, methods in route_names.items() for method in methods}
         self._objects, self._routes, self._coordinator = objects, routes, coordinator
@@ -234,7 +246,7 @@ class ClosedChannelLaunchGate:
         if type(state) is not dict or state.get("closed") is not False:
             raise ControlError("AGENT_LAUNCH_FENCED")
         if json.loads(self._inputs_bytes)["bridge_configuration"]["effect_gateway_configuration"].get("schema") \
-                == "liminal-closed-channel-effect-gateway-store-v1":
+                in ("liminal-closed-channel-effect-gateway-store-v1", "liminal-receiver-fenced-effect-gateway-store-v1"):
             bridge_state = objects["bridge"].inventory()
             if type(bridge_state) is not dict or bridge_state.get("fenced") is not False:
                 raise ControlError("AGENT_LAUNCH_BRIDGE_FENCED")
