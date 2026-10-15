@@ -43,9 +43,15 @@ filters apply:
 These Core jobs are path-scoped on pull requests; they are not emitted for every
 documentation-only change. Repository security workflows that are intentionally
 path- or feature-scoped must also be required whenever they are applicable to a
-PR. Prefer a GitHub Ruleset / required-workflow configuration for this when
-available, because static branch-protection check contexts are a poor fit for
-jobs that do not run on every change.
+PR. A ruleset-required workflow is not a path-conditional gate: GitHub ignores
+event filters such as `paths`, `branches` and `types` for these workflows.
+Requiring Core CI this way therefore runs it on documentation-only pull requests
+as well. To retain conditional enforcement instead, first implement and validate
+an always-emitted required applicability gate that fails closed unless every
+applicable specialized check succeeds for the exact revision. That selector is
+not established by the generic baseline gate described above.
+
+See GitHub's [ruleset workflow event behavior](https://docs.github.com/en/enterprise-cloud@latest/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/troubleshooting-rules#supported-ruleset-workflow-events).
 
 Examples of security-critical workflow families currently present in the repository include governance/identity, portable receipts, capability broker, egress, causal escalation, containment, runtime mediation, session recorder, and isolated execution checks. Do not mark a path-scoped check as globally required unless the workflow is guaranteed to emit that check for every pull request; otherwise merges can become permanently blocked on an expected-but-never-created check.
 
@@ -66,8 +72,12 @@ Use a repository Ruleset targeting the default branch if available. Otherwise us
 - Require status checks before merging.
 - Require the branch to be up to date before merging, unless a merge queue/ruleset provides an equivalent exact-head guarantee.
 - Require `Governance Required Gate` on every pull request targeting `main`.
-- Enforce the three Core CI jobs listed above when their path filters apply.
-- Add security-critical path-specific workflows through required-workflow rules where GitHub supports them.
+- Enforce all three Core CI jobs listed above. A ruleset-required Core workflow
+  runs on every pull request, regardless of its ordinary event path filters.
+- For specialized workflows, choose unconditional required-workflow enforcement,
+  or implement and verify the always-emitted applicability gate before requiring
+  it. Do not treat required-workflow rules as honoring path filters, and do not
+  make a sometimes-absent job context globally required.
 
 The baseline centralizes generic repository regression coverage. Specialized
 workflows retain their focused assertions, real Docker probes, signed fixtures,
