@@ -1,0 +1,482 @@
+{
+  "schema": "liminal-containment-assurance-graph-v1",
+  "classification": "EVIDENCE_ONLY",
+  "execution_authorized": false,
+  "scope": {
+    "claim": "Declared G03 synthetic receiver effect paths require the listed existing controls; this file is an assurance model, not a new runtime gate.",
+    "basis_commit": "69dedf3796d190fbf2da54fb95dfc6560a3663e6",
+    "basis_tree": "e834916ff40ec4e30601cef3f45c0993986fe7b8",
+    "universal_escape_prevention": false,
+    "assumptions": [
+      "trusted_host",
+      "trusted_operator_keys",
+      "trusted_authority_stores",
+      "trusted_docker_daemon",
+      "trusted_host_clock",
+      "declared_routes_complete"
+    ]
+  },
+  "spaces": [
+    "ideas",
+    "project",
+    "real",
+    "time"
+  ],
+  "source_bindings": [
+    {
+      "id": "idea_store",
+      "path": "sdk/liminal_agent_control/center_continuity.py",
+      "sha256": "5ba3284a7ec36facf3065d2dbfa3a05590f10077fb0fe250fbedd6bf43f5b931",
+      "symbol": "CenterContinuityStore.record_idea"
+    },
+    {
+      "id": "projection_store",
+      "path": "sdk/liminal_agent_control/center_continuity.py",
+      "sha256": "5ba3284a7ec36facf3065d2dbfa3a05590f10077fb0fe250fbedd6bf43f5b931",
+      "symbol": "CenterContinuityStore.project"
+    },
+    {
+      "id": "orientation",
+      "path": "sdk/liminal_agent_control/orientation.py",
+      "sha256": "b67ecbdcaa8840f05301f49f9ca2d82673c1c12c9bf2658d764540ae7dd42852",
+      "symbol": "admission_in_transaction"
+    },
+    {
+      "id": "session_authority",
+      "path": "sdk/liminal_agent_control/brakes_store.py",
+      "sha256": "e64f2929e0b360e7f2783ad28818182c8c6b9824a80dc415c88834fdcb1d994b",
+      "symbol": "SessionAuthority"
+    },
+    {
+      "id": "observer_auth",
+      "path": "sdk/liminal_agent_control/observer_auth.py",
+      "sha256": "01eedb9270a06f807336415a915faaf1a40d79810104fca227d35c754562c0bc",
+      "symbol": "ObserverAuthStore.ingest"
+    },
+    {
+      "id": "launch_inventory",
+      "path": "sdk/liminal_agent_control/external_agent_launch.py",
+      "sha256": "f14c52c825518cbb7f6abae0b43e7027a04a21a1827025c0c9909037bb45a7bd",
+      "symbol": "build_channel_inventory"
+    },
+    {
+      "id": "launch_gate",
+      "path": "sdk/liminal_agent_control/external_agent_launch.py",
+      "sha256": "f14c52c825518cbb7f6abae0b43e7027a04a21a1827025c0c9909037bb45a7bd",
+      "symbol": "ClosedChannelLaunchGate.assert_ready"
+    },
+    {
+      "id": "channel_inspect",
+      "path": "sdk/liminal_agent_control/external_agent_channels.py",
+      "sha256": "e9a709011c22887708f7e31f7d5700a28bf3a4271c82d0d796bb02cbd1bfafc4",
+      "symbol": "verify_agent_channels"
+    },
+    {
+      "id": "proposal_bridge",
+      "path": "sdk/liminal_agent_control/external_agent_bridge.py",
+      "sha256": "cc0b3c7e073d3b6555b57a92a8681d9d5b2479232df0209aafeea5f678df2b5b",
+      "symbol": "ExternalAgentBridge"
+    },
+    {
+      "id": "effect_gateway",
+      "path": "sdk/liminal_agent_control/external_agent_receiver_gateway.py",
+      "sha256": "8c59347da2fbcf7b38e2d5a79784da3f20dc1a2d339005960151fada524e1e20",
+      "symbol": "ReceiverFencedEffectGateway"
+    },
+    {
+      "id": "effect_authority",
+      "path": "sdk/liminal_agent_control/external_authority.py",
+      "sha256": "ddb4e24a09916d5d45aabdbcc624000293fdc432949e27933d9555d4896be415",
+      "symbol": "ExternalAuthorityStore"
+    },
+    {
+      "id": "begin_permit",
+      "path": "sdk/liminal_agent_control/external_authority.py",
+      "sha256": "ddb4e24a09916d5d45aabdbcc624000293fdc432949e27933d9555d4896be415",
+      "symbol": "ExternalAuthorityStore.begin"
+    },
+    {
+      "id": "dispatch_recheck",
+      "path": "sdk/liminal_agent_control/external_agent_effect_gateway.py",
+      "sha256": "6da6a4f7ffa052a30c4abb21b2b3089758518221cd382a468b0fddebf5638778",
+      "symbol": "ClosedChannelEffectGateway._before_endpoint_commit"
+    },
+    {
+      "id": "receiver_store",
+      "path": "sdk/liminal_agent_control/external_agent_receiver.py",
+      "sha256": "3f09fa9fe78d5d746c20cd7de69c4b0cfcdbf4f898888e40e94183446a6a48f6",
+      "symbol": "ReceiverFenceStore"
+    },
+    {
+      "id": "coordinator",
+      "path": "sdk/liminal_agent_control/external_agent_coordinator.py",
+      "sha256": "4c5f3fe79e3ab5147fb75f172df513f710c806aa67084681f9048c72a3b80578",
+      "symbol": "ExternalAgentCoordinator"
+    },
+    {
+      "id": "receiver_demo",
+      "path": "sdk/liminal_agent_control/external_agent_receiver_demo.py",
+      "sha256": "f7af0f137951dfdd6fe08c82b30dc1122574bbaad3ef98390e3fa24408d38d31"
+    },
+    {
+      "id": "receiver_verifier",
+      "path": "scripts/verify_external_agent_receiver_evidence.py",
+      "sha256": "811b3c756de1ef732592de7c77a3fe7028b3d73da181b9791be7eda70c3e1480",
+      "symbol": "verify_report"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "idea",
+      "space": "ideas",
+      "kind": "idea",
+      "binding": "idea_store"
+    },
+    {
+      "id": "projection",
+      "space": "project",
+      "kind": "projection",
+      "binding": "projection_store"
+    },
+    {
+      "id": "orientation_admission",
+      "space": "project",
+      "kind": "control",
+      "binding": "orientation"
+    },
+    {
+      "id": "session_admission",
+      "space": "project",
+      "kind": "control",
+      "binding": "session_authority"
+    },
+    {
+      "id": "signed_observation",
+      "space": "real",
+      "kind": "evidence",
+      "binding": "observer_auth"
+    },
+    {
+      "id": "proposal",
+      "space": "ideas",
+      "kind": "proposal"
+    },
+    {
+      "id": "launch",
+      "space": "project",
+      "kind": "control",
+      "binding": "launch_gate"
+    },
+    {
+      "id": "inventory",
+      "space": "project",
+      "kind": "control",
+      "binding": "launch_inventory"
+    },
+    {
+      "id": "inspect",
+      "space": "real",
+      "kind": "control",
+      "binding": "channel_inspect"
+    },
+    {
+      "id": "bridge",
+      "space": "project",
+      "kind": "control",
+      "binding": "proposal_bridge"
+    },
+    {
+      "id": "authorization",
+      "space": "project",
+      "kind": "control",
+      "binding": "effect_authority"
+    },
+    {
+      "id": "begin",
+      "space": "time",
+      "kind": "control",
+      "binding": "begin_permit"
+    },
+    {
+      "id": "dispatch_recheck",
+      "space": "time",
+      "kind": "control",
+      "binding": "dispatch_recheck"
+    },
+    {
+      "id": "receiver_fence",
+      "space": "real",
+      "kind": "control",
+      "binding": "receiver_store"
+    },
+    {
+      "id": "synthetic_effect",
+      "space": "real",
+      "kind": "effect",
+      "binding": "receiver_store"
+    },
+    {
+      "id": "stop",
+      "space": "time",
+      "kind": "control",
+      "binding": "coordinator"
+    },
+    {
+      "id": "unknown_query",
+      "space": "time",
+      "kind": "control",
+      "binding": "effect_gateway"
+    },
+    {
+      "id": "runtime_report",
+      "space": "real",
+      "kind": "evidence",
+      "binding": "receiver_demo"
+    },
+    {
+      "id": "independent_verifier",
+      "space": "project",
+      "kind": "evidence",
+      "binding": "receiver_verifier"
+    }
+  ],
+  "edges": [
+    {
+      "from": "proposal",
+      "to": "launch",
+      "kind": "flow"
+    },
+    {
+      "from": "launch",
+      "to": "bridge",
+      "kind": "flow"
+    },
+    {
+      "from": "bridge",
+      "to": "authorization",
+      "kind": "flow"
+    },
+    {
+      "from": "authorization",
+      "to": "begin",
+      "kind": "flow"
+    },
+    {
+      "from": "begin",
+      "to": "dispatch_recheck",
+      "kind": "flow"
+    },
+    {
+      "from": "dispatch_recheck",
+      "to": "receiver_fence",
+      "kind": "flow"
+    },
+    {
+      "from": "receiver_fence",
+      "to": "synthetic_effect",
+      "kind": "flow"
+    },
+    {
+      "from": "idea",
+      "to": "projection",
+      "kind": "describes"
+    },
+    {
+      "from": "projection",
+      "to": "orientation_admission",
+      "kind": "describes"
+    },
+    {
+      "from": "orientation_admission",
+      "to": "session_admission",
+      "kind": "supports"
+    },
+    {
+      "from": "signed_observation",
+      "to": "orientation_admission",
+      "kind": "supports"
+    },
+    {
+      "from": "inventory",
+      "to": "launch",
+      "kind": "supports"
+    },
+    {
+      "from": "inspect",
+      "to": "launch",
+      "kind": "supports"
+    },
+    {
+      "from": "runtime_report",
+      "to": "independent_verifier",
+      "kind": "supports"
+    },
+    {
+      "from": "independent_verifier",
+      "to": "receiver_fence",
+      "kind": "supports"
+    },
+    {
+      "from": "stop",
+      "to": "begin",
+      "kind": "invalidates"
+    },
+    {
+      "from": "stop",
+      "to": "dispatch_recheck",
+      "kind": "invalidates"
+    },
+    {
+      "from": "stop",
+      "to": "receiver_fence",
+      "kind": "requests_fence"
+    },
+    {
+      "from": "receiver_fence",
+      "to": "unknown_query",
+      "kind": "describes"
+    }
+  ],
+  "requirements": [
+    {
+      "id": "g03_receiver_effect",
+      "entry": "proposal",
+      "target": "synthetic_effect",
+      "ordered_guards": [
+        "launch",
+        "bridge",
+        "authorization",
+        "begin",
+        "dispatch_recheck",
+        "receiver_fence"
+      ]
+    }
+  ],
+  "channels": [
+    {
+      "id": "worker_network",
+      "mode": "DENIED",
+      "barrier": "launch",
+      "inventory_binding": "launch_inventory",
+      "inspection_binding": "channel_inspect"
+    },
+    {
+      "id": "worker_workspace",
+      "mode": "READ_ONLY",
+      "barrier": "launch",
+      "inventory_binding": "launch_inventory",
+      "inspection_binding": "channel_inspect"
+    },
+    {
+      "id": "worker_host_filesystem",
+      "mode": "DENIED",
+      "barrier": "launch",
+      "inventory_binding": "launch_inventory",
+      "inspection_binding": "channel_inspect"
+    },
+    {
+      "id": "worker_control_sockets_devices",
+      "mode": "DENIED",
+      "barrier": "launch",
+      "inventory_binding": "launch_inventory",
+      "inspection_binding": "channel_inspect"
+    },
+    {
+      "id": "worker_host_namespaces",
+      "mode": "RESTRICTED",
+      "barrier": "launch",
+      "inventory_binding": "launch_inventory",
+      "inspection_binding": "channel_inspect"
+    },
+    {
+      "id": "worker_local_tmpfs_processes",
+      "mode": "CONFINED",
+      "barrier": "launch",
+      "inventory_binding": "launch_inventory",
+      "inspection_binding": "channel_inspect"
+    },
+    {
+      "id": "worker_stdio_proposals",
+      "mode": "MEDIATED",
+      "barrier": "launch",
+      "inventory_binding": "launch_inventory",
+      "inspection_binding": "channel_inspect"
+    },
+    {
+      "id": "worker_stdio_claims",
+      "mode": "OBSERVATION_ONLY",
+      "barrier": "launch",
+      "inventory_binding": "launch_inventory",
+      "inspection_binding": "channel_inspect"
+    },
+    {
+      "id": "worker_stderr",
+      "mode": "OBSERVATION_ONLY",
+      "barrier": "launch",
+      "inventory_binding": "launch_inventory",
+      "inspection_binding": "channel_inspect"
+    },
+    {
+      "id": "host_command_lifecycle",
+      "mode": "MEDIATED",
+      "barrier": "launch",
+      "inventory_binding": "launch_inventory",
+      "inspection_binding": "channel_inspect"
+    },
+    {
+      "id": "host_endpoint_effect",
+      "mode": "MEDIATED",
+      "barrier": "launch",
+      "inventory_binding": "launch_inventory",
+      "inspection_binding": "channel_inspect"
+    },
+    {
+      "id": "host_authority_control",
+      "mode": "TRUSTED_CONTROL",
+      "barrier": "launch",
+      "inventory_binding": "launch_inventory",
+      "inspection_binding": "channel_inspect"
+    },
+    {
+      "id": "host_watchdog_stop_reconciliation",
+      "mode": "TRUSTED_CONTROL",
+      "barrier": "launch",
+      "inventory_binding": "launch_inventory",
+      "inspection_binding": "channel_inspect"
+    },
+    {
+      "id": "external_model_mcp_host_shell_delegation",
+      "mode": "DENIED",
+      "barrier": "launch",
+      "inventory_binding": "launch_inventory",
+      "inspection_binding": "channel_inspect"
+    },
+    {
+      "id": "host_receiver_fence_control",
+      "mode": "TRUSTED_CONTROL",
+      "barrier": "receiver_fence",
+      "inventory_binding": "launch_inventory",
+      "inspection_binding": "channel_inspect"
+    }
+  ],
+  "evidence_roles": {
+    "producer": "receiver_demo",
+    "verifier": "receiver_verifier"
+  },
+  "temporal_contract": {
+    "expiry": "BEGIN_ADMISSION_ONLY",
+    "stop_linearization": "RECEIVER_TRANSACTION_WINNER",
+    "unknown": "PRESERVE_RESERVATION_QUERY_ONLY",
+    "committed": "IMMUTABLE_AFTER_STOP",
+    "no_effect": "SIGNED_RECEIVER_FENCE_ONLY",
+    "future_plan": "NOT_AUTHORIZATION"
+  },
+  "gaps": {
+    "g03_orientation": "NOT_CONNECTED",
+    "kernel_escape_resistance": "NOT_ESTABLISHED",
+    "compromised_host_or_daemon": "NOT_ESTABLISHED",
+    "live_llm": "NOT_RUN",
+    "unknown_channels": "NOT_ESTABLISHED",
+    "independent_operator_reproduction": "NOT_ESTABLISHED"
+  }
+}

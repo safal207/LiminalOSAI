@@ -183,3 +183,8 @@ insert. Trusted host/operator/receiver/authority processes, local stores, keys,
 Docker daemon and source/image provenance are explicit trust inputs. Kernel
 escape resistance, host compromise, database rollback, remote business effects,
 live-model behavior and general containment remain outside the result.
+
+The [four-space assurance graph](CONTAINMENT_ASSURANCE_GRAPH.md) links these
+bounded controls to ideas, project structure, observations and time. Its checker
+does not grant execution authority; the ordinary orientation/idea profile is
+explicitly not connected to the G03 runtime.
