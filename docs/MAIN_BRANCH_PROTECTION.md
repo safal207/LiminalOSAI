@@ -27,19 +27,43 @@ This runbook defines the repository-level control plane that must surround the r
 
 ## Minimum always-required checks
 
-The current Core CI workflow produces three always-on jobs that should be required for `main`:
+`Governance Required Gate` is the always-on baseline context for every pull
+request targeting `main`. It also runs on pushes to `main` and manual dispatch.
+The job calls `make validate`: both binaries, smoke checks, all C test executables
+and automatic discovery of every `tests/test_*.py` module. Empty discovery,
+import errors, failures, skipped tests and expected failures cannot satisfy it.
+
+The Core CI workflow retains complete compiler and sanitizer runs when its path
+filters apply:
 
 - `gcc strict build`
 - `clang strict build`
 - `ASan and UBSan`
 
-Repository security workflows that are intentionally path- or feature-scoped must also be required whenever they are applicable to a PR. Prefer a GitHub Ruleset / required-workflow configuration for this when available, because static branch-protection check contexts are a poor fit for jobs that do not run on every change.
+These Core jobs are path-scoped on pull requests; they are not emitted for every
+documentation-only change. Repository security workflows that are intentionally
+path- or feature-scoped must also be required whenever they are applicable to a
+PR. A ruleset-required workflow is not a path-conditional gate: GitHub ignores
+event filters such as `paths`, `branches` and `types` for these workflows.
+Requiring Core CI this way therefore runs it on documentation-only pull requests
+as well. To retain conditional enforcement instead, first implement and validate
+an always-emitted required applicability gate that fails closed unless every
+applicable specialized check succeeds for the exact revision. That selector is
+not established by the generic baseline gate described above.
+
+See GitHub's [ruleset workflow event behavior](https://docs.github.com/en/enterprise-cloud@latest/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/troubleshooting-rules#supported-ruleset-workflow-events).
 
 Examples of security-critical workflow families currently present in the repository include governance/identity, portable receipts, capability broker, egress, causal escalation, containment, runtime mediation, session recorder, and isolated execution checks. Do not mark a path-scoped check as globally required unless the workflow is guaranteed to emit that check for every pull request; otherwise merges can become permanently blocked on an expected-but-never-created check.
 
 ## Recommended GitHub configuration
 
 Use a repository Ruleset targeting the default branch if available. Otherwise use classic branch protection with equivalent settings.
+
+Required-workflow enforcement is a separate organization- or enterprise-level
+ruleset capability; it is not provided by a repository ruleset or classic branch
+protection. If that capability is unavailable, require emitted job contexts only
+after the workflows are configured to run on every pull request. The current
+path-filtered Core CI workflow does not yet satisfy that prerequisite.
 
 ### Pull request gate
 
@@ -53,8 +77,39 @@ Use a repository Ruleset targeting the default branch if available. Otherwise us
 
 - Require status checks before merging.
 - Require the branch to be up to date before merging, unless a merge queue/ruleset provides an equivalent exact-head guarantee.
-- Require the three Core CI jobs listed above.
-- Add security-critical path-specific workflows through required-workflow rules where GitHub supports them.
+- Require `Governance Required Gate` on every pull request targeting `main`.
+- The current `governance-required-gate.yml` has no `merge_group` trigger, so use
+  the up-to-date-branch option above. Before enabling a merge queue, add
+  `merge_group` to every required Actions workflow, validate its event/source
+  handling and prove the required checks are emitted for the actual merge group.
+  Existing PR or push checks do not establish queue readiness.
+- Preserve enforcement of all three Core CI jobs listed above. Where an
+  organization or enterprise required-workflow rule is available, requiring
+  Core CI runs it on every pull request regardless of ordinary event filters.
+  With a repository ruleset or classic protection, first configure Core CI to
+  run on every pull request, then require its three job contexts. Do not require
+  its currently path-filtered contexts globally before that change.
+- For specialized workflows, choose organization/enterprise unconditional
+  required-workflow enforcement where available, or implement and verify the
+  always-emitted applicability gate before requiring it. Do not treat
+  required-workflow rules as honoring path filters, and do not make a
+  sometimes-absent job context globally required.
+
+These are prerequisites, not claims that the current repository configuration
+already meets the target state. See GitHub's [merge-queue check requirements](https://docs.github.com/en/enterprise-cloud@latest/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#status-checks-with-github-actions-and-a-merge-queue)
+and [ruleset workflow availability](https://docs.github.com/en/enterprise-cloud@latest/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#require-workflows-to-pass-before-merging).
+
+The baseline centralizes generic repository regression coverage. Specialized
+workflows retain their focused assertions, real Docker probes, signed fixtures,
+offline verifier checks and evidence exports. A baseline pass does not establish
+that an applicable backend or evidence workflow ran. Redundant generic full-suite
+steps have been removed from those workflows; compiler and sanitizer jobs still
+run the complete suite under their respective build profiles.
+
+Forbidden-content checks use `scripts/check_forbidden.py` to preserve the grep
+exit-status contract: a match fails, a clean scan passes, and scanner errors fail.
+The helper suppresses matching content, and scanner workflows include its path
+in their triggers. A later successful command cannot repair a failed scan.
 
 ### History / destructive operations
 
@@ -135,7 +190,8 @@ The issue may be closed only when all are true:
 - [ ] GitHub branch/ruleset metadata reports protection/enforcement for `main`.
 - [ ] Direct ordinary pushes are rejected.
 - [ ] PRs are required.
-- [ ] Core CI required checks are configured.
+- [ ] The always-on baseline required check is configured.
+- [ ] Applicable Core CI checks are enforced.
 - [ ] Applicable security-critical workflows are enforced without creating permanently pending checks.
 - [ ] Exact-head/up-to-date behavior is enforced.
 - [ ] Force pushes are blocked.

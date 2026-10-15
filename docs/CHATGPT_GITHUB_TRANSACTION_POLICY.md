@@ -188,6 +188,36 @@ engine.record_approval(
 
 Execution remains blocked until the entire ledger is ready.
 
+## Approval-ledger lock recovery
+
+Creation and append acquire an exclusive sibling file named after the ledger
+with `.lock` appended: `approval-ledger.json.lock` for `approval-ledger.json`.
+Contention fails explicitly. A killed writer can leave that file behind;
+there is no automatic reclamation based on PID, age or heartbeat.
+
+An authorized operator can recover it through a separate maintenance operation:
+
+1. Stop every service, worker, container and other writer using this ledger,
+   and prevent new writers from starting. Confirm that their ledger mutations
+   have ended and their process/file handles are released. Keep this exclusive
+   maintenance window for the entire recovery. A PID in the lock, missing open
+   descriptor or old timestamp alone does not prove quiescence: the writer
+   closes its lock descriptor before performing the protected mutation.
+2. Preserve the ledger, lock and relevant snapshot/journal files as incident
+   evidence. Validate the ledger hash chain against its original policy snapshot
+   and transaction inputs. If validation fails, stop recovery and reconcile the
+   inconsistency; do not rewrite entries, clear denials or fabricate approval.
+3. After proving all writers stopped, remove only this exact sibling `.lock`
+   file. Do not use wildcard lock deletion or remove a lock while another
+   process could still be using the ledger.
+4. Re-run policy verification and readiness checks, then restart writers.
+   Retain accepted denials and unresolved state. Record the recovery and its
+   verification results; lock removal does not authorize transaction execution.
+
+If exclusive maintenance cannot be established, leave the lock in place and
+continue failing closed. This is cooperative local-file coordination, not a
+distributed lock or protection against a privileged host writer.
+
 ## CLI
 
 Initialize policy artifacts for an existing v0.8 transaction:

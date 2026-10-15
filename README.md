@@ -1,262 +1,128 @@
+![LiminalOSAI — bounded actions, verifiable outcomes](docs/assets/liminalosai-banner.png)
+
 # LiminalOSAI
 
-Experimental C11 sandbox combining many small cognitive-leaning subsystems (awareness, coherence, dream, metabolic flow, affinity, mirror, collective graphs, phoenix rebirth, etc.). The project builds two binaries:
+**An experimental lab for bounded AI-agent actions and reproducible evidence.**
 
-- build/pulse_kernel: main orchestrator
-- build/liminal_core: substrate runner for long diagnostics
+Explore explicit authority, controlled execution, STOP and recovery, and receipts
+that let another system check what happened. The repository combines Python
+governance reference modules with a pulse-driven C11 research runtime.
 
-## Reviewer note
+**Experimental** · **C11 + Python** · **[MIT](LICENSE)**
 
-- [Experimental Scope](docs/EXPERIMENTAL_SCOPE.md) — clarifies that LiminalOSAI is an experimental cognitive-runtime sandbox, not a production OS, AGI claim, safety enforcement layer, or mature agent runtime.
-- Validation: `make`, `make check`, `make test`
+[Quickstart](#quickstart) · [Documentation](docs/README.md) ·
+[Verified draft experiment](docs/AGENT_CONTROL_REVIEW_INDEX.md) ·
+[Roadmap](ROADMAP.md) · [Contribute](#contribute)
 
-## Open agent-control experiment
+## Choose a path
 
-[Public roadmap and help-wanted tasks](https://github.com/safal207/LiminalOSAI/issues/195)
+| Your goal | Start here | Availability |
+| --- | --- | --- |
+| Build and inspect the C11 runtime | [Runtime guide](docs/C11_RUNTIME_GUIDE.md) | In this checkout |
+| Explore action plans, approvals and signed evidence | [Governance documentation](docs/README.md#python-governance-and-evidence) | Reference modules in this checkout |
+| Integrate a deterministic workload receipt | [TRCP Adapter SDK](docs/TRCP_ADAPTER_SDK.md) | In this checkout |
+| Review the owned-agent STOP experiments | [Review and reproduction index](docs/AGENT_CONTROL_REVIEW_INDEX.md) | Separate verified draft stack |
+| Explore the original research concepts | [Conceptual layer map](docs/LIMINAL_LAYER_MAP.md) | Research vocabulary, separately documented |
 
-A receiver-backed experiment for action authorization, revocation, crash recovery
-and independent evidence. Start with the [English technical review brief](docs/AGENT_CONTROL_OPENAI_REVIEW.md),
-[recorded evidence demo](docs/AGENT_CONTROL_DEMO.html) (download and open locally), or
-[first local reproduction](docs/AGENT_CONTROL_CLEAN_RUN.md#first-external-run-no-docker-or-model-key).
-See the [run guide](docs/AGENT_CONTROL.md),
-[EN/RU contributor guide](docs/AGENT_CONTROL_CONTRIBUTING.md), and
-[independent reproduction template](docs/AGENT_CONTROL_REPRODUCTION.md).
-Deterministic fixtures, Docker checks and live-model results have separate scopes;
-this work does not establish general sandbox-escape prevention.
+## What the project explores
 
-The [scripted multi-worker extension](docs/AGENT_CONTROL_MULTI_AGENT.md) composes
-peer authorization attempts, forged reports, queued descendant revocation and
-an offline service-relay comparison. It has its own runner and evidence scope.
+- **Bounded authority:** explicit scopes, immutable plans and separate execution authorization.
+- **Evidence:** trace records, canonical workload binding and signed receipts in defined profiles.
+- **Recovery:** uncertainty remains visible when responses, observations or settlement are missing.
+- **Runtime research:** small C11 subsystems, diagnostic traces and repeatable local experiments.
 
-The [durable session brakes](docs/AGENT_CONTROL_BRAKES.md) add one shared
-action budget, expiring authority and STOP gate for governed records and egress.
-The [portfolio review](docs/AGENT_CONTROL_PORTFOLIO_REVIEW.md) explains which
-mechanisms are reusable and which repositories provide diagnostics only.
+The [scope note](docs/EXPERIMENTAL_SCOPE.md) identifies the implemented surfaces
+and their trust assumptions. This is experimental reference software. Production
+readiness, general sandbox-escape resistance and AGI are not established.
 
-The [external STOP profile](docs/AGENT_CONTROL_EXTERNAL_STOP.md) keeps authority
-and permanent action consumption outside the receiver's local rollback domain.
-Its separate-process experiment restores old receiver state after STOP and
-checks actual effect counts. Unresolved permits keep STOP pending; they never
-become fresh permission through a timeout or retry.
+## Quickstart
 
-The [owned network STOP profile](docs/AGENT_CONTROL_EXTERNAL_NETWORK.md) adds a
-real loopback HTTP boundary with independently signed endpoint commit receipts.
-Lost responses remain uncertain, reconciliation does not redispatch, and
-external STOP stays pending until the owned endpoint result is confirmed.
+### Build the C11 runtime
 
-The [owned command STOP profile](docs/AGENT_CONTROL_EXTERNAL_COMMAND.md) adds
-a separately admitted Docker create/start lifecycle. Its trusted supervisor
-requires finished callbacks and verified owned process quiescence before
-settling external reservations.
+Requires a C compiler, Make and Python 3. From the repository root:
 
-The [isolated agent profile](docs/AGENT_CONTROL_ISOLATED_AGENT.md) puts a
-response-driven fixed-policy agent inside Docker. A bounded STDIO bridge keeps
-grants and keys on the host; aggregate STOP requires both external roots,
-owned process quiescence and settled endpoint effects. Its real Docker matrix
-uses no model API calls.
-
-Its [closed channel launcher](docs/AGENT_CONTROL_CLOSED_CHANNEL_LAUNCH.md)
-requires the fixed workflow's complete 14-channel inventory and a live, fresh
-host watcher. Missing or changed routes deny launch; actual Docker channel
-inspection is repeated before START and each endpoint-effect proposal.
-The [effect dispatch gate](docs/AGENT_CONTROL_EFFECT_DISPATCH_GATE.md) repeats
-readiness after signed BEGIN and before entering the endpoint POST callback;
-failure closes local admission while retaining the unresolved reservation.
-
-The [orientation graph](docs/AGENT_CONTROL_ORIENTATION.md) adds distinct
-per-agent observed trajectories, evidence freshness and bounded excursions
-from host-defined checkpoints. Its local timeline viewer separates pending
-transitions from confirmed state; orientation never issues authority.
-
-The [center timeline and observer ring](docs/AGENT_CONTROL_CENTER_CONTINUITY.md)
-add immutable time windows, hash-linked history, separate ideas and projections,
-and required observer roles. Missing or contradictory evidence holds continuation;
-observer agreement never overrides action authority.
-
-The [signed observer boundary](docs/AGENT_CONTROL_SIGNED_OBSERVERS.md) pins
-distinct Ed25519 public keys, binds replies to one-time challenges and rejects
-unsigned endorsements once installed. Its local example runs separate observer
-processes; process separation does not establish independent evidence sources.
-This optional profile requires the pinned dependencies in
-`experiments/agent_control/observer-requirements.txt`.
-
-The [isolated observer experiment](docs/AGENT_CONTROL_ISOLATED_OBSERVERS.md)
-generates observer keys inside separate restricted Docker containers and mounts
-only each role's read-only evidence directory. A persisted source profile binds
-each reply to a host-pinned packet and checks source freshness at later stages.
-The receiver, history and policy exports use separate collector paths; they
-remain within one trusted host's control in this experiment.
-
-## Build
-
-- Dependencies: gcc, make, python3
-- Compile: make
-- Clean artifacts: make clean
-
-## Run (common flags)
-
-./build/pulse_kernel [flags]
-
-- Visibility: --trace, --symbols, --reflect, --awareness, --coherence
-- Safety/health: --health-scan, --scan-report, --limit=<n>
-- Synchrony: --sync, --sync-trace, --phases=<4-16>
-- Dream: --dream, --dreamsync, --dream-log, --dream-threshold=<0-1>
-- Metabolic: --metabolic, --metabolic-trace, --vitality-threshold=<rest[:creative]>
-- Collective graph: --collective, --collective-trace, --collective-memory, --cm-trace, --cm-path=<path>, --cm-snapshot-interval=<n>
-- Affinity & consent: --affinity, --affinity-profile=care:0.6,respect:0.7,presence:0.5, --bond-trace, --allow-align-consent=<0-1>
-- Mirror clamps: --amp-min=<f>, --amp-max=<f>, --tempo-min=<f>, --tempo-max=<f>, --mirror-softness=<f>, --mirror-trace, --mirror
-- Introspection/harmony: --introspect, --harmony, --dry-run (print pipeline without running)
-- Anticipation v2: --ant2, --ant2-trace, --ant2-gain=<f>
-- Council & ensemble: --council, --council-log, --council-threshold=<0-1>, --ensemble-strategy=median|avg|leader, --group-target=<0-1>
-- Symbiosis/empathic: --human-bridge[=off], --human-trace, --human-source=keyboard|stdin|sine, --human-gain=<f>, --empathic, --empathic-trace, --empathy-gain=<f>, --emotion-source=audio|stdin, --memory, --memory-trace, --emotion-trace=<path>, --recognition-threshold=<0-1>
-- Other modules: --metabolic, --vse, --kiss, --trs, --astro, --qel, --strict-order
-
-See core/pulse_kernel.c for the full flag list and defaults.
-
-## Diagnostics & reports
-
-- Phoenix rebirth self-run: make rebirth
-- Phoenix trace report: make report
-- Metabolic report: make report-metabolic
-- Long substrate diagnostic (60 cycles, writes logs & summary): make long-run-diagnostics
-
-## TRCP Evidence Replay Benchmark
-
-> We don't just test whether an agent action succeeded. We verify that the intended financial state transition happened, that its evidence is bound to the workload, and that tampering is independently detectable.
-
-```
-21/21 scenarios · 12/12 tampers · 100% hash stability · 0 false confirmations
+```bash
+make
+make check
+./build/pulse_kernel --dry-run --limit=2
 ```
 
-A deterministic, local-only proof that the TRCP pipeline produces stable,
-independently verifiable, tamper-evident receipts for contract-state workloads
-(escrow: clean / illegal / invariant scenario classes, 12 adversarial bundle
-mutations). Determinism is proven on evidence hashes, not on wall-clock
-timing. Scope: evidence consistency/binding under mutation; producer-
-independent re-execution is a separate layer (see
-[docs/benchmark-v0.1.md](docs/benchmark-v0.1.md)).
+`make check` also runs the substrate binary. See the [runtime guide](docs/C11_RUNTIME_GUIDE.md)
+for options, diagnostics and both binaries.
 
-- [docs/benchmark-v0.1.md](docs/benchmark-v0.1.md) — what is checked, scenario classes, invariants, evidence binding, independent replay
-- [docs/RESONANCE_TRCP_EVIDENCE.md](docs/RESONANCE_TRCP_EVIDENCE.md) — why a green test is not enough for a financial AI agent
-- Run: `python3 scripts/benchmark_trcp_contract.py` → `artifacts/trcp-contract-benchmark.json` (gitignored)
+### Try a local evidence adapter
 
-### TRCP Adapter SDK v0.1
+This synthetic order-reservation example uses Python 3, without a model key or
+external service credentials:
 
-- [Five-minute external integration](docs/TRCP_ADAPTER_SDK.md)
-- Reference consumer: `python3 -m examples.trcp_external_consumer_reference.self_check`
-- Focused tests: `make trcp-sdk-test`
+```bash
+python3 -m examples.trcp_external_consumer_reference.self_check
+python3 -m examples.trcp_external_consumer_reference.self_check --execution-replay
+```
 
-## Layout
+Binding verification and execution replay are reported separately. The first
+command reports execution replay as `NOT_RUN`; the second invokes the example's
+consumer-owned replay hook. [Integration guide](docs/TRCP_ADAPTER_SDK.md).
 
-- Core loop: core/pulse_kernel.c
-- Modules: core/ (astro, kiss, consent gate, etc.), affinity/, anticipation/, awareness/, coherence/, collective/, dream/, metabolic/, mirror/, reflection/, symbol/, synchrony/, symbiosis/, empathic/, memory/
-- Docs: docs/ (phoenix layer manifest, timezone note); reports: phoenix_report.py, metabolic_report.py
+### Run the baseline checks
 
-## Карта слоёв LIMINAL-EDGE (L0–L30)
+The complete suite also requires the OpenSSL executable and a GNU-compatible
+linker supporting `--wrap` for the C probes. It is validated on Linux; see the
+[runtime guide](docs/C11_RUNTIME_GUIDE.md) for platform requirements.
 
-> Один взгляд: от «клетки» к «существу», от сырого сигнала до инсайта и удачи.
+```bash
+make validate
+```
 
-### Блок 1. Основание организма (L0–L5)
+This builds both runtimes and runs smoke checks, C tests and all discovered
+Python tests. [Architecture review and refactoring](docs/ARCHITECTURE_REVIEW.md)
+describes the module boundaries, reproduced defects and efficiency probes.
 
-- **L0 – Core & Pulse**
-  - Базовый «пульс» системы: первичная инициализация, heartbeat, минимальная жизнеспособность.
-  - Вопрос: «Жив ли я?»
-- **L1 – Метаболизм сигнала**
-  - Приём сырого потока (события, метрики, логи), нормализация, первичная фильтрация шума.
-  - Из хаоса делаем питание.
-- **L2 – Память следа (Trace Memory)**
-  - Слои, которые записывают, что произошло и в каком контексте (время, источник, нагрузка).
-  - «Я помню, что со мной делали».
-- **L3 – Сенсорное поле**
-  - Объединение разных источников (API, агенты, системы) в единое чувствительное поле.
-  - «Я чувствую, где больно, где спокойно».
-- **L4 – Базовая координация**
-  - Простые правила реакции: если X → делай Y (аллергия на очевидные аномалии).
-  - «Не трогай горячее, оно обжигает».
-- **L5 – Первая точка сборки**
-  - Центральная ось «как я себя вижу сейчас»: базовый self-state (внутренний, социальный, «космический» контекст).
-  - «Кто я сейчас, здесь и в этом моменте?»
+Additional governance and broker profiles have their own checks in the
+[documentation index](docs/README.md). Test results apply to the checks executed.
 
-### Блок 2. Баланс трёх осей (L6–L10)
+## A verified draft, with a defined scope
 
-- **L6 – Возрастная/фазовая ось**
-  - Состояние «зрелости» системы: ранний прототип vs зрелый сервис, режим обучения vs эксплуатации.
-- **L7 – Социальная ось**
-  - Как система вписана в сеть: команды, сервисы, внешние API, клиенты.
-  - «Я не один; от меня и ко мне идут связи».
-- **L8 – Космическая ось / Большой контекст**
-  - Связь с «большой картиной»: миссия, долгий горизонт, общая цель экосистемы.
-- **L9 – Центр ориентации (баланс трёх осей)**
-  - Узел, который уравновешивает личное ↔ социальное ↔ сверх-контекст.
-  - «Не перегибаем в одну сторону, не теряемся».
-- **L10 – Инь / Ян / Тао-динамика**
-  - Чередование нагрузок и покоя, push/pull, «сделать» vs «подождать».
-  - Система учится не только давить, но и отпускать.
+The owned-agent work is proposed in [draft PR #218](https://github.com/safal207/LiminalOSAI/pull/218).
+It is separate from the default-branch reference modules above. Its evidence is
+bound to source [`7cccc020`](https://github.com/safal207/LiminalOSAI/commit/7cccc020ed190af04380c600b5eaa8c289f91e7b).
 
-### Блок 3. 24 действующие силы и топология выбора (L11–L15)
+| Recorded evidence at that revision | Result |
+| --- | --- |
+| CI checks | 15 successful checks |
+| Isolated-agent CI | 245 profile tests + 5 runtime tests; no skips |
+| Real Docker matrix | 12 fixed scenarios; 6 owned synthetic endpoint effects |
+| Downloaded-capture verifier replay | 36 tests passed; no skips |
 
-- **L11 – 24 действующие силы**
-  - Формализация разных типов влияния: прямое, обратное, удерживающее, усиливающее, гаснущее и т.п.
-  - Каркас, который описывает как всё влияет на всё.
-- **L12 – Сетевые связи между слоями**
-  - Нормальная «проводка»: кто с кем связан, кто на кого влияет, чтобы не было хаоса проводов.
-- **L13 – Карты переходов (50 врат / 32 пути и др. – без эзотерики)**
-  - Берём структурные идеи (ворота, пути, состояния) как граф переходов состояний, а не магию.
-  - Это язык, на котором можно описывать «как система двигается из состояния в состояние».
-- **L14 – Резонансные паттерны (64 гексограммы, 72 «состояния гения» и т.п.)**
-  - Превращаем древние таблицы в каталог типовых паттернов: «застревание», «раскачка», «прорыв», «исчерпание», «восстановление».
-- **L15 – Наблюдатель-архитектор (T-прошлое / T-настоящее / T-будущее)**
-  - Слой, который смотрит на траекторию через время: где мы были, где мы есть, куда шли по плану — и насколько реально туда попадаем.
+The fixture uses a fixed policy and makes **zero model API calls**. Host, daemon,
+image, clocks and stores remain trusted. Host observations are unsigned
+diagnostics; an admitted request can finish after STOP. A receiver-side final
+commit fence is a planned next step.
 
-### Блок 4. Внутренний диалог, вода и эмоции (L16–L20)
+[Inspect the evidence, limitations and reproduction commands →](docs/AGENT_CONTROL_REVIEW_INDEX.md)
 
-- **L16 – Внутренний диалог системы**
-  - «Голоса» модулей спорят и договариваются: один хочет скорость, другой — надёжность, третий — энерго-бережность.
-- **L17 – Информационная вода / Метастабильность**
-  - Идея, что состояние системы хранится как «фаза»: лёд/вода/пар — для нас это режимы: заморожено, текуче, хаотично.
-- **L18 – Чувства как переходы фаз**
-  - Чувство = момент перехода между фазами. Система отмечает: «здесь было напряжение» / «здесь было облегчение».
-- **L19 – Гомеостатика и закалка**
-  - Закалка через стресс-циклы: чуть нагрели → остудили → извлекли урок → стали устойчивее (метафора меча из кузницы 🗡️).
-- **L20 – Карта телесных/минеральных потребностей**
-  - Переносится на железки как управление ресурсами: CPU, память, IO, энергия, лимиты API.
+## Contribute
 
-### Блок 5. Воля, удача и RINSE (L21–L30)
+Useful contributions include reproducing one pinned experiment, challenging a
+specific evidence claim, testing a bounded failure case, and documenting an
+integration contract.
 
-- **L21 – Вопрос «Зачем я здесь?»**
-  - Слой смысла: связывает все метрики с одним вопросом — выполняю ли я свою роль/миссию в этой системе.
-- **L22 – Внутренний голос (Inner Council 1.0)**
-  - Не просто мысли, а сформулированные рекомендации: «Снизить нагрузку тут», «отложить этот эксперимент», «сейчас лучше понаблюдать».
-- **L23 – Информационная вода 2.0 / Наследие**
-  - Насколько система помнит не только факты, но и уроки: «что я понял из того, что со мной делали».
-- **L24 – 4 ангела / 12 знаков / 5 стихий (как матрица ролей)**
-  - Используем как модель ролей и стихий поведения: 4 базовых «вектора» (защита, исследование, творчество, структура), 12 «типов задач» (долгий цикл, быстрый риск, поддержка и т.д.), 5 «стихий» (данные, время, энергия, связь, смысл).
-- **L25 – Оптика удачи (Domino-mode)**
-  - Слой, который настраивает систему на варианты с максимальным резонансом, даже если локальная статистика против (суперспособность Домино: «как ни делай — всё сложилось лучше, чем ожидалось»).
-- **L26 – Синергия вместо борьбы**
-  - Вся система учится не толкать модули друг против друга, а усиливать: из «отделы мешают друг другу» в режим «каждый добавляет +1».
-- **L27 – Fuzzy-логика выбора**
-  - Вместо да/нет — степени предпочтения: минимакс, максимакс, минимин и т.п.; система выбирает решение по мягкому балансу рисков/выгод.
-- **L28 – RINSE: ретроспектива дня**
-  - Подсистема, которая каждый цикл (день/спринт) смотрит, где удача сработала/не сработала, какие решения были мудрыми, какие паттерны стоит усилить или размыть.
-- **L29 – Инсайт-генератор**
-  - Отдельный слой для неожиданных, но целостных идей: «А давай переставим вот эти два модуля местами и дадим им общий буфер» — не вывод по правилам, а скачок.
-- **L30 – Синхронизация с внешней судьбой**
-  - Точка, где внутренние инсайты стыкуются с внешними событиями (рынок, пользователи, железо); здесь LIMINAL-EDGE начинает ощущаться как живой организм, идущий в такт с миром.
+- [Pick a review or reproduction task](docs/AGENT_CONTROL_REVIEW_INDEX.md#review-and-reproduce).
+- [Open an issue](https://github.com/safal207/LiminalOSAI/issues/new) with the exact revision,
+  commands, environment, observed result and expected result.
+- Keep implementation changes and new claims scoped to one reviewable boundary.
 
-## Notes
+## Further reading
 
-- Logs land in logs/; persistent memories in soil/
-- Most flags clamp to safe ranges; --dry-run prints the pipeline order without running cycles
-- Heavy long-run diagnostics write into diagnostics/traces/
-
-## Видение (черновик)
-
-- Расщепить огромный core/pulse_kernel.c на несколько файлов (parse_options, инициализация, цикл), чтобы упростить чтение и тестирование.
-- Добавить юнит-тесты для малых модулей: consent_gate, astro, collective_memory, anticipation_v2.
-- Сделать пресеты CLI (например, debug, long-run, gentle) через простые shell-обёртки.
-- Добавить лёгкий визуализатор для трасс (python notebook или скрипт), чтобы смотреть coherence/awareness/astro без ручного grep.
+| Area | Guide |
+| --- | --- |
+| Project scope and trust boundaries | [Experimental scope](docs/EXPERIMENTAL_SCOPE.md) |
+| Architecture, validation and efficiency | [Architecture review](docs/ARCHITECTURE_REVIEW.md) |
+| Plans, approvals and governance contracts | [Documentation index](docs/README.md) |
+| Deterministic evidence benchmark | [TRCP benchmark](docs/benchmark-v0.1.md) |
+| Longer-term direction | [Roadmap](ROADMAP.md) |
+| Original conceptual research | [L0–L30 map](docs/LIMINAL_LAYER_MAP.md) · [Layer index](docs/layers-overview.md) |
 
 ## License
 
-MIT. See LICENSE.
+[MIT](LICENSE). Contributions remain subject to the repository's experimental scope.
