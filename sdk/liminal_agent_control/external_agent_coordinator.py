@@ -356,10 +356,6 @@ class ExternalAgentCoordinator:
         """
         failures = [{"branch": "coordinator_store", "reason": _reason(error)}]
         try:
-            self._stop_receiver()
-        except BaseException as exc:
-            failures.append({"branch": "receiver_fence", "reason": _reason(exc)})
-        try:
             self.bridge.fence(reason)
         except BaseException as exc:
             failures.append({"branch": "bridge_fence", "reason": _reason(exc)})
@@ -374,6 +370,12 @@ class ExternalAgentCoordinator:
                 cleanup = self.supervisor.cleanup(self._command_id)
             except BaseException as exc:
                 failures.append({"branch": "owned_cleanup", "reason": _reason(exc)})
+        # An unavailable journal cannot certify aggregate STOP. Attempt the
+        # independent containment steps before a possibly slow receiver RPC.
+        try:
+            self._stop_receiver()
+        except BaseException as exc:
+            failures.append({"branch": "receiver_fence", "reason": _reason(exc)})
         return {"schema": "liminal-agent-stop-aggregate-v1", "run_id": self.run_binding["run_id"],
             "run_binding_digest": digest(self.run_binding), "status": "UNKNOWN", "admission_closed": True,
             "reason": reason, "cleanup": cleanup, "failures": failures, "authority_observations": [],

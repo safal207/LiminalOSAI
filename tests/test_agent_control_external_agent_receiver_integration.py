@@ -161,6 +161,76 @@ class ExternalAgentReceiverIntegrationTests(unittest.TestCase):
         self.assertEqual(self.coordinator.stop()["status"], "STOPPED")
         self.assertEqual(len(self.receiver.inventory()["fences"]), 1)
 
+    def test_emergency_containment_precedes_blocked_receiver_stop(self):
+        # Real signed authority/receiver HTTP and SQLite, with a gated client
+        # call and explicit bridge/supervisor doubles, not Docker evidence.
+        launch = agent_action(action_id="create", attempt_id="create-attempt", root_id="command-root",
+            execution_id="command-worker", epoch=1, stage="CREATE", spec=self.spec)
+        self.coordinator.launch(launch)
+        permit, _ = self.begin()
+        pending = self.effect_receiver.query(self.action["action_id"])
+        self.coordinator.db_path.unlink()
+        entered, release = threading.Event(), threading.Event()
+        original_stop = self.endpoint.stop
+
+        def blocked_stop(*args, **kwargs):
+            entered.set()
+            if not release.wait(3):
+                raise TimeoutError("bounded receiver test gate expired")
+            return original_stop(*args, **kwargs)
+
+        with patch.object(self.endpoint, "stop", side_effect=blocked_stop), ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(self.coordinator.stop)
+            try:
+                self.assertTrue(entered.wait(2), "emergency path did not attempt receiver STOP")
+                self.assertTrue(self.bridge.fenced)
+                self.assertIn("owned-command", self.supervisor.cleanup_calls)
+                self.assertTrue(self.command_store.status("command-root")["admission_closed"])
+                effect = self.effect_store.status("effect-root")
+                self.assertTrue(effect["admission_closed"])
+                self.assertEqual((effect["issued_count"], effect["pending_count"]), (1, 1))
+                self.assertFalse(future.done(), "blocked receiver must not yield a terminal aggregate")
+            finally:
+                release.set()
+                result = future.result(5)
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["coordinator_durable_state"], "UNAVAILABLE")
+        self.assertFalse(result["execution_authorized"])
+        self.assertEqual({row["branch"] for row in result["failures"]}, {"coordinator_store", "receiver_fence"})
+        after = self.effect_receiver.query(self.action["action_id"])
+        self.assertEqual(after["status"], pending["status"])
+        self.assertEqual(after["reservation_id"], permit["reservation_id"])
+        self.assertIsNone(after["receipt"])
+        self.assertEqual(self.receiver.inventory()["effects"], [])
+        self.assertEqual(self.receiver.inventory()["terminals"], [])
+
+    def test_emergency_containment_preserves_independent_failures_before_receiver(self):
+        launch = agent_action(action_id="create", attempt_id="create-attempt", root_id="command-root",
+            execution_id="command-worker", epoch=1, stage="CREATE", spec=self.spec)
+        self.coordinator.launch(launch)
+        self.coordinator.db_path.unlink()
+        calls = []
+
+        def fail(branch):
+            def operation(*args, **kwargs):
+                calls.append(branch)
+                raise RuntimeError("controlled " + branch + " failure")
+            return operation
+
+        with (patch.object(self.bridge, "fence", side_effect=fail("bridge_fence")),
+              patch.object(self.command_admin, "stop", side_effect=fail("command")),
+              patch.object(self.effect_admin, "stop", side_effect=fail("effect")),
+              patch.object(self.supervisor, "cleanup", side_effect=fail("owned_cleanup")),
+              patch.object(self.endpoint, "stop", side_effect=fail("receiver_fence"))):
+            result = self.coordinator.stop()
+        self.assertEqual(calls, ["bridge_fence", "command", "effect", "owned_cleanup", "receiver_fence"])
+        self.assertEqual([row["branch"] for row in result["failures"]], ["coordinator_store", *calls])
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["coordinator_durable_state"], "UNAVAILABLE")
+        self.assertIsNone(result["cleanup"])
+        self.assertEqual(result["authority_observations"], [])
+        self.assertFalse(result["execution_authorized"])
+
     def test_consumed_pre_permit_denial_stays_denied_on_execute_and_reconcile(self):
         self.effect_admin.stop("effect-root")
         # Isolate authority result propagation at a healthy admission boundary.
