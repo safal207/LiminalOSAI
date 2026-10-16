@@ -16,7 +16,7 @@ from . import center_continuity, orientation
 from .authority import AuthorityStore, ControlError, canonical_bytes, digest
 from .brakes_store import SessionAuthority
 from .external_agent_coordinator import agent_policy_digest, validate_run_binding
-from .external_agent_effect_gateway import _copy, _identity, _reason
+from .external_agent_effect_gateway import ClosedChannelEffectGateway, _copy, _identity, _reason
 from .external_agent_receiver_gateway import ReceiverFencedEffectGateway
 from .external_network_protocol import validate_network_action
 
@@ -298,14 +298,19 @@ class OrientationFencedEffectGateway(ReceiverFencedEffectGateway):
                for name, expected in self._orientation_routes.items()):
             raise ControlError("AGENT_ORIENTATION_GUARD_ROUTE_CHANGED")
         guard.assert_bound()
+        # Sidecar storage can wait behind a writer after the first gate check.
+        # Recheck the base gate directly, without another sidecar transaction.
+        ClosedChannelEffectGateway._assert_gate_ready(self)
 
     def _before_authority_begin(self, action: dict) -> None:
         self.orientation_guard.admit(action)
+        ClosedChannelEffectGateway._assert_gate_ready(self)
 
     def _before_endpoint_commit(self, action: dict, authorization: dict, reservation_id: str, permit_pair: dict) -> None:
         super()._before_endpoint_commit(action, authorization, reservation_id, permit_pair)
         try:
             self.orientation_guard.check(action)
+            ClosedChannelEffectGateway._assert_gate_ready(self)
         except BaseException as error:
             reason = _reason(error)
             self._close_admission()
