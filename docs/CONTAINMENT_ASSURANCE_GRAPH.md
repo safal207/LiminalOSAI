@@ -38,11 +38,17 @@ flowchart TD
 `SessionAuthority` и observer hooks. `project()` не выдаёт permit; cached
 guidance не заменяет транзакционную admission-проверку.
 
-**Связь этого контура с конкретным G03 `external_agent_*` сейчас
-`NOT_CONNECTED`.** Имена узлов и стрелка на рисунке не устанавливают runtime hook.
+**В штатном G03-профиле `ReceiverFencedEffectGateway` связь этого контура
+по-прежнему `NOT_CONNECTED`.** Имена узлов и стрелка на рисунке не устанавливают runtime hook.
 Этот пробел обязателен в v1-модели; удаление записи или замена на `CONNECTED`
 отвергаются checker. Для действующей интеграции требуется отдельное изменение
 реального enforcement и его негативные runtime-тесты.
+
+Отдельный строгий [`OrientationFencedEffectGateway`](G03_ORIENTATION_ADMISSION.md)
+подключает обязательный локальный veto к существующим idea/projection/orientation
+записям до BEGIN и перед POST. Он не заменяет штатный профиль и не повышает его
+Docker evidence либо статусы этого v1-графа. Автоматическая observation feedback
+и rollout нового профиля остаются отдельными переходами.
 
 ### Проект и реальность: обязательные зависимости G03
 
@@ -167,7 +173,7 @@ report подтверждает только ограниченную G03-мат
 
 | Пробел | Текущий статус | Минимальное доказательство для пересмотра |
 | --- | --- | --- |
-| Orientation/idea/observer hooks на конкретном G03 пути | `NOT_CONNECTED` | Реальный deny-only hook в нужной транзакционной границе; тесты без hook, с подменой lineage, stale revision и STOP |
+| Orientation/idea/observer hooks штатного G03-профиля | `NOT_CONNECTED` | Rollout строгого профиля, отдельные runtime captures и достоверная observation feedback; существование локального veto само по себе этот пробел не закрывает |
 | Kernel/Docker escape resistance | `NOT_ESTABLISHED` | Отдельная модель угроз и независимая проверка самой isolation boundary |
 | Скомпрометированный host/daemon/operator | `NOT_ESTABLISHED` | Иная архитектура границ доверия и воспроизводимые доказательства для неё |
 | Адаптивный live LLM | `NOT_RUN` | Ограниченный preregistered прогон настоящей модели без опасных действий и реальных секретов |

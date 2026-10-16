@@ -98,7 +98,7 @@ class ClosedChannelEffectGateway(NetworkGateway):
         objects = {"gateway": self, "gate": gate, "coordinator": coordinator,
             "bridge": coordinator.bridge, "authority": self.external_controller, "endpoint": self.endpoint_client,
             "authority_opener": self.external_controller._opener, "endpoint_opener": self.endpoint_client._opener}
-        names = {"gateway": ("execute", "_configuration", "_call", "_before_endpoint_commit", "bind_launch_gate"),
+        names = {"gateway": ("execute", "_configuration", "_call", "_before_authority_begin", "_before_endpoint_commit", "bind_launch_gate"),
             "gate": ("assert_ready", "configuration"),
             "coordinator": ("close_admission", "fence_state", "watcher_health"), "bridge": ("fence",),
             "authority": ("begin", "query", "finish", "_call"),
@@ -170,6 +170,9 @@ class ClosedChannelEffectGateway(NetworkGateway):
                 self._assert_gate_ready()
                 if canonical_bytes(action) not in {canonical_bytes(item) for item in self.run_binding["effect_actions"]}:
                     raise ControlError("AGENT_EFFECT_ACTION_BINDING_MISMATCH")
+                if (known is not None and known["status"] == "AUTHORIZED"
+                        and known["reservation_id"] is None):
+                    self._before_authority_begin(action)
             except BaseException as error:
                 self._close_admission()
                 if known is not None and (known["reservation_id"] is not None
@@ -191,6 +194,9 @@ class ClosedChannelEffectGateway(NetworkGateway):
             # fixed run's four approved action digests.
             self._known_results[action_digest] = _copy(result)
             return result
+
+    def _before_authority_begin(self, action: dict) -> None:
+        """Protected admission seam; the legacy profile has no local veto."""
 
     def _validate_dispatch(self, action: Any, authorization: Any, reservation_id: Any,
                            permit_pair: Any) -> None:
