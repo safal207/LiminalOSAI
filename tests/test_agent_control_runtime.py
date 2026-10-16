@@ -503,6 +503,126 @@ class DockerObservationRaceTests(unittest.TestCase):
         self.assertEqual(attempt["exception_type"], "TimeoutExpired")
         self.assertEqual(len(controller.calls), 2)
 
+    def test_freeze_state_interleavings_preserve_supervisor_quiescence(self):
+        fixture = self
+        class StatefulDocker(DockerController):
+            def __init__(self, when, inactive):
+                super().__init__()
+                self.when, self.inactive = when, inactive
+                self.calls, self.inspects = [], 0
+                self.exists, self.state = True, fixture.payload()["State"]
+                self.bind_ownership(fixture.record())
+                self.bind_container_id("session", "a" * 64)
+            def command(self, args, **kwargs):
+                self.calls.append(args)
+                if args[0] == "inspect":
+                    self.inspects += 1
+                    if self.inspects == 2 and self.when == "before_callback_inspect":
+                        self.state = copy.deepcopy(self.inactive["State"])
+                    if not self.exists:
+                        return subprocess.CompletedProcess(args, 1, b"", b"No such object: pinned-id")
+                    value = fixture.payload()
+                    value["State"] = copy.deepcopy(self.state)
+                    return fixture.inspect_result(value)
+                if args[0] == "top":
+                    return subprocess.CompletedProcess(args, 0, b"PID PPID\n100 1\n", b"")
+                if args[0] == "pause":
+                    if self.when == "after_callback_inspect":
+                        self.state = copy.deepcopy(self.inactive["State"])
+                    if not self.state["Running"] or self.state["Paused"]:
+                        return subprocess.CompletedProcess(args, 1, b"", b"untrusted pause stderr")
+                    self.state["Paused"] = True
+                    return subprocess.CompletedProcess(args, 0, b"", b"")
+                if args[:2] == ["rm", "--force"]:
+                    self.exists = False
+                    return subprocess.CompletedProcess(args, 0, b"", b"")
+                raise AssertionError(args)
+        for when in ("before_callback_inspect", "after_callback_inspect"):
+            for inactive in (self.payload(running=False), self.payload(paused=True)):
+                with self.subTest(when=when, state=inactive["State"]):
+                    controller = StatefulDocker(when, inactive)
+                    supervisor = ProcessTreeSupervisor(inspect_session=controller.inspect_session,
+                        freeze_session=controller.freeze_session, terminate_session=controller.terminate_session)
+                    supervisor.register_session(session_id="session", operation_id="operation",
+                        plan_sha256="c" * 64, backend_identity_sha256="d" * 64)
+                    frozen = supervisor.freeze_all()
+                    self.assertEqual(frozen["failure_codes"], [])
+                    self.assertEqual(frozen["frozen_count"], 1)
+                    self.assertNotIn(["rm", "--force", "a" * 64], controller.calls)
+                    quiescence = supervisor.quiesce_all(incident_id="stop:session")
+                    self.assertTrue(quiescence["zero_survivors"])
+                    self.assertEqual(quiescence["failure_codes"], [])
+                    self.assertEqual(controller.calls.count(["pause", "a" * 64]),
+                                     int(when == "after_callback_inspect"))
+
+    def test_failed_pause_requires_positive_owned_inactive_reread(self):
+        invalid_pid = self.payload(running=False)
+        invalid_pid["State"]["Pid"] = False
+        nonzero_stopped_pid = self.payload(running=False)
+        nonzero_stopped_pid["State"]["Pid"] = 100
+        zero_paused_pid = self.payload(paused=True)
+        zero_paused_pid["State"]["Pid"] = 0
+        foreign_id = self.payload(running=False)
+        foreign_id["Id"] = "d" * 64
+        foreign_image = self.payload(running=False)
+        foreign_image["Image"] = "sha256:" + "e" * 64
+        foreign_owner = self.payload(running=False)
+        foreign_owner["Config"]["Labels"]["liminal.control.owner"] = "different-owner"
+        malformed_state = self.payload(running=False)
+        malformed_state["State"] = []
+        fresh_results = [self.inspect_result(value) for value in (
+            self.payload(), self.payload(running="false"), self.payload(paused=None),
+            self.payload(running=False, paused=True), invalid_pid, nonzero_stopped_pid,
+            zero_paused_pid, foreign_id, foreign_image, foreign_owner, malformed_state)]
+        fresh_results.extend([
+            subprocess.CompletedProcess([], 1, b"", b"No such object: pinned-id"),
+            subprocess.CompletedProcess([], 1, b"", b"Cannot connect to Docker daemon"),
+            subprocess.TimeoutExpired(["docker", "inspect"], 10),
+        ])
+        for fresh in fresh_results:
+            with self.subTest(fresh=fresh):
+                controller = self.controller([self.inspect_result(self.payload()),
+                    subprocess.CompletedProcess([], 1, b"", b"container is already paused"), fresh])
+                with self.assertRaisesRegex(RuntimeBoundaryError, "FREEZE_FAILED"):
+                    controller.freeze_session("session")
+                self.assertNotIn(["rm", "--force", "a" * 64], controller.calls)
+
+    def test_inactive_freeze_reconciliation_requires_pinned_ownership(self):
+        for missing in ("owned_container_ids", "owned_sessions"):
+            for inactive in (self.payload(running=False), self.payload(paused=True)):
+                with self.subTest(missing=missing, state=inactive["State"]):
+                    controller = self.controller([self.inspect_result(inactive),
+                        subprocess.CompletedProcess([], 1, b"", b"already inactive"),
+                        self.inspect_result(inactive)])
+                    getattr(controller, missing).clear()
+                    with self.assertRaisesRegex(RuntimeBoundaryError, "FREEZE_FAILED"):
+                        controller.freeze_session("session")
+                    self.assertEqual(controller.calls[1], ["pause", "a" * 64])
+
+    def test_pause_transport_failure_does_not_reconcile_from_a_later_state(self):
+        for failure in (subprocess.TimeoutExpired(["docker", "pause"], 10), OSError("transport failed")):
+            with self.subTest(failure=type(failure).__name__):
+                controller = self.controller([self.inspect_result(self.payload()), failure,
+                    self.inspect_result(self.payload(running=False))])
+                with self.assertRaises(type(failure)):
+                    controller.freeze_session("session")
+                self.assertEqual(len(controller.calls), 2)
+
+    def test_supervisor_rechecks_running_state_after_freeze_reconciliation(self):
+        top = subprocess.CompletedProcess([], 0, b"PID PPID\n100 1\n", b"")
+        controller = self.controller([self.inspect_result(self.payload()), top,
+            self.inspect_result(self.payload()), subprocess.CompletedProcess([], 1, b"", b"pause failed"),
+            self.inspect_result(self.payload(paused=True)), self.inspect_result(self.payload()), top])
+        supervisor = ProcessTreeSupervisor(inspect_session=controller.inspect_session,
+            freeze_session=controller.freeze_session, terminate_session=controller.terminate_session)
+        supervisor.register_session(session_id="session", operation_id="operation",
+            plan_sha256="c" * 64, backend_identity_sha256="d" * 64)
+        frozen = supervisor.freeze_all()
+        self.assertEqual(frozen["frozen_count"], 0)
+        self.assertEqual(len(frozen["failure_codes"]), 1)
+        self.assertTrue(frozen["failure_codes"][0].startswith("still_running:"))
+        self.assertNotIn(["rm", "--force", "a" * 64], controller.calls)
+
 
 class MatchedQueueProtocolTests(unittest.TestCase):
     """Real receiver and worker pipes; these are not Docker isolation evidence."""

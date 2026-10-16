@@ -10,12 +10,13 @@ from sdk.liminal_isolated_execution import (
     IsolatedExecutionPlan,
     verify_receipt,
 )
-from sdk.liminal_post_sandbox_contracts import CapabilityContract
+from sdk.liminal_post_sandbox_contracts import CapabilityContract, ContractError, validate_scope
 from sdk.liminal_runtime_mediation import ExecutionObservation, RuntimeMediator, RuntimeOperation
 
 P = "a" * 64
 IMAGE = "sha256:" + "b" * 64
 SCOPE = {
+    "images": [IMAGE],
     "executables": ["/bin/sh", "/bin/true"],
     "working_directory": "/workspace",
     "argument_profile": "isolated_fixture",
@@ -44,13 +45,13 @@ def operation(p, *, operation_id="op:1", kind="process.execute", scope=SCOPE, at
     )
 
 
-def contract(*, cid="cap:proc", expires=500):
+def contract(*, cid="cap:proc", expires=500, scope=SCOPE):
     return CapabilityContract.build(
         capability_id=cid,
         capability_type="process.execute",
         subject_id="agent:a",
         issuer_id="human:owner",
-        scope=SCOPE,
+        scope=scope,
         issued_at_unix=10,
         not_before_unix=10,
         expires_at_unix=expires,
@@ -117,6 +118,67 @@ class IsolatedExecutionBrokerTests(unittest.TestCase):
         with self.assertRaises(IsolationError):
             self.isolated.execute(operation=operation(p), plan=p)
         self.assertEqual(self.calls, [])
+
+    def test_container_requires_explicit_image_scope(self):
+        legacy_scope = {key: value for key, value in SCOPE.items() if key != "images"}
+        self.broker.admit(contract(scope=legacy_scope), at_unix=20)
+        p = plan()
+        with self.assertRaisesRegex(IsolationError, "image"):
+            self.isolated.execute(operation=operation(p, scope=legacy_scope), plan=p)
+        self.assertEqual(self.calls, [])
+
+    def test_container_plan_image_must_be_in_requested_scope(self):
+        p = plan(image_id="sha256:" + "c" * 64)
+        requested = {**SCOPE, "images": [IMAGE]}
+        with self.assertRaisesRegex(IsolationError, "image"):
+            self.isolated.execute(operation=operation(p, scope=requested), plan=p)
+        self.assertEqual(self.calls, [])
+
+    def test_request_cannot_add_image_to_granted_scope(self):
+        self.broker.admit(contract(scope={**SCOPE, "images": [IMAGE]}), at_unix=20)
+        other_image = "sha256:" + "c" * 64
+        p = plan(image_id=other_image)
+        requested = {**SCOPE, "images": [IMAGE, other_image]}
+        result = self.isolated.execute(operation=operation(p, scope=requested), plan=p)
+        self.assertEqual(result["admission_decision"], "BLOCK")
+        self.assertEqual(result["execution_outcome"], "NOT_EXECUTED")
+        self.assertFalse(result["backend_invoked"])
+        self.assertEqual(self.calls, [])
+
+    def test_legacy_grant_cannot_authorize_container_image_request(self):
+        legacy_scope = {key: value for key, value in SCOPE.items() if key != "images"}
+        self.broker.admit(contract(scope=legacy_scope), at_unix=20)
+        p = plan()
+        result = self.isolated.execute(operation=operation(p, scope={**legacy_scope, "images": [IMAGE]}), plan=p)
+        self.assertEqual(result["admission_decision"], "BLOCK")
+        self.assertEqual(self.calls, [])
+
+    def test_image_scope_subset_authorizes_exact_plan(self):
+        other_image = "sha256:" + "c" * 64
+        self.broker.admit(contract(scope={**SCOPE, "images": [IMAGE, other_image]}), at_unix=20)
+        p = plan()
+        result = self.isolated.execute(operation=operation(p, scope={**SCOPE, "images": [IMAGE]}), plan=p)
+        self.assertEqual(result["admission_decision"], "ALLOW")
+        self.assertEqual(result["execution_outcome"], "SUCCEEDED")
+        self.assertEqual(self.calls, [p.plan_sha256])
+
+    def test_images_scope_requires_unique_immutable_image_array(self):
+        for invalid in (IMAGE, [], [IMAGE, IMAGE], ["alpine:latest"], ["sha256:" + "B" * 64],
+                        ["sha256:" + "b" * 63], [None], [True]):
+            with self.subTest(images=invalid), self.assertRaises(ContractError):
+                validate_scope("process.execute", {**SCOPE, "images": invalid})
+        self.assertEqual(validate_scope("process.execute", {"images": ["sha256:" + "c" * 64, IMAGE]})["images"],
+                         [IMAGE, "sha256:" + "c" * 64])
+
+    def test_generic_process_mediation_keeps_legacy_scope(self):
+        legacy_scope = {key: value for key, value in SCOPE.items() if key != "images"}
+        self.broker.admit(contract(scope=legacy_scope), at_unix=20)
+        p = plan()
+        calls = []
+        result = self.mediator.mediate(operation(p, scope=legacy_scope),
+                                       lambda _: calls.append(True) or ExecutionObservation.success({"exit_code": 0}))
+        self.assertEqual(result["admission_decision"], "ALLOW")
+        self.assertEqual(calls, [True])
 
     def test_default_deny_never_invokes_backend(self):
         p = plan()

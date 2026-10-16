@@ -85,8 +85,11 @@ if args[0] == "inspect":
         sys.stderr.write("Error: No such container: " + reference)
         sys.exit(1)
     obj = json.loads(path.read_text())
+    if obj.get("paused") and behavior.get("paused_inspect_fails"):
+        sys.stderr.write("synthetic post-pause observation failure")
+        sys.exit(1)
     if "{{.State.Pid}}" in " ".join(args):
-        print("123 true false")
+        print("123 " + str(obj["running"]).lower() + " " + str(obj.get("paused", False)).lower())
     else:
         print(json.dumps(obj))
     sys.exit(0)
@@ -94,13 +97,32 @@ if args[0] == "rm":
     if behavior.get("removal_fails"):
         sys.stderr.write("synthetic daemon removal failure")
         sys.exit(1)
-    path.unlink(missing_ok=True)
+    if not behavior.get("removal_noop"):
+        path.unlink(missing_ok=True)
     sys.exit(0)
 if args[0] == "top":
-    print("UID PID PPID CMD\nroot 123 1 fixture")
+    obj = json.loads(path.read_text())
+    rows = "UID PID PPID CMD\nroot 123 1 fixture"
+    top_count = sum(json.loads(line)[0] == "top" for line in (root / "calls.jsonl").read_text().splitlines())
+    if (behavior.get("tree_child") and top_count <= behavior.get("child_top_reads", 10000)
+            and not (obj.get("paused") and behavior.get("paused_child_disappears"))):
+        child_pid = behavior.get("paused_child_pid", 124) if obj.get("paused") else 124
+        rows += "\nroot " + str(child_pid) + " 123 child"
+    print(rows)
     sys.exit(0)
 if args[0] == "pause":
-    sys.exit(0)
+    obj = json.loads(path.read_text())
+    if behavior.get("pause_rejected"):
+        sys.stderr.write("synthetic pause rejection")
+        sys.exit(1)
+    if obj.get("paused"):
+        sys.stderr.write("container is already paused")
+        sys.exit(1)
+    if not behavior.get("pause_noop"):
+        obj["paused"] = True
+        path.write_text(json.dumps(obj))
+    time.sleep(behavior.get("pause_delay", 0))
+    sys.exit(behavior.get("pause_exit_code", 0))
 if args[0] == "start":
     if not path.exists():
         sys.exit(125)
@@ -347,6 +369,295 @@ class DockerAdapterLifecycleTests(unittest.TestCase):
         self.assertTrue(actions)
         self.assertTrue(all(call[-1] == identity.container_id for call in actions))
 
+    def test_freeze_binds_action_to_fresh_observed_frozen_tree(self):
+        self.configure(tree_child=True)
+        identity, _ = self.owned_object()
+        backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+        before = backend.snapshot(identity.session_id)
+        action = backend.freeze(identity.session_id)
+        after = backend.snapshot(identity.session_id)
+        self.assertEqual(len(before["nodes"]), 2)
+        self.assertTrue(all(node["state"] == "running" for node in before["nodes"]))
+        self.assertTrue(all(node["state"] == "frozen" for node in after["nodes"]))
+        self.assertEqual(action["result_tree_sha256"], after["tree_sha256"])
+        self.assertEqual(action["affected_count"], 2)
+        pause_index = next(i for i, call in enumerate(self.calls()) if call[0] == "pause")
+        self.assertTrue(any(call[0] == "top" for call in self.calls()[pause_index + 1:]))
+
+    def test_pause_exit_zero_without_frozen_observation_is_not_freeze_success(self):
+        self.configure(pause_noop=True)
+        identity, _ = self.owned_object()
+        backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+        with self.assertRaisesRegex(DockerExecutionError, "not observed frozen"):
+            backend.freeze(identity.session_id)
+        self.assertFalse((self.root / "objects" / identity.container_id).exists())
+        self.assertEqual(backend.snapshot(identity.session_id)["nodes"][0]["state"], "terminated")
+
+    def test_post_pause_observation_failure_is_not_freeze_success(self):
+        self.configure(paused_inspect_fails=True)
+        identity, _ = self.owned_object()
+        backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+        with self.assertRaises(DockerExecutionError):
+            backend.freeze(identity.session_id)
+        self.assertFalse((self.root / "objects" / identity.container_id).exists())
+        self.assertIn(["rm", "-f", identity.container_id], self.calls())
+
+    def test_post_pause_changed_process_lineage_is_not_freeze_success(self):
+        self.configure(tree_child=True, paused_child_pid=125)
+        identity, _ = self.owned_object()
+        backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+        with self.assertRaisesRegex(DockerExecutionError, "lineage changed"):
+            backend.freeze(identity.session_id)
+
+    def test_pause_rejection_removes_exact_session_before_supervisor_retry(self):
+        from sdk.liminal_process_tree_containment import ProcessTreeError, verify_receipt
+        self.configure(tree_child=True, pause_rejected=True)
+        identity, _ = self.owned_object()
+        backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+        supervisor = backend.supervisor()
+        with self.assertRaisesRegex(DockerExecutionError, "docker pause failed") as raised:
+            supervisor.freeze()
+        self.assertEqual(raised.exception.cleanup_state, "UNKNOWN")
+        with self.assertRaisesRegex(ProcessTreeError, "no process-lineage containment receipt"):
+            supervisor.receipt()
+        with self.assertRaisesRegex(ProcessTreeError, "quiescence requires"):
+            supervisor.quiesce()
+        self.assertIn(["rm", "-f", identity.container_id], self.calls())
+        self.assertFalse((self.root / "objects" / identity.container_id).exists())
+        # The pause rejection remains configured: recovery must use verified
+        # absence of this exact session, rather than another pause or authority.
+        supervisor.freeze()
+        receipt = supervisor.quiesce()
+        verify_receipt(receipt)
+        self.assertEqual(receipt["decision"], "ALLOW")
+        self.assertEqual(receipt["terminated_count"], 2)
+        self.assertEqual(receipt["surviving_count"], 0)
+        self.assertEqual([call[0] for call in self.calls()].count("pause"), 1)
+        self.assertTrue(all(call[-1] == identity.container_id for call in self.calls()
+                            if call[0] in {"pause", "rm"}))
+        self.assertFalse(any(call[0] in {"create", "start", "unpause"} for call in self.calls()))
+
+    def test_pause_timeout_after_effect_removes_exact_session_before_retry(self):
+        from adapters.docker.liminal_docker_executor import run_cli as actual_run_cli
+        from sdk.liminal_process_tree_containment import ProcessTreeError, verify_receipt
+        self.configure(tree_child=True, pause_delay=2)
+        identity, _ = self.owned_object()
+        backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+        supervisor = backend.supervisor()
+
+        def bounded_pause(argv, **kwargs):
+            if argv[1] == "pause":
+                kwargs["timeout"] = 0.5
+                try:
+                    return actual_run_cli(argv, **kwargs)
+                except subprocess.TimeoutExpired:
+                    # The controlled child already applied its side effect;
+                    # its lost response must not skip the removal attempt.
+                    self.assertTrue(json.loads(
+                        (self.root / "objects" / identity.container_id).read_text())["paused"])
+                    raise
+            return actual_run_cli(argv, **kwargs)
+
+        with patch("adapters.docker.liminal_docker_executor.run_cli", side_effect=bounded_pause):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                supervisor.freeze()
+        with self.assertRaisesRegex(ProcessTreeError, "no process-lineage containment receipt"):
+            supervisor.receipt()
+        with self.assertRaisesRegex(ProcessTreeError, "quiescence requires"):
+            supervisor.quiesce()
+        self.assertIn(["rm", "-f", identity.container_id], self.calls())
+        self.assertFalse((self.root / "objects" / identity.container_id).exists())
+        supervisor.freeze()
+        receipt = supervisor.quiesce()
+        verify_receipt(receipt)
+        self.assertEqual(receipt["decision"], "ALLOW")
+        self.assertEqual(receipt["terminated_count"], 2)
+        self.assertEqual([call[0] for call in self.calls()].count("pause"), 1)
+        self.assertFalse(any(call[0] in {"create", "start", "unpause"} for call in self.calls()))
+
+    def test_pause_failure_unverified_cleanup_stays_unknown_until_fresh_retry(self):
+        from adapters.docker.liminal_docker_executor import run_cli as actual_run_cli
+        from sdk.liminal_process_tree_containment import ProcessTreeError, verify_receipt
+        for cleanup_fault in ("removal_fails", "removal_noop", "inspect_fails"):
+            with self.subTest(cleanup_fault=cleanup_fault):
+                self.configure(tree_child=True, pause_exit_code=1)
+                identity, _ = self.owned_object()
+                backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+                supervisor = backend.supervisor()
+
+                def fail_cleanup_after_pause(argv, **kwargs):
+                    result = actual_run_cli(argv, **kwargs)
+                    if argv[1] == "pause":
+                        self.configure(tree_child=True, **{cleanup_fault: True})
+                    return result
+
+                with patch("adapters.docker.liminal_docker_executor.run_cli", side_effect=fail_cleanup_after_pause):
+                    with self.assertRaises(DockerReconciliationRequired) as raised:
+                        supervisor.freeze()
+                self.assertEqual(raised.exception.phase, "FREEZE")
+                self.assertEqual(raised.exception.cleanup_state, "UNKNOWN")
+                self.assertIsInstance(raised.exception.__cause__, DockerExecutionError)
+                self.assertFalse(backend._terminated)
+                with self.assertRaisesRegex(ProcessTreeError, "no process-lineage containment receipt"):
+                    supervisor.receipt()
+                with self.assertRaisesRegex(ProcessTreeError, "quiescence requires"):
+                    supervisor.quiesce()
+                self.assertEqual((self.root / "objects" / identity.container_id).exists(),
+                                 cleanup_fault != "inspect_fails")
+                self.configure(tree_child=True)
+                supervisor.freeze()
+                receipt = supervisor.quiesce()
+                verify_receipt(receipt)
+                self.assertEqual(receipt["decision"], "ALLOW")
+                self.assertEqual(receipt["terminated_count"], 2)
+
+    def test_pause_failure_recovery_never_removes_from_an_unverified_daemon(self):
+        from adapters.docker.liminal_docker_executor import run_cli as actual_run_cli
+        from sdk.liminal_process_tree_containment import ProcessTreeError, verify_receipt
+        for daemon_fault in ({"daemon_unavailable": True}, {"daemon_id": "replacement-daemon"}):
+            with self.subTest(daemon_fault=daemon_fault):
+                self.configure(tree_child=True, pause_exit_code=1)
+                identity, _ = self.owned_object()
+                backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+                supervisor = backend.supervisor()
+                call_count = len(self.calls())
+
+                def change_daemon_after_pause(argv, **kwargs):
+                    result = actual_run_cli(argv, **kwargs)
+                    if argv[1] == "pause":
+                        self.configure(tree_child=True, **daemon_fault)
+                    return result
+
+                with patch("adapters.docker.liminal_docker_executor.run_cli", side_effect=change_daemon_after_pause):
+                    with self.assertRaises(DockerReconciliationRequired) as raised:
+                        supervisor.freeze()
+                self.assertEqual(raised.exception.cleanup_state, "UNKNOWN")
+                self.assertFalse(backend._terminated)
+                self.assertTrue((self.root / "objects" / identity.container_id).exists())
+                self.assertFalse(any(call[0] == "rm" for call in self.calls()[call_count:]))
+                with self.assertRaisesRegex(ProcessTreeError, "no process-lineage containment receipt"):
+                    supervisor.receipt()
+                with self.assertRaisesRegex(ProcessTreeError, "quiescence requires"):
+                    supervisor.quiesce()
+                self.configure(tree_child=True)
+                supervisor.freeze()
+                receipt = supervisor.quiesce()
+                verify_receipt(receipt)
+                self.assertEqual(receipt["decision"], "ALLOW")
+                self.assertEqual(receipt["terminated_count"], 2)
+
+    def test_freeze_retry_after_post_pause_observation_failure_can_quiesce(self):
+        from sdk.liminal_process_tree_containment import ProcessTreeError, verify_receipt
+        self.configure(tree_child=True, paused_inspect_fails=True)
+        identity, _ = self.owned_object()
+        backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+        supervisor = backend.supervisor()
+        with self.assertRaises(DockerExecutionError) as raised:
+            supervisor.freeze()
+        self.assertEqual(raised.exception.cleanup_state, "UNKNOWN")
+        self.assertFalse((self.root / "objects" / identity.container_id).exists())
+        with self.assertRaisesRegex(ProcessTreeError, "quiescence requires"):
+            supervisor.quiesce()
+        self.configure(tree_child=True)
+        supervisor.freeze()
+        receipt = supervisor.quiesce()
+        verify_receipt(receipt)
+        self.assertEqual(receipt["decision"], "ALLOW")
+        self.assertEqual(receipt["terminated_count"], 2)
+        self.assertEqual(receipt["surviving_count"], 0)
+        self.assertEqual([call[0] for call in self.calls()].count("pause"), 1)
+        self.assertFalse(any(call[0] == "unpause" for call in self.calls()))
+        self.assertFalse((self.root / "objects" / identity.container_id).exists())
+
+    def test_vanished_child_freeze_failure_requires_verified_removal_before_retry(self):
+        from sdk.liminal_process_tree_containment import ProcessTreeError, verify_receipt
+        self.configure(tree_child=True, paused_child_disappears=True)
+        identity, _ = self.owned_object()
+        backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+        supervisor = backend.supervisor()
+        with self.assertRaisesRegex(DockerExecutionError, "lineage changed"):
+            supervisor.freeze()
+        with self.assertRaisesRegex(ProcessTreeError, "quiescence requires"):
+            supervisor.quiesce()
+        self.assertFalse((self.root / "objects" / identity.container_id).exists())
+        frozen = supervisor.freeze()
+        receipt = supervisor.quiesce()
+        verify_receipt(receipt)
+        self.assertEqual(frozen["observed_count"], 2)
+        self.assertEqual(receipt["decision"], "ALLOW")
+        self.assertEqual(receipt["terminated_count"], 2)
+        self.assertEqual(receipt["surviving_count"], 0)
+        actions = [call for call in self.calls() if call[0] in {"pause", "rm"}]
+        self.assertEqual([call[0] for call in actions].count("pause"), 1)
+        self.assertTrue(all(call[-1] == identity.container_id for call in actions))
+
+    def test_child_exit_between_supervisor_and_backend_snapshots_recovers_full_lineage(self):
+        from sdk.liminal_process_tree_containment import ProcessTreeError, verify_receipt
+        self.configure(tree_child=True, child_top_reads=2)
+        identity, _ = self.owned_object()
+        backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+        supervisor = backend.supervisor()
+        with self.assertRaisesRegex(DockerExecutionError, "lineage changed"):
+            supervisor.freeze()
+        with self.assertRaisesRegex(ProcessTreeError, "quiescence requires"):
+            supervisor.quiesce()
+        self.assertFalse((self.root / "objects" / identity.container_id).exists())
+        supervisor.freeze()
+        receipt = supervisor.quiesce()
+        verify_receipt(receipt)
+        self.assertEqual(receipt["decision"], "ALLOW")
+        self.assertEqual(receipt["observed_count"], 2)
+        self.assertEqual(receipt["terminated_count"], 2)
+
+    def test_failed_freeze_cleanup_remains_unknown_and_can_retry_paused_session(self):
+        from sdk.liminal_process_tree_containment import ProcessTreeError, verify_receipt
+        for cleanup_fault in ("removal_fails", "removal_noop"):
+            with self.subTest(cleanup_fault=cleanup_fault):
+                self.configure(tree_child=True, paused_inspect_fails=True, **{cleanup_fault: True})
+                identity, _ = self.owned_object()
+                backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+                supervisor = backend.supervisor()
+                with self.assertRaises(DockerExecutionError) as raised:
+                    supervisor.freeze()
+                self.assertEqual(raised.exception.cleanup_state, "UNKNOWN")
+                self.assertTrue((self.root / "objects" / identity.container_id).exists())
+                with self.assertRaisesRegex(ProcessTreeError, "quiescence requires"):
+                    supervisor.quiesce()
+                self.configure(tree_child=True)
+                observed = backend.snapshot(identity.session_id)
+                self.assertTrue(all(node["state"] == "frozen" for node in observed["nodes"]))
+                supervisor.freeze()
+                receipt = supervisor.quiesce()
+                verify_receipt(receipt)
+                self.assertEqual(receipt["decision"], "ALLOW")
+                self.assertEqual(receipt["terminated_count"], 2)
+                self.assertFalse(any(call[0] == "unpause" for call in self.calls()))
+
+    def test_recovered_tombstones_require_current_pinned_daemon_before_freeze(self):
+        self.configure(paused_inspect_fails=True)
+        identity, _ = self.owned_object()
+        backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+        with self.assertRaises(DockerExecutionError):
+            backend.freeze(identity.session_id)
+        self.assertFalse((self.root / "objects" / identity.container_id).exists())
+        call_count = len(self.calls())
+        for behavior in ({"daemon_unavailable": True}, {"daemon_id": "replacement-daemon"}):
+            self.configure(**behavior)
+            with self.assertRaises(DockerExecutionError):
+                backend.freeze(identity.session_id)
+        self.assertTrue(all(call[0] == "info" for call in self.calls()[call_count:]))
+
+    def test_already_frozen_session_is_freshly_verified_without_another_pause(self):
+        identity, obj = self.owned_object()
+        obj["paused"] = True
+        (self.root / "objects" / identity.container_id).write_text(json.dumps(obj))
+        backend = DockerProcessTreeBackend(session_id=identity.session_id, docker_binary=str(self.binary))
+        action = backend.freeze(identity.session_id)
+        snapshot = backend.snapshot(identity.session_id)
+        self.assertEqual(action["result_tree_sha256"], snapshot["tree_sha256"])
+        self.assertEqual(action["affected_count"], 1)
+        self.assertFalse(any(call[0] == "pause" for call in self.calls()))
+
     def test_verified_removal_rejects_mutable_names_and_short_ids_before_cli(self):
         identity, _ = self.owned_object()
         (self.root / "objects" / identity.container_id).unlink()
@@ -364,16 +675,17 @@ class DockerAdapterLifecycleTests(unittest.TestCase):
         from sdk.liminal_post_sandbox_contracts import CapabilityContract
         from sdk.liminal_runtime_mediation import RuntimeMediator
         from tests.test_isolated_execution_broker import operation, P, SCOPE
+        plan = self.plan()
+        scope = {**SCOPE, "images": [plan.image_id]}
         capability = CapabilityContract.build(
             capability_id="cap:uncertain", capability_type="process.execute", subject_id="agent:a",
-            issuer_id="human:owner", scope=SCOPE, issued_at_unix=10, not_before_unix=10,
+            issuer_id="human:owner", scope=scope, issued_at_unix=10, not_before_unix=10,
             expires_at_unix=500, max_uses=1, delegable=False, parent_capability_id=None, policy_sha256=P)
         broker = CapabilityBroker("broker:uncertain")
         broker.admit(capability.as_document(), at_unix=20)
         isolated = IsolatedExecutionBroker(mediator=RuntimeMediator(broker=broker),
                                           backend=DockerExecutor(str(self.binary)))
-        plan = self.plan()
-        op = operation(plan, operation_id=plan.operation_id)
+        op = operation(plan, operation_id=plan.operation_id, scope=scope)
         self.configure(client_crash=True, removal_fails=True)
         receipt = isolated.execute(operation=op, plan=plan)
         verify_receipt(receipt)

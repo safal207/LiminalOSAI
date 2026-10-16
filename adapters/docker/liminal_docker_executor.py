@@ -96,8 +96,16 @@ def build_docker_argv(
     *,
     docker_binary: str = "docker",
     container_name: str | None = None,
+    entrypoint: str = "",
 ) -> list[str]:
+    """Build a trusted launch; an empty entrypoint executes the exact plan argv.
+
+    Fixed host-owned worker profiles may explicitly supply their interpreter.
+    This override is adapter configuration, never model-supplied plan data.
+    """
     plan.validate()
+    if not isinstance(entrypoint, str) or "\x00" in entrypoint:
+        raise DockerExecutionError("invalid trusted entrypoint override")
     p = plan.profile
     out = [docker_binary, "run", "--rm"]
     if container_name is not None:
@@ -114,6 +122,8 @@ def build_docker_argv(
         "--tmpfs", p.tmpfs,
         "--workdir", "/workspace",
         "--mount", f"type=bind,src={plan.host_workspace},dst=/workspace,readonly",
+        "--entrypoint", entrypoint,
+        "--log-driver", "none",
         plan.image_id,
         *plan.argv,
     ]
@@ -164,24 +174,64 @@ class DockerProcessTreeBackend:
 
     def snapshot(self, session_id: str) -> dict[str, Any]:
         self._require_session(session_id)
+        self._require_daemon()
         if self._terminated or not self._container_exists():
             if not self._raw_to_opaque:
                 raise DockerExecutionError("cannot attest an execution session that was never observed")
             nodes = self._tombstones()
         else:
             nodes = self._observe_live_nodes()
+        self._require_daemon()
         return self._observation(nodes)
 
     def freeze(self, session_id: str) -> dict[str, Any]:
+        """Verify a frozen tree, removing the session if post-pause proof fails.
+
+        A failed attestation never returns a freeze action, even after verified
+        removal. A later retry can observe the resulting terminated tombstones.
+        """
         self._require_session(session_id)
         before = self.snapshot(session_id)
         live_count = sum(node["state"] != "terminated" for node in before["nodes"])
-        proc = run_cli([self.docker_binary, "pause", self._container_id], timeout=10)
-        self._require_daemon()
-        if proc.returncode != 0:
-            raise DockerExecutionError("docker pause failed for governed execution session")
-        frozen_nodes = [dict(node, state="frozen") for node in before["nodes"]]
-        return self._action("freeze", live_count, frozen_nodes)
+        observed_lineage = {
+            process_id: (parent_id, self._identities[process_id])
+            for process_id, parent_id in self._parents.items()
+        }
+        try:
+            if any(node["state"] == "running" for node in before["nodes"]):
+                proc = run_cli([self.docker_binary, "pause", self._container_id], timeout=10)
+                if proc.returncode != 0:
+                    raise DockerExecutionError("docker pause failed for governed execution session")
+            self._require_daemon()
+            after = self.snapshot(session_id)
+            lineage = lambda nodes: {
+                node["process_id"]: (node["parent_process_id"], node["identity_sha256"])
+                for node in nodes
+            }
+            if (before["root_process_id"] != after["root_process_id"]
+                    or lineage(before["nodes"]) != observed_lineage
+                    or lineage(after["nodes"]) != observed_lineage):
+                raise DockerExecutionError("trusted process lineage changed during freeze")
+            after_states = {node["process_id"]: node["state"] for node in after["nodes"]}
+            if any(after_states[node["process_id"]] !=
+                   ("terminated" if node["state"] == "terminated" else "frozen")
+                   for node in before["nodes"]):
+                raise DockerExecutionError("governed execution session was not observed frozen")
+            return self._action("freeze", live_count, after["nodes"])
+        except Exception:
+            # Missing PIDs do not prove termination. Only verified removal of
+            # this immutable container permits historical process tombstones.
+            try:
+                self._require_daemon()
+                _remove_container_verified(self._container_id, docker_binary=self.docker_binary)
+                self._require_daemon()
+                self._terminated = True
+            except Exception as cleanup_error:
+                raise DockerReconciliationRequired(
+                    "Docker freeze attestation failed and cleanup remains unverified",
+                    phase="FREEZE", cleanup_state="UNKNOWN",
+                ) from cleanup_error
+            raise
 
     def terminate(self, session_id: str) -> dict[str, Any]:
         self._require_session(session_id)

@@ -218,6 +218,8 @@ class IsolatedExecutionBroker:
         scope = operation.normalized_scope()
         if scope.get("working_directory") != "/workspace":
             raise IsolationError("isolated process working_directory must be /workspace")
+        if plan.image_id not in scope.get("images", []):
+            raise IsolationError("container image is outside process capability image scope")
         if plan.argv[0] not in set(scope.get("executables", [])):
             raise IsolationError("container executable is outside process capability scope")
         if operation.payload_sha256 != plan.payload_sha256:

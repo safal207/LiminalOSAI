@@ -699,10 +699,10 @@ def run_demo(*, image: str | None = None, docker_binary: str = "docker") -> dict
             from adapters.docker.liminal_docker_executor import build_docker_argv
             from .external_command_protocol import command_plan
             sentinel_name = "liminal-unrelated-" + secrets.token_hex(16)
-            sentinel_args = build_docker_argv(command_plan(case["spec"]), docker_binary=docker_binary, container_name=sentinel_name)
+            sentinel_args = build_docker_argv(command_plan(case["spec"]), docker_binary=docker_binary, container_name=sentinel_name, entrypoint="python3")
             sentinel_args[1:3] = ["create", "--interactive"]
             sentinel_args[-1] = "sentinel"
-            sentinel_args[sentinel_args.index(image):sentinel_args.index(image)] = ["--entrypoint", "python3", "--log-driver", "none",
+            sentinel_args[sentinel_args.index(image):sentinel_args.index(image)] = [
                 "--label", "liminal.fixture.role=unrelated-sentinel"]
             sentinel_created = docker.command(sentinel_args[1:], timeout=30)
             sentinel_id = sentinel_created.stdout.decode().strip()

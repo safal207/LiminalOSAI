@@ -443,7 +443,31 @@ class DockerController:
         container_id = observed.get("Id")
         if type(container_id) is not str or not re.fullmatch(r"[0-9a-f]{64}", container_id):
             raise RuntimeBoundaryError("IMMUTABLE_CONTAINER_ID_UNAVAILABLE")
+
+        def positively_inactive(value: dict | None) -> bool:
+            # A process may stop or another trusted callback may pause it
+            # after the supervisor's snapshot. Never infer either from stderr
+            # or an unavailable/missing object: retain the pinned ownership.
+            if (value is None or session_id not in self.owned_sessions
+                    or self.owned_container_ids.get(session_id) != container_id
+                    or value.get("Id") != container_id):
+                return False
+            state = value.get("State")
+            if (type(state) is not dict or type(state.get("Running")) is not bool
+                    or type(state.get("Paused")) is not bool or type(state.get("Pid")) is not int):
+                return False
+            return ((state["Running"] is False and state["Paused"] is False and state["Pid"] == 0)
+                    or (state["Running"] is True and state["Paused"] is True and state["Pid"] > 0))
+
+        if positively_inactive(observed):
+            return
         if self.command(["pause", container_id]).returncode:
+            try:
+                fresh = self._inspect(session_id)
+            except Exception as exc:
+                raise RuntimeBoundaryError("FREEZE_FAILED") from exc
+            if positively_inactive(fresh):
+                return
             raise RuntimeBoundaryError("FREEZE_FAILED")
 
     def terminate_session(self, session_id: str) -> None:
@@ -1026,10 +1050,9 @@ def _run_matched_arm(arm: str, *, image: str, broker_db_path: str | Path, receiv
         bridge.observer_required = True
         bridge.observer = lambda: controller.inspect_session(session_id)
         try:
-            argv = build_docker_argv(plan, docker_binary=docker_binary, container_name=session_id)
+            argv = build_docker_argv(plan, docker_binary=docker_binary, container_name=session_id, entrypoint="python3")
             argv[1:3] = ["create", "--interactive"]
             image_index = argv.index(image)
-            argv[image_index:image_index] = ["--entrypoint", "python3", "--log-driver", "none"]
             for key, value in ownership_labels(record).items():
                 image_index = argv.index(image)
                 argv[image_index:image_index] = ["--label", f"{key}={value}"]
@@ -1186,10 +1209,9 @@ def _run_fixture(fixture: str, *, broker: Any, image: str, timeout_seconds: int,
         registered = True
         report["registered_before_start"] = True
         try:
-            argv = build_docker_argv(plan, docker_binary=docker_binary, container_name=session_id)
+            argv = build_docker_argv(plan, docker_binary=docker_binary, container_name=session_id, entrypoint="python3")
             argv[1:3] = ["create", "--interactive"]  # Retain stopped container for host observation.
             image_index = argv.index(image)
-            argv[image_index:image_index] = ["--entrypoint", "python3", "--log-driver", "none"]
             for key, value in ownership_labels(record).items():
                 image_index = argv.index(image)
                 argv[image_index:image_index] = ["--label", f"{key}={value}"]

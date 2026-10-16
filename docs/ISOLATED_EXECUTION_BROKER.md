@@ -21,6 +21,8 @@ process.execute request
 
 The trusted Docker adapter launches a validated immutable image ID with:
 
+- an explicitly cleared image ENTRYPOINT, so the exact plan argv is executed;
+- `--log-driver none`, preventing workload log retention by the daemon;
 - `--network none`
 - `--read-only`
 - `--cap-drop ALL`
@@ -49,14 +51,34 @@ The runtime operation's `payload_sha256` must equal the digest derived from the 
 ```text
 immutable image ID
 + argv digest
-+ host workspace digest
++ host workspace path-string digest
 + timeout
 + isolation profile digest
 → plan_sha256
 → payload_sha256
 ```
 
-Changing image, arguments, workspace or isolation profile after authorization therefore invalidates the execution request before backend dispatch.
+Changing the image ID, arguments, workspace **path string** or isolation profile
+after authorization invalidates the execution request before backend dispatch.
+The legacy field `host_workspace_sha256` hashes the canonical path string. It
+does **not** hash directory contents, resolve filesystem aliases or bind an
+immutable filesystem snapshot. Files or symlink targets can change without
+changing this digest. This generic profile requires a trusted host writer and a
+stable workspace throughout authorization and execution. A one-time `realpath`
+or tree hash alone would still leave a check/use race; adversarial host writers
+require a separately governed immutable staging/snapshot design.
+
+Container operations also require `scope.images`, a nonempty allow-list of
+immutable image IDs. The requested image list must be a subset of the actual
+grant, and the plan image must occur in the requested list. A payload digest
+cannot supply this authorization. Existing image-less container grants fail
+closed and must be reissued with explicit image scope. Generic noncontainer
+`process.execute` operations keep their existing scope contract.
+
+Fixed G03 worker profiles explicitly select their trusted `python3` ENTRYPOINT;
+their argv consists of interpreter arguments. Their effective ENTRYPOINT and
+daemon log configuration remain independently checked. This profile-specific
+configuration is never a model-controlled plan field.
 
 ## Output boundary
 
@@ -156,6 +178,106 @@ The isolation CI workflow builds a minimal fixture image and checks that the con
 6. only the loopback network interface under `network=none`.
 
 These are observations of runtime configuration, not live outbound-network or filesystem-write attempts.
+
+The separate `docker_behavior_probe.py` campaign exercises actual bounded
+behavior, with an intentionally weakened control for each of six checks:
+inherited ENTRYPOINT, daemon logging, root-filesystem writes, workspace writes,
+TCP to a disposable internal-network listener, and active seccomp filtering.
+The independent verifier checks raw argv, immutable image lineage, container
+inspection, attached output, exit state and cleanup. The `none` logging case
+also requires attached stdout to remain readable. Weakened argv mutations are
+diagnostic controls in this disposable campaign. The production builder exposes
+no model-controlled weakening options; trusted adapter authority remains part
+of the security boundary.
+This does not establish PID/memory exhaustion resistance, the exact seccomp
+policy, arbitrary outbound-network isolation, or kernel exploit resistance.
+
+The direct process-tree adapter rereads the actual tree after pause and rejects
+running nodes or changed lineage. The public containment supervisor retains its
+own independent post-action snapshot and comparison. A successful pause followed
+by an unreadable or changed tree is an incomplete freeze, even though the
+container may already be paused. The adapter attempts verified removal of the
+same immutable container on the pinned daemon and still raises the original
+freeze failure. Failed removal leaves recovery unresolved; that attempt cannot
+produce a containment receipt. No recovery path unpauses the workload.
+
+A nonzero pause result or a transport exception during that attempted action
+uses the same verified-removal recovery. Neither result establishes whether the
+container became paused. If pause is persistently rejected, recovery must not
+depend on a later successful pause before attempting removal. Failure before
+the action, such as an unavailable initial snapshot, still raises without
+assuming that an action was dispatched.
+
+A later retry can attest an already-frozen tree without issuing a duplicate
+pause. After verified removal, a fresh daemon-identity check can reuse the prior
+verified absence of that immutable container to attest all previously observed
+processes as terminated. This terminal path does not repeat container inspection;
+it allows the supervisor to complete its normal freeze/quiesce protocol with
+zero live processes. A missing child in
+one live process-table read is not by itself proof of termination. Cleanup does
+not refund authority, erase the earlier failure, or prove that no effect occurred.
+
+### Causal graph across state, evidence and time
+
+| Space | Bound state | Required link |
+| --- | --- | --- |
+| Intent | Contain one authorized execution session | Session, daemon and immutable container identity |
+| Project | Adapter action and supervisor receipt | Actual observation hashes and unchanged lineage checks |
+| Runtime | Running, paused or absent container | Fresh live observations; terminal history requires verified removal and a current daemon binding |
+| Time | Before action, after action, recovery, retry | Each conclusion uses observations from that transition |
+
+```mermaid
+flowchart TD
+    A["t0: bound running tree"] -->|"pause exact container"| B["t1: pause acknowledged"]
+    A -->|"pause attempted; nonzero or transport error"| E["t2: freeze result unknown"]
+    B -->|"fresh observation matches"| C["t2: frozen tree attested"]
+    C -->|"supervisor verifies and terminates"| D["absence verified"]
+    B -->|"read fails or lineage changes"| E
+    E -->|"remove same pinned container"| F{"absence verified?"}
+    F -->|"no"| G["error; no receipt"]
+    F -->|"yes"| H["original error retained; terminated history"]
+    H -->|"t3: verify same daemon; reuse absence proof"| I["zero-live freeze and quiesce"]
+    I --> D
+```
+
+The graph separates physical state from what the observer can establish. An
+unavailable Docker daemon cannot be interpreted as an absent container; likewise
+a failed log query cannot establish disabled log retention, and a missing network
+endpoint cannot establish membership in the owned control network. These are
+evidence failures at distinct edges, not interchangeable passing checks. A valid
+receipt establishes the bounded observed transition, not future immunity to
+container-runtime or kernel vulnerabilities.
+
+### Host-runtime freeze interleavings
+
+The separate `DockerController` used by the host runtime can observe a running
+container before that same container exits or is paused by another owned
+controller. Its freeze callback accepts an already stopped or paused state only
+when a fresh inspection positively binds the registered ownership and pinned
+immutable ID, with consistent boolean state and PID. A nonzero pause result
+requires another such positive observation; the error text alone proves nothing.
+After a rejected pause, missing, unavailable, replaced, malformed or still-running
+observations retain the failure. Transport exceptions remain conservative failures.
+
+```mermaid
+flowchart TD
+    A["t0: supervisor observes running"] --> B["t1: inspect pinned owned container"]
+    B -->|"positively stopped or paused"| F["supervisor independently rechecks"]
+    B -->|"running"| C["t2: pause same immutable ID"]
+    C -->|"acknowledged"| F
+    C -->|"nonzero"| D{"fresh owned state safely stopped or paused?"}
+    D -->|"yes"| F
+    D -->|"no or unverified"| E["freeze incomplete; failure retained"]
+    F -->|"valid"| G["existing quiescence verifies removal"]
+    F -->|"invalid or unavailable"| E
+    E -->|"cleanup still attempted; failure retained"| G
+```
+
+The callback does not terminate during FREEZE. Existing host-runtime fencing,
+revocation, quiescence and final verification retain their order and checks; a
+failed freeze is not erased by later zero-survivor cleanup. These controlled
+interleavings establish a reachable availability defect, not the exact cause of
+the historical CI failure whose inner error was not retained.
 
 ## Explicit nonclaims
 

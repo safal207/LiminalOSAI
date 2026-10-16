@@ -102,6 +102,7 @@ class PackageInstallBrokerTests(unittest.TestCase):
                 scope={
                     "argument_profile": ARGUMENT_PROFILE,
                     "executables": [INSTALLER_EXECUTABLE],
+                    "images": [(binding or self.binding).installer_image_id],
                     "working_directory": "/workspace",
                 },
                 issued_at_unix=100,
