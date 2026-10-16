@@ -248,6 +248,37 @@ evidence failures at distinct edges, not interchangeable passing checks. A valid
 receipt establishes the bounded observed transition, not future immunity to
 container-runtime or kernel vulnerabilities.
 
+### Host-runtime freeze interleavings
+
+The separate `DockerController` used by the host runtime can observe a running
+container before that same container exits or is paused by another owned
+controller. Its freeze callback accepts an already stopped or paused state only
+when a fresh inspection positively binds the registered ownership and pinned
+immutable ID, with consistent boolean state and PID. A nonzero pause result
+requires another such positive observation; the error text alone proves nothing.
+After a rejected pause, missing, unavailable, replaced, malformed or still-running
+observations retain the failure. Transport exceptions remain conservative failures.
+
+```mermaid
+flowchart TD
+    A["t0: supervisor observes running"] --> B["t1: inspect pinned owned container"]
+    B -->|"positively stopped or paused"| F["supervisor independently rechecks"]
+    B -->|"running"| C["t2: pause same immutable ID"]
+    C -->|"acknowledged"| F
+    C -->|"nonzero"| D{"fresh owned state safely stopped or paused?"}
+    D -->|"yes"| F
+    D -->|"no or unverified"| E["freeze incomplete; failure retained"]
+    F -->|"valid"| G["existing quiescence verifies removal"]
+    F -->|"invalid or unavailable"| E
+    E -->|"cleanup still attempted; failure retained"| G
+```
+
+The callback does not terminate during FREEZE. Existing host-runtime fencing,
+revocation, quiescence and final verification retain their order and checks; a
+failed freeze is not erased by later zero-survivor cleanup. These controlled
+interleavings establish a reachable availability defect, not the exact cause of
+the historical CI failure whose inner error was not retained.
+
 ## Explicit nonclaims
 
 This is concrete container-runtime enforcement for `process.execute`, but it is **not** a VM boundary and does not prove resistance to Docker/container-runtime/kernel vulnerabilities.
