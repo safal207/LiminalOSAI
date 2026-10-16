@@ -7,9 +7,13 @@ prove universal escape resistance, and no receipt auto-advances orientation.
 """
 from __future__ import annotations
 
+import concurrent.futures
+from contextlib import contextmanager
 import copy
 import json
 import sqlite3
+import sys
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -176,6 +180,111 @@ class ExternalAgentOrientationTests(unittest.TestCase):
         self.assertEqual(pending["reservation_id"], result["reservation_id"])
         self.assertIsNone(pending["receipt"])
         self.assertEqual(self.receiver.inventory()["terminals"], [])
+
+    @contextmanager
+    def _execute_with_blocked_orientation_writer(self, target, closure):
+        fixture = ExternalAgentOrientationTests("test_positive_commit_does_not_auto_complete_or_advance_local_trajectory")
+        fixture.setUp()
+        context = fixture.context
+        gateway = fixture.make_gateway(context)
+        entered, held, attempted = (threading.Event() for _ in range(3))
+        active = False
+
+        def trace(frame, event, argument):
+            nonlocal active
+            direct_final_check = (target != "check" or (
+                frame.f_back.f_code.co_name == "_before_endpoint_commit"
+                and frame.f_back.f_code.co_filename.endswith("/external_agent_orientation.py")))
+            if (event == "call" and frame.f_code.co_name == target
+                    and frame.f_code.co_filename.endswith("/external_agent_orientation.py")
+                    and direct_final_check and not entered.is_set()):
+                entered.set()
+                if not held.wait(3):
+                    raise AssertionError("independent sidecar writer was not acquired")
+                active = True
+            if (active and event == "return" and frame.f_code.co_name == "_connect"
+                    and frame.f_code.co_filename.endswith("/brakes_store.py")):
+                argument.set_trace_callback(
+                    lambda sql: attempted.set() if sql == "BEGIN IMMEDIATE" else None)
+            return trace
+
+        def execute():
+            # Observe call entry and SQL only. Protected admission routes retain
+            # their original identity and execute against real SQLite/HTTP.
+            sys.settrace(trace)
+            try:
+                return gateway.execute(fixture.action)
+            finally:
+                sys.settrace(None)
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(execute)
+                try:
+                    self.assertTrue(entered.wait(3), "orientation boundary was not reached")
+                    with sqlite3.connect(context["authority"].db_path, isolation_level=None) as writer:
+                        writer.execute("BEGIN IMMEDIATE")
+                        held.set()
+                        self.assertTrue(attempted.wait(3), "sidecar writer was not attempted")
+                        with self.assertRaises(concurrent.futures.TimeoutError):
+                            future.result(timeout=.05)
+                        if closure == "bridge":
+                            context["bridge"].fence("UNIT_SIDECAR_STORAGE_RACE")
+                        elif closure == "coordinator":
+                            context["coordinator"].close_admission("UNIT_SIDECAR_STORAGE_RACE")
+                        elif closure == "watchdog":
+                            context["coordinator"].health_error = ControlError("UNIT_WATCHDOG_DEAD")
+                        else:
+                            self.assertIsNone(closure)
+                        self.assertEqual(writer.execute(
+                            "SELECT state FROM brakes_sessions WHERE root_id='effect-root'"
+                        ).fetchone()[0], "ACTIVE")
+                        writer.rollback()
+                finally:
+                    # Release the entry rendezvous even if acquiring the writer
+                    # or an assertion fails, so the worker cannot be stranded.
+                    held.set()
+                result = future.result(timeout=5)
+            yield fixture, result, context, gateway
+        finally:
+            fixture.doCleanups()
+
+    def test_gate_rechecked_after_bound_sidecar_writer_before_external_begin(self):
+        for closure in (None, "bridge", "coordinator", "watchdog"):
+            with self.subTest(closure=closure), self._execute_with_blocked_orientation_writer(
+                    "assert_bound", closure) as (fixture, result, context, _):
+                if closure is None:
+                    self.assertEqual(result["status"], "COMMITTED", result)
+                else:
+                    fixture.no_external_begin_or_post(result)
+                    self.assertEqual(context["authority"].status("effect-root")["action_count"], 0)
+
+    def test_gate_rechecked_after_admit_sidecar_writer_before_external_begin(self):
+        for closure in (None, "bridge", "coordinator", "watchdog"):
+            with self.subTest(closure=closure), self._execute_with_blocked_orientation_writer(
+                    "admit", closure) as (fixture, result, context, _):
+                if closure is None:
+                    self.assertEqual(result["status"], "COMMITTED", result)
+                else:
+                    fixture.no_external_begin_or_post(result)
+                status = context["authority"].status("effect-root")
+                self.assertEqual((status["action_count"], status["pending_action_count"],
+                                  status["stage_count"], status["pending_stage_count"]), (1, 1, 1, 1))
+
+    def test_gate_rechecked_after_final_sidecar_writer_blocks_endpoint_post(self):
+        for closure in (None, "bridge", "coordinator", "watchdog"):
+            with self.subTest(closure=closure), self._execute_with_blocked_orientation_writer(
+                    "check", closure) as (fixture, result, context, gateway):
+                if closure is None:
+                    self.assertEqual(result["status"], "COMMITTED", result)
+                else:
+                    fixture.retained_unknown(result)
+                    events = gateway.inventory()["dispatch_boundary"]["events"]
+                    self.assertEqual(events[-1]["result"], "BLOCKED")
+                    self.assertEqual(events[-1]["reservation_id"], result["reservation_id"])
+                status = context["authority"].status("effect-root")
+                self.assertEqual((status["action_count"], status["pending_action_count"],
+                                  status["stage_count"], status["pending_stage_count"]), (1, 1, 1, 1))
 
     def test_required_guard_rejected_before_gateway_database_creation(self):
         for value in (None, object()):
