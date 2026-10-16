@@ -201,6 +201,13 @@ same immutable container on the pinned daemon and still raises the original
 freeze failure. Failed removal leaves recovery unresolved; that attempt cannot
 produce a containment receipt. No recovery path unpauses the workload.
 
+A nonzero pause result or a transport exception during that attempted action
+uses the same verified-removal recovery. Neither result establishes whether the
+container became paused. If pause is persistently rejected, recovery must not
+depend on a later successful pause before attempting removal. Failure before
+the action, such as an unavailable initial snapshot, still raises without
+assuming that an action was dispatched.
+
 A later retry can attest an already-frozen tree without issuing a duplicate
 pause. After verified removal, a fresh daemon-identity check can reuse the prior
 verified absence of that immutable container to attest all previously observed
@@ -222,9 +229,10 @@ not refund authority, erase the earlier failure, or prove that no effect occurre
 ```mermaid
 flowchart TD
     A["t0: bound running tree"] -->|"pause exact container"| B["t1: pause acknowledged"]
+    A -->|"pause attempted; nonzero or transport error"| E["t2: freeze result unknown"]
     B -->|"fresh observation matches"| C["t2: frozen tree attested"]
     C -->|"supervisor verifies and terminates"| D["absence verified"]
-    B -->|"read fails or lineage changes"| E["t2: freeze result unknown"]
+    B -->|"read fails or lineage changes"| E
     E -->|"remove same pinned container"| F{"absence verified?"}
     F -->|"no"| G["error; no receipt"]
     F -->|"yes"| H["original error retained; terminated history"]

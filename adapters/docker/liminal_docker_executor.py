@@ -197,11 +197,11 @@ class DockerProcessTreeBackend:
             process_id: (parent_id, self._identities[process_id])
             for process_id, parent_id in self._parents.items()
         }
-        if any(node["state"] == "running" for node in before["nodes"]):
-            proc = run_cli([self.docker_binary, "pause", self._container_id], timeout=10)
-            if proc.returncode != 0:
-                raise DockerExecutionError("docker pause failed for governed execution session")
         try:
+            if any(node["state"] == "running" for node in before["nodes"]):
+                proc = run_cli([self.docker_binary, "pause", self._container_id], timeout=10)
+                if proc.returncode != 0:
+                    raise DockerExecutionError("docker pause failed for governed execution session")
             self._require_daemon()
             after = self.snapshot(session_id)
             lineage = lambda nodes: {
