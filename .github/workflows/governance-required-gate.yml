@@ -54,6 +54,18 @@ jobs:
           "$PYTHON" scripts/run_python_tests.py \
             tests.test_agent_control_external_agent_receiver_evidence.ReceiverCaptureMutationTests
 
+      - name: Verify final observed orientation capture after full discovery
+        if: hashFiles('sdk/liminal_agent_control/__init__.py') != ''
+        run: |
+          "$PYTHON" scripts/verify_external_agent_orientation_evidence.py \
+            "$LIMINAL_EXTERNAL_AGENT_ORIENTATION_EVIDENCE" \
+            --expected-source-sha "$EXPECTED_SOURCE_SHA" \
+            --expected-image "$LIMINAL_EXTERNAL_AGENT_DOCKER_IMAGE" \
+            > "$RUNNER_TEMP/owned-stack-validation/evidence/orientation-final-verification.json"
+          "$PYTHON" -c 'from scripts.prepare_owned_stack_validation import ORIENTATION_CAPTURE_CLASS_CHECK; exec(ORIENTATION_CAPTURE_CLASS_CHECK)'
+          "$PYTHON" scripts/run_python_tests.py \
+            tests.test_agent_control_external_agent_orientation_evidence.OrientationCaptureEvidenceTests
+
       - name: Declared gate scope
         run: |
           echo "This gate always runs for pull requests targeting main or stacked agent/** branches."
@@ -61,6 +73,7 @@ jobs:
           echo "Owned-stack prerequisites include actual Docker images and receiver capture before discovery."
           echo "Preparation readiness is not a test PASS; this unchanged make validate gate must complete."
           echo "Final receiver capture is independently verified and all nine capture tests rerun after full discovery."
+          echo "The separate observed orientation profile requires real Docker capture and all six capture controls before and after discovery."
           echo "Specialized compiler, sanitizer, Docker and evidence workflows retain their own checks."
           echo "Path-filtered workflows remain gated by their own paths filters and are intentionally not required checks."
 

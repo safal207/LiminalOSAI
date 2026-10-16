@@ -44,7 +44,7 @@
     {
       "id": "session_authority",
       "path": "sdk/liminal_agent_control/brakes_store.py",
-      "sha256": "e64f2929e0b360e7f2783ad28818182c8c6b9824a80dc415c88834fdcb1d994b",
+      "sha256": "a9a76284b0e0788323c6a384dced017eaaa7745969dc5492b2ea3a88666a4754",
       "symbol": "SessionAuthority"
     },
     {

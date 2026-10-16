@@ -47,8 +47,14 @@ guidance не заменяет транзакционную admission-прове
 Отдельный строгий [`OrientationFencedEffectGateway`](G03_ORIENTATION_ADMISSION.md)
 подключает обязательный локальный veto к существующим idea/projection/orientation
 записям до BEGIN и перед POST. Он не заменяет штатный профиль и не повышает его
-Docker evidence либо статусы этого v1-графа. Автоматическая observation feedback
-и rollout нового профиля остаются отдельными переходами.
+Docker evidence либо статусы этого v1-графа. Дополнительный наблюдаемый профиль
+`ObservedOrientationFencedEffectGateway` повторно проверяет signed receiver
+receipt и атомарно связывает его с локальной orientation/center observation.
+Он имеет отдельную четырёхсценарную Docker-пробу и независимый verifier; эти
+результаты относятся к её точному source/image. Rollout штатного профиля и
+универсальная защита от побега остаются неустановленными. Подробные границы
+обратной связи, UNKNOWN и исторического факта после STOP указаны в документе
+строгого профиля.
 
 ### Проект и реальность: обязательные зависимости G03
 

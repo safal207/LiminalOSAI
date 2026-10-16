@@ -60,12 +60,67 @@ dispatch evidence выполняется последняя локальная �
 открытие строгого gateway требует здорового типизированного guard; восстановления
 нового instance без sidecar этот профиль не обещает.
 
-Этот шаг **не** добавляет автоматическую обратную связь signed receipt →
-orientation observation. Локальная transition остаётся pending до отдельного
+Сам admission-only профиль **не** добавляет автоматическую обратную связь
+signed receipt → orientation observation. Локальная transition остаётся pending до отдельного
 достоверного наблюдения через существующие trusted-host API. Нельзя освободить её
 по ответу worker, callback PASS, предполагаемому нулю эффектов или возврату budget.
 Новый независимый переход потребует такого наблюдения либо нового host-owned run;
 молчаливой переинициализации старого состояния нет.
+
+## Отдельный профиль проверенной обратной связи
+
+`ObservedOrientationFencedEffectGateway`, `ObservedOrientationAgentBridge` и
+`ObservedOrientationCoordinator` выбираются отдельно. Gateway требует привязку
+к этому coordinator до admission. Их persisted configuration содержит дополнительный
+`orientation_feedback` contract; admission-only gateway не открывает такую DB
+как совместимую. `ReceiptOrientationObserver` повторно проверяет Ed25519 receipt
+receiver и его точные action, authorization, reservation и endpoint pin.
+Reservation берётся из постоянного gateway grant, а не из заявления worker.
+
+После signed `COMMITTED` одна локальная SQLite-транзакция завершает зарезервированные
+stage/action как `RETURNED` и добавляет `CONFIRMED` observation существующего
+orientation/center контура. Локальное `RETURNED` означает завершение вызова;
+коммерческий результат подтверждает только receiver receipt. Временная отметка
+наблюдения — доверенное локальное время при ingestion, а signed `terminal_at`
+receiver сохраняется как отдельная временная шкала.
+
+```mermaid
+flowchart TD
+    R["Signed receiver receipt"] --> V["Проверка подписи и точной привязки"]
+    D["Постоянный action и consumed reservation"] --> V
+    V --> T["Одна локальная транзакция"]
+    T --> C["Stage и action завершены"]
+    T --> O["Orientation и center observation"]
+    O --> N["Новый host-prepared переход"]
+    H["STOP, expiry или поздний факт"] --> L["История и HOLD"]
+    T --> L
+```
+
+| Наблюдаемый исход | Обратная связь |
+| --- | --- |
+| Точный signed `COMMITTED` | Один `CONFIRMED`, без нового BEGIN/POST |
+| Повтор того же receipt, включая reconciliation | `ALREADY_CONFIRMED`, без новой ревизии или события |
+| Signed `NO_EFFECT` либо `UNKNOWN` без commit proof | Успешная orientation observation не создаётся |
+| Ошибка подписи, action, authorization или reservation | Sidecar не изменяется |
+| Сбой локальной транзакции после remote commit | Локальные изменения откатываются вместе; remote truth сохраняется, feedback помечается `UNAVAILABLE` |
+| Commit proof поступил после STOP/expiry | Исторический `CONFIRMED` с HOLD; authority и progress budget не восстанавливаются |
+
+Обёртка работает и после `execute`, и после query-only `reconcile`. Она может
+принять проверенный commit proof при внешнем aggregate `UNKNOWN`, не переписывая
+этот aggregate. Холодный query-only recovery без привязанного coordinator
+не возобновляет run: новый commit proof записывается исторически с HOLD.
+Ошибка feedback не превращает remote `COMMITTED` в `NO_EFFECT`
+и не запускает повторный POST. Точная повторная observation распознаётся до
+проверки возраста нового ingestion: прежняя история не становится новым фактом.
+Coordinator закрывает observation-путь под тем же коротким локальным lock,
+который упорядочивает receipt ingestion. Затем он выполняет прежние независимые
+STOP/containment действия. Поздняя запись сначала сохраняет локальное закрытие
+в своей observation-транзакции и остаётся историей с HOLD. Недоступный sidecar
+не должен препятствовать попыткам внешнего STOP и owned cleanup. Это локальное
+упорядочивание, а не атомарная транзакция между разными БД или удалёнными системами.
+
+Ни receipt, ни observer не подготавливают следующую идею, ticket или projection
+автоматически; это остаётся обязанностью trusted host.
 
 ## Граница времени и STOP
 
@@ -89,10 +144,21 @@ HTTP-запросы, authority/receiver/sidecar SQLite и явные supervisor/
 Полная прежняя G03-матрица отдельно проверяет 14 контейнеров / 15 каналов /
 8 requests / 6 synthetic effects / 2 signed NO_EFFECT на своём профиле.
 
+Для наблюдаемого профиля отдельно зарегистрирована четырёхсценарная проба:
+`verified_feedback_chain`, `tampered_or_stale_context`, `forged_observation` и
+`stop_after_begin`. Её source-pinned deterministic worker использует настоящий
+Docker с четырьмя контейнерами и теми же 15 объявленными каналами. Host явно
+готовит второй переход после проверки первого receipt; это не доказательство
+самостоятельного выбора observations моделью. Независимый offline verifier
+проверяет сырые Docker/SQL и signed evidence; capture mutation tests повреждают
+настоящий report. CI сохраняет разные preparation/final capture bytes и
+повторяет проверки после полного `make validate`. Проба считается выполненной
+только по артефактам конкретного чистого source/image, не по наличию этого текста.
+
 v1 assurance graph продолжает описывать штатный маршрут. Его
 `g03_orientation: NOT_CONNECTED` не повышается в CONNECTED из-за существования
-отдельного строгого профиля. Default rollout, новая Docker-матрица этого профиля,
-автоматическая независимая observation feedback, kernel escape resistance,
-необъявленные каналы и compromised-host resistance здесь не установлены.
+отдельного строгого профиля. Default rollout, live LLM, kernel escape resistance, необъявленные каналы и
+compromised-host resistance здесь не установлены. Четыре сценария отдельного
+observed профиля не повышают прежние 14 сценариев до универсального доказательства.
 Глобальные `containment_status: NOT_ESTABLISHED`, `readiness: HOLD` и
 `execution_authorized: false` сохраняются.

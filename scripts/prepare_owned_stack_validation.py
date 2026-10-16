@@ -18,6 +18,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 WORKER_REFERENCE = "python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1"
 CAPTURE_CLASS = "tests.test_agent_control_external_agent_receiver_evidence.ReceiverCaptureMutationTests"
+ORIENTATION_CAPTURE_CLASS = "tests.test_agent_control_external_agent_orientation_evidence.OrientationCaptureEvidenceTests"
+ORIENTATION_CAPTURE_TESTS = 6
 MAX_RECEIVER_CAPTURE_BYTES = 24 * 1024 * 1024  # Same raw bound as the independent checker.
 REQUIRED_SOURCES = (
     "experiments/agent_control/observer-requirements.txt",
@@ -26,6 +28,12 @@ REQUIRED_SOURCES = (
     "scripts/verify_external_agent_receiver_evidence.py",
     "tests/test_agent_control_external_agent_receiver_runtime.py",
     "tests/test_agent_control_external_agent_receiver_evidence.py",
+    "sdk/liminal_agent_control/external_agent_orientation_feedback.py",
+    "sdk/liminal_agent_control/external_agent_orientation_demo.py",
+    "experiments/agent_control/preregistration_external_agent_orientation.json",
+    "scripts/verify_external_agent_orientation_evidence.py",
+    "tests/test_agent_control_external_agent_orientation_runtime.py",
+    "tests/test_agent_control_external_agent_orientation_evidence.py",
 )
 CAPTURE_CLASS_CHECK = """
 import os
@@ -38,6 +46,18 @@ suite = unittest.defaultTestLoader.loadTestsFromName(
     'tests.test_agent_control_external_agent_receiver_evidence.ReceiverCaptureMutationTests')
 if suite.countTestCases() != 9:
     raise SystemExit('all nine receiver capture tests must be present before discovery')
+"""
+ORIENTATION_CAPTURE_CLASS_CHECK = """
+import os
+from pathlib import Path
+import unittest
+report = Path(os.environ['LIMINAL_EXTERNAL_AGENT_ORIENTATION_EVIDENCE'])
+if not report.is_file() or report.stat().st_size == 0:
+    raise SystemExit('fresh actual orientation report is required before discovery')
+suite = unittest.defaultTestLoader.loadTestsFromName(
+    'tests.test_agent_control_external_agent_orientation_evidence.OrientationCaptureEvidenceTests')
+if suite.countTestCases() != 6:
+    raise SystemExit('all six orientation capture tests must be present before discovery')
 """
 
 
@@ -141,7 +161,9 @@ def prepare(root: Path, output_directory: Path):
         "LIMINAL_EXTERNAL_AGENT_REQUIRE_DOCKER": "1",
         "LIMINAL_EXTERNAL_COMMAND_REQUIRE_DOCKER": "1",
         "LIMINAL_EXTERNAL_AGENT_RECEIVER_REQUIRE_DOCKER": "1",
+        "LIMINAL_EXTERNAL_AGENT_ORIENTATION_REQUIRE_DOCKER": "1",
         "LIMINAL_EXTERNAL_AGENT_RECEIVER_EVIDENCE": str(evidence / "receiver.json"),
+        "LIMINAL_EXTERNAL_AGENT_ORIENTATION_EVIDENCE": str(evidence / "orientation.json"),
         "LIMINAL_EXTERNAL_AGENT_EVIDENCE": str(evidence / "agent.json"),
         "LIMINAL_EXTERNAL_COMMAND_EVIDENCE": str(evidence / "command.json"),
         "LIMINAL_EXTERNAL_NETWORK_EVIDENCE": str(evidence / "network.json"),
@@ -169,12 +191,36 @@ def prepare(root: Path, output_directory: Path):
     command([python, "-c", CAPTURE_CLASS_CHECK], root=root, env=preparation_env, timeout=60)
     # Run all nine now as well: presence alone cannot certify runnable evidence.
     command([python, root / "scripts/run_python_tests.py", CAPTURE_CLASS], root=root, env=preparation_env, timeout=120)
+    # The observed-orientation profile has its own real Docker experiment and
+    # independent checker. It cannot substitute for the receiver's 14-case matrix.
+    command([python, root / "scripts/run_python_tests.py",
+             "tests/test_agent_control_external_agent_orientation_runtime.py"],
+            root=root, env=child_env, timeout=900)
+    orientation_capture = Path(environment["LIMINAL_EXTERNAL_AGENT_ORIENTATION_EVIDENCE"])
+    if not orientation_capture.is_file() or orientation_capture.stat().st_size == 0:
+        raise ValueError("orientation runtime did not produce its required actual capture")
+    orientation_preparation_capture = evidence / "orientation-preparation.json"
+    orientation_preparation_sha256 = snapshot_receiver_capture(orientation_capture, orientation_preparation_capture)
+    orientation_preparation_env = {
+        **child_env, "LIMINAL_EXTERNAL_AGENT_ORIENTATION_EVIDENCE": str(orientation_preparation_capture)}
+    with (evidence / "orientation-preparation-verification.json").open("x", encoding="utf-8") as stream:
+        command([python, root / "scripts/verify_external_agent_orientation_evidence.py",
+                 orientation_preparation_capture, "--expected-source-sha", revision,
+                 "--expected-image", worker_id, "--expected-report-sha256", orientation_preparation_sha256],
+                root=root, env=orientation_preparation_env, timeout=120, output=stream)
+    command([python, "-c", ORIENTATION_CAPTURE_CLASS_CHECK], root=root,
+            env=orientation_preparation_env, timeout=60)
+    command([python, root / "scripts/run_python_tests.py", ORIENTATION_CAPTURE_CLASS],
+            root=root, env=orientation_preparation_env, timeout=120)
     result = {
         "status": "READY_FOR_VALIDATION", "revision": revision, "daemon_id": daemon_id,
         "worker_reference": WORKER_REFERENCE, "worker_image_id": worker_id,
         "observer_image_id": observer_id, "receiver_capture_tests": 9,
         "receiver_preparation_capture": "evidence/receiver-preparation.json",
         "receiver_preparation_sha256": preparation_sha256,
+        "orientation_capture_tests": ORIENTATION_CAPTURE_TESTS,
+        "orientation_preparation_capture": "evidence/orientation-preparation.json",
+        "orientation_preparation_sha256": orientation_preparation_sha256,
         "python_bin": str(venv / "bin"), "environment": environment,
     }
     (output_directory / "preparation.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")

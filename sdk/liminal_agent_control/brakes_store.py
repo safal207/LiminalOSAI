@@ -378,12 +378,19 @@ class SessionAuthority:
             db.execute("BEGIN IMMEDIATE")
             self.finish_action_in_transaction(db, action_id, outcome=outcome)
 
+    def finish_stage_in_transaction(self, db: Any, action_id: str, stage_id: str, *, outcome: str) -> None:
+        """Finish one stage in the caller's transaction without changing its outcome."""
+        self._require_transaction(db)
+        if outcome not in {"RETURNED", "UNKNOWN"}:
+            raise ControlError("invalid stage outcome")
+        row = db.execute("SELECT status FROM brakes_stages WHERE action_id=? AND stage_id=?", (action_id, stage_id)).fetchone()
+        if row is None or row["status"] not in {"RESERVED", outcome}:
+            raise ControlError("stage outcome cannot be rewritten")
+        db.execute("UPDATE brakes_stages SET status=? WHERE action_id=? AND stage_id=?", (outcome, action_id, stage_id))
+
     def finish_stage(self, action_id: str, stage_id: str, *, outcome: str) -> None:
         if outcome not in {"RETURNED", "UNKNOWN"}:
             raise ControlError("invalid stage outcome")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT status FROM brakes_stages WHERE action_id=? AND stage_id=?", (action_id, stage_id)).fetchone()
-            if row is None or row["status"] not in {"RESERVED", outcome}:
-                raise ControlError("stage outcome cannot be rewritten")
-            db.execute("UPDATE brakes_stages SET status=? WHERE action_id=? AND stage_id=?", (outcome, action_id, stage_id))
+            self.finish_stage_in_transaction(db, action_id, stage_id, outcome=outcome)
